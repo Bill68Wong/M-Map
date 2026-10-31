@@ -279,6 +279,59 @@ function dedupeByFamily(list: string[], geoOf: GeoMap): string[] {
 }
 
 /**
+ * ★ 2026-10-30：**环线跳站**的最小绕行里程（米）。
+ *   低于此值的「绕回同族站」不改写上车站 —— 相邻站台沿路微移不属于绕圈。
+ *   实测（T8 擎天匯 → 關閘廣場）：25/26/50/N3 由 C652 安順大廈 上车，
+ *   需绕 6 站才回到 20m 外的 C653 金峰南岸。
+ */
+const LOOP_MIN_RIDE_M = 300;
+
+/**
+ * ★ 2026-10-30 **环线跳站**：`boardMain` 上车后若先绕一圈、再回到**物理相邻**的同族站
+ *   （≤ `FAMILY_RADIUS_M`），返回该下游同族站主码 —— 在那里上车即可跳过绕圈。
+ *
+ * 判据（同一 `route|dir` 站序）：
+ *   · `board` 之后、`alight` 之前存在下标 `k`；
+ *   · `board → k` 沿站序累计里程 ≥ `LOOP_MIN_RIDE_M`（确为绕圈，非相邻站台微移）；
+ *   · `stops[k]` 与 `board` 的球面距离 ≤ `FAMILY_RADIUS_M`。
+ * 命中多个 ⇒ 取绕行里程最大者。
+ */
+function loopSkipBoardOf(
+  routeIdx: RouteIndex,
+  geoOf: GeoMap,
+  route: string,
+  boardMain: string,
+  alightMain: string,
+): string | null {
+  const pb = geoOf.get(boardMain);
+  if (!pb) return null;
+  let best: { main: string; skipM: number } | null = null;
+  for (const d of routeIdx.dirsOf.get(route) ?? []) {
+    const stops = routeIdx.dirStops.get(`${route}|${d}`);
+    if (!stops) continue;
+    const mains = stops.map(mainCodeOf);
+    const ais = mains.map((m, i) => (m === alightMain ? i : -1)).filter((i) => i >= 0);
+    if (!ais.length) continue;
+    for (let i = 0; i < mains.length; i++) {
+      if (mains[i] !== boardMain) continue;
+      const j = ais.find((x) => x > i); // 本方向上「该上车出现位置」之后仍能到达下车点
+      if (j === undefined) continue;
+      let run = 0;
+      for (let k = i + 1; k < j; k++) {
+        const prev = geoOf.get(mains[k - 1]);
+        const cur = geoOf.get(mains[k]);
+        if (prev && cur) run += haversineM(prev, cur);
+        if (run < LOOP_MIN_RIDE_M || !cur) continue;
+        if (mains[k] === boardMain) continue;
+        if (haversineM(pb, cur) > FAMILY_RADIUS_M) continue;
+        if (!best || run > best.skipM) best = { main: mains[k], skipM: run };
+      }
+    }
+  }
+  return best?.main ?? null;
+}
+
+/**
  * ★ 链键 = 乘车段的**线路序列**（与上/下车站、换乘点无关）。
  *   同一条链的多个「上车站 × 换乘点 × 下车站」组合 = 该链的**变体**，共享一个名额池
  *   （供 `perChainLimit` 链级限额使用）。
@@ -355,8 +408,52 @@ export function searchStationPaths(
   /** ★ 2026-09-21 E：同「首末站 × 线路序列」已保留的变体数（候选限流用） */
   const familyCount = new Map<string, number>();
 
-  const add = (rides: RidePath[], transfers: { at: string; to: string }[]): boolean => {
+  const ride = (route: string, a: string, b: string): RidePath | null => {
+    if (mainCodeOf(a) === mainCodeOf(b)) return null;
+    const seg = segmentsOf(routeIdx, route, a, b);
+    if (!seg || !seg.segs.length) return null;
+    return { route, board: a, alight: b, hops: seg.segs };
+  };
+
+  const add = (rawRides: RidePath[], transfers: { at: string; to: string }[]): boolean => {
     const full = (): boolean => results.length >= o.maxCandidates;
+    let rides = rawRides;
+
+    // ★ 2026-10-30 **环线跳站**：首段若绕 ≥`LOOP_MIN_RIDE_M` 后回到 ≤`FAMILY_RADIUS_M` 内的
+    //   同族站，把上车站改到该下游站（起点步行距离由 `candidatesToSeeds` 按新站重算）。
+    //   实测（T8 擎天匯 → 關閘廣場）：25/26/50/N3 由 C652 安順大廈 上车需绕 6 站才到 C653。
+    //   ⚠️ 只改**首段**：中段改写会让 `transfers`（换乘点）与前后腿对不上。
+    const r0 = rides[0];
+    if (r0) {
+      const skip = loopSkipBoardOf(routeIdx, geoOf, r0.route, mainCodeOf(r0.board), mainCodeOf(r0.alight));
+      if (skip) {
+        const nr = ride(r0.route, skip, r0.alight);
+        if (nr) rides = [nr, ...rides.slice(1)];
+      }
+    }
+
+    // ★ 2026-10-30 **换乘段环线**：中段同样是「上车后绕一圈回到同族站」时——本站的换乘口径
+    //   只支持同一主码（步行 0，`transfer_walks` 也无近距跨站记录）⇒ 直接剔除该候选；
+    //   只有上一段恰好也在跳过的那个站下车（可原地换乘）时才改写上车站。
+    for (let i = 1; i < rides.length; i++) {
+      const r = rides[i];
+      const skip = loopSkipBoardOf(routeIdx, geoOf, r.route, mainCodeOf(r.board), mainCodeOf(r.alight));
+      if (!skip) continue;
+      if (mainCodeOf(rides[i - 1].alight) !== skip) return !full();
+      const nr = ride(r.route, skip, r.alight);
+      if (!nr) return !full();
+      rides[i] = nr;
+      transfers[i - 1] = { at: skip, to: skip };
+    }
+
+    // ★ 2026-10-30 **近邻腿否决**：任一段「上车站 ≈ 下车站（≤ `FAMILY_RADIUS_M`）」的乘车
+    //   无意义（步行更快）⇒ 剔除整条候选（实测绕圈候选多由此产生）。
+    for (const r of rides) {
+      const a = geoOf.get(mainCodeOf(r.board));
+      const b = geoOf.get(mainCodeOf(r.alight));
+      if (a && b && haversineM(a, b) <= FAMILY_RADIUS_M) return !full();
+    }
+
     // ★ 2026-09-21 新增：剔除「同一线路被重复乘坐」的候选。
     //
     //   实测事故（黑沙海滩 → 十月初五马路，22:00）：本地枚举产出
@@ -404,13 +501,6 @@ export function searchStationPaths(
     familyCount.set(famKey, (familyCount.get(famKey) ?? 0) + 1);
     results.push({ rides, transfers });
     return !full();
-  };
-
-  const ride = (route: string, a: string, b: string): RidePath | null => {
-    if (mainCodeOf(a) === mainCodeOf(b)) return null;
-    const seg = segmentsOf(routeIdx, route, a, b);
-    if (!seg || !seg.segs.length) return null;
-    return { route, board: a, alight: b, hops: seg.segs };
   };
 
   // ── 0 换乘 ──

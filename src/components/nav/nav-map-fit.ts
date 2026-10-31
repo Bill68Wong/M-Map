@@ -17,8 +17,12 @@ export const TARGET_METERS_ACROSS = 2500;
 /** ★ S1：缩放收敛区间（minZoom=11：一屏≈27.6km，远小于遮罩外圈±1.6°≈178km ⇒ 永不露边） */
 export const MIN_ZOOM = 11;
 export const MAX_ZOOM = 18;
-/** 域外遮罩不透明度 */
-export const MASK_OPACITY = 0.42;
+/**
+ * 域外遮罩不透明度
+ * ★ 2026-10-31：0.42 → 0.25。本应用只服务澳门，域外只需**压暗**区分主次，
+ *   0.42 时珠海/横琴与澳门对比过强（实测截图：域外近深蓝灰、澳门全亮）⇒ 降到中等暗度。
+ */
+export const MASK_OPACITY = 0.25;
 
 /**
  * 运行时读一个 CSS Token 的 **resolved 具体值**。
