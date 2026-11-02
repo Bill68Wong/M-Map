@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
 
-export const preferredRegion = "sin1";
 
 /**
  * POST /api/timer/[id]/crowd —— 记录「本趟车」的拥挤度（v0.18.0）

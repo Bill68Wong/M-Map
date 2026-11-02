@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
 
-export const preferredRegion = "sin1";
 
 /** POST /api/free/[id]/crowd { level: 0-4 } —— 本次采集的拥挤度（可反复修改） */
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {

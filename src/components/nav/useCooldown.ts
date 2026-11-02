@@ -40,6 +40,16 @@ export interface UseCooldown {
    * 注意：这是"换语境"，不是"绕过防连点"；防连点请勿调它。
    */
   reset: () => void;
+  /**
+   * ★ v3.7.0 S2：**实时**读取剩余秒数（`untilRef` + `Date.now()`，不读 `sec` state）。
+   *
+   * 为什么需要它：`sec` 由 250ms 计时器写 state，而**页面隐藏时计时器被节流/冻结** ⇒
+   * 回到前台的那一刻 `sec` 还停在后台前的旧值（例如 4），据此判断会「以为还在冷却」
+   * 而**静默不刷**（正是 D1「回前台不刷新」的复发路径）。事件回调里读时间戳才准。
+   *
+   * 只能用于"事件到达瞬间"的判断；渲染期请继续用 `sec`（渲染必须纯）。
+   */
+  remainingSec: () => number;
 }
 
 /**
@@ -69,5 +79,10 @@ export function useCooldown(totalSec: number): UseCooldown {
     setSec(0);
   }, []);
 
-  return { sec, cooling: sec > 0, start, reset };
+  const remainingSec = useCallback(
+    () => Math.max(0, Math.ceil((untilRef.current - Date.now()) / 1000)),
+    [],
+  );
+
+  return { sec, cooling: sec > 0, start, reset, remainingSec };
 }

@@ -7,8 +7,9 @@
  * 参数：`from` `to`（place slug：home / school / hengqin / gate）
  *      `zone`（B/C | N/O | R，默认 N/O）· `limit`（默认 5）· `force=1`（绕过缓存）
  *
- * ⚠️ `preferredRegion = "sin1"`：与 Supabase 主库（ap-southeast-1 新加坡）**同区**，
- *    把每次 DB 往返的跨区 RTT 抹掉 —— 这是「2 秒出 5 卡」的关键一环（见计划 §六 #8）。
+ * ⚠️ 函数区域：v3.7.0（ADR C1）起由**项目级** `vercel.json: "regions": ["hkg1"]` 决定
+ *    （原 `preferredRegion = "sin1"` 是 route 段配置，Hobby 下不生效、真身 iad1 ⇒ 已清理）。
+ *    要改区域改 `vercel.json`，**不要**在这里加回 `preferredRegion` —— 那只会误导后来人。
  *
  * 鉴权：v3.6.0 起 middleware **全站公开**（口令门已拆）⇒ 本接口匿名可调，靠 CDN/内存缓存
  *   与上游令牌桶控量，无需凭据。
@@ -23,7 +24,6 @@ import { API_ERROR } from "@/lib/http/errors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 /** 预算 0.5~1.5s；留足余量（Hobby 上限 60s） */
 export const maxDuration = 30;
 

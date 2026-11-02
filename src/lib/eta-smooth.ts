@@ -44,6 +44,18 @@ export function getSmoothMem(): Map<string, SmoothMemEntry> {
 }
 
 /**
+ * ★ v3.7.0：**清空**平滑记忆（换行程时调，避免上一条行程的封顶值压住新行程）。
+ *
+ * 为什么需要：记忆键是 `线路|车牌|等车站`，**不含 OD**。两条不同行程若共用同一
+ * 线路 + 同一辆车 + 同一上车站，后一条会继承前一条的封顶值 ⇒「还有 N 站」偏高且降不下来。
+ * 换 OD 时清一次即可 —— 只是丢掉「只降不升」的兜底，**不改平滑算法本身**，
+ * 同一行程内的收敛速度完全不受影响（第一帧后记忆立即重建）。
+ */
+export function clearSmoothMem(): void {
+  getSmoothMem().clear();
+}
+
+/**
  * 对一帧结果做"同车只降不升"修正（原地改 nearest.stopsAway）。
  * @param mem  跨帧记忆 Map（用 getSmoothMem() 获取的模块级单例）
  * @param results 当前帧各线路结果（与 EtaResponse.results 同构，字段够用即可）

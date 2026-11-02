@@ -1,6 +1,16 @@
+import { readFileSync } from "node:fs";
 import type { NextConfig } from "next";
 
+/** 构建期版本单字符串（唯一来源 = package.json；DSAT UA 同源）。经 env 注入 ⇒ 服务端/客户端同值。 */
+const APP_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version as string;
+
 const nextConfig: NextConfig = {
+  /**
+   * ★ v3.8.0：`NEXT_PUBLIC_APP_VERSION` 供开屏版本门（`src/lib/splash/version.ts`）与
+   *   `body[data-app-version]` 只读钩子使用 —— 架构要求「不存在第二个版本来源」，
+   *   故从 package.json 注入而不是各处手写。
+   */
+  env: { NEXT_PUBLIC_APP_VERSION: APP_VERSION },
   /**
    * ★ 2026-09-24：构建目录可被 `NEXT_DIST_DIR` 覆盖（缺省 = 默认 `.next`，线上零影响）。
    *   动机：本机 `.next` 目录树在构建进程被强杀后出现过 NTFS 级异常状态——

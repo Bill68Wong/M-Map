@@ -21,7 +21,6 @@ import { API_ERROR, errorResponse } from "@/lib/http/errors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 export const maxDuration = 15;
 
 const CACHE_HEADER = { "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=600" };

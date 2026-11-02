@@ -14,11 +14,13 @@
  *     同一个 10 秒窗口；手动刷新在冷却中禁用，自动刷新始终放行（否则换向会看不到车）。
  *   · 信号丢失：车牌命中响应 `badCar` ⇒ `status = "lost"`（与后端 `status` 值正交合并）。
  */
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { errorTextOf } from "@/lib/ui/error-text";
 import { COOLDOWN_VEHICLE_SEC, useCooldown } from "./useCooldown";
 import type { VehicleLite } from "./VehicleMarker";
 import type { RouteLineItem } from "./RouteLinesSheet";
+import { noteVehFail, noteVehFrame, retainVehTicker } from "./observe-hooks";
+import { useResumeRefresh } from "./useResumeRefresh";
 
 /** 当前正在查看的线路（`dir` 由站姿 shape 回报后补齐） */
 export type PickedLine = RouteLineItem & { dir?: string };
@@ -84,7 +86,9 @@ export function useRouteVehicles(): UseRouteVehicles {
    *   原实现自带一个 `setInterval` 逐秒递减的 `setCooldownSec`（10s），
    *   与 `useRideTracking` 各持一套 ⇒ 两处口径必然漂移，故整体删除换成本 hook。
    */
-  const { sec: cooldownSec, start: startCooldown, reset: resetCooldown } = useCooldown(COOLDOWN_VEHICLE_SEC);
+  const { sec: cooldownSec, start: startCooldown, reset: resetCooldown, remainingSec } = useCooldown(
+    COOLDOWN_VEHICLE_SEC,
+  );
 
   /** 请求序号：忽略过期响应（快速换向时旧响应可能后到） */
   const seqRef = useRef(0);
@@ -115,6 +119,7 @@ export function useRouteVehicles(): UseRouteVehicles {
         setError(errorTextOf(j.error));
         setVehicles([]);
         setFetchedAt(null);
+        noteVehFail(); // ★ v3.7.0 S2：观测钩子 `data-veh=failed`
         return;
       }
       const bad = new Set(j.badCar ?? []);
@@ -145,11 +150,13 @@ export function useRouteVehicles(): UseRouteVehicles {
       setVehicles(list);
       setFetchedAt(j.fetchedAt ?? new Date().toISOString());
       setError("");
+      noteVehFrame(j.fetchedAt ?? null); // ★ v3.7.0 S2：`data-veh=fresh`；同一帧不重置年龄
     } catch {
       if (seq !== seqRef.current) return;
       setError("车辆位置获取失败");
       setVehicles([]);
       setFetchedAt(null);
+      noteVehFail();
     } finally {
       if (seq === seqRef.current) setFetching(false);
     }
@@ -210,6 +217,33 @@ export function useRouteVehicles(): UseRouteVehicles {
     void fetchVehicles(picked.code, dir, picked.kind);
     startCooldown();
   }, [picked, dirs, cooldownSec, fetchVehicles, startCooldown]);
+
+  /**
+   * ★ v3.7.0 S2（D1 / D6）：**回前台 / 网络恢复 ⇒ 立刻补一次**（线路查看模式）。
+   *
+   * ⚠️ 两条硬纪律：
+   *   1. **必须受既有 5s 冷却约束**（不得成为绕过防连点的后门）；
+   *   2. 冷却判断读 `remainingSec()`（时间戳口径）而**不是** `cooldownSec` state ——
+   *      页面隐藏期间 250ms 计时器被节流，state 还停在后台前的旧值（例如 4），
+   *      据此判断会「以为还在冷却」而静默不刷 —— 那正是 D1 的复发路径。
+   */
+  const resumeRefresh = useCallback(() => {
+    const cur = pickedRef.current;
+    if (!cur || cur.kind !== "bus") return;
+    const dir = cur.dir ?? dirs[0];
+    if (!dir) return;
+    if (remainingSec() > 0) return;
+    void fetchVehicles(cur.code, dir, cur.kind);
+    startCooldown();
+  }, [dirs, fetchVehicles, startCooldown, remainingSec]);
+  useResumeRefresh(resumeRefresh, !!picked);
+
+  /** ★ v3.7.0 S2：`data-veh-age` 心跳（与导航态共用单例，引用计数） */
+  const hasPicked = picked !== null;
+  useEffect(() => {
+    if (!hasPicked) return;
+    return retainVehTicker();
+  }, [hasPicked]);
 
   const selectVehicle = useCallback((vehicle: VehicleLite, count: number) => {
     setSelected({ vehicle, count });

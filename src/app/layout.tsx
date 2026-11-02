@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
+import BrandSplash from "@/components/brand/BrandSplash";
 import "./globals.css";
 
 /** 与 README 线上地址一致；`metadataBase` 只用于把相对 OG 图 URL 解析成绝对地址 */
@@ -82,6 +83,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="zh-CN">
       <body>
         {children}
+        {/* ★ v3.8.0 开屏覆盖层：挂根布局 ⇒ 任何整页加载（冷启动/刷新/深链/分享链接）都播一次；
+            客户端路由因 layout 不重挂 ⇒ 结构性不播，无需任何已播标记。 */}
+        <BrandSplash />
         <Analytics />
         <SpeedInsights />
       </body>

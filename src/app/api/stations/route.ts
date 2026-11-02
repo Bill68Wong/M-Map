@@ -38,7 +38,6 @@ import { API_ERROR } from "@/lib/http/errors";
 /** 就近部署：Supabase 新加坡池化器 → sin1；pg 需要 Node 运行时；请求期动态执行 */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 export const maxDuration = 15;
 
 interface StationPoint {

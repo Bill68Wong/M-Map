@@ -637,7 +637,9 @@ export interface RideLegView {
    *
    * 触发（`model.ts`）：**轻轨首段**且 `tier ∈ {1,2}`（正常档赶不上、提速档可赶上）且**有该班真实时刻**。
    * 文案：`走快一点可赶上 ${clock} 那班`（**禁「一定」**；无真实时刻不产出 ⇒ `undefined`）。
-   * 渲染：`RecommendCard` 以 `<TierBadge>` 呈现（`rc-tier--1/2`）；**只在方案卡**（不进导航站条）。
+   * 渲染：`RecommendCard` 以 `<TierBadge>` 呈现；**只在方案卡**（不进导航站条）。
+   * ★ v3.7.0 S4：本字段是**全站唯一还会渲染**的赶车胶囊内容（v3.7.0 起 `TierBadge`
+   *   只认 `catchHint`，速度档文案 `tierText` 与档位色阶全部隐藏）。
    */
   catchHint?: string;
 }

@@ -29,7 +29,7 @@ import {
   type RouteShapeLite,
 } from "@/lib/nav/route-overview";
 import type { RecommendCard } from "@/lib/recommend/types";
-import { useDetailBody, type DetailBody } from "./useDetailBody";
+import { useDetailBody, type DetailBody, type FoldState } from "./useDetailBody";
 
 export interface OverviewBox {
   minLng: number;
@@ -47,6 +47,13 @@ export interface UseRouteOverview {
   /** 取景外包框（彩段 + 起终点）；无几何时为 null */
   box: OverviewBox | null;
   reload: () => void;
+  /**
+   * ★ v3.7.0（C5）：折叠栏按需查询的透传（`useDetailBody` 的同一份）。
+   *   宿主（`RouteSheet` / `NavShell`）必须把它一直传到 `StationReachFold`，
+   *   否则首包 `foldLive={}` 会被渲染成「暂无到站信息」（把"没查"说成"没有班次"）。
+   */
+  loadFold: () => void;
+  foldState: FoldState;
 }
 
 /**
@@ -85,13 +92,14 @@ export function useRouteOverview(
     const routes = routeKey ? routeKey.split("|") : [];
 
     void (async () => {
-      // (b) 各 route 的 shapes（并行；force-cache）
+      // (b) 各 route 的 shapes（并行）
+      // ★ v3.7.0（P2 · 去强缓存）：不再传 `cache: "force-cache"` —— 服务端已下发
+      //   `s-maxage` + 浏览器可见 `max-age`，浏览器会按 HTTP 语义自己缓存；
+      //   再叠 `force-cache` 就是两层缓存互相遮蔽（2026-09-21 事故同形）。
       const entries = await Promise.all(
         routes.map(async (code): Promise<[string, RouteShapeLite[]]> => {
           try {
-            const r = await fetch(`/api/route-shapes?code=${encodeURIComponent(code)}`, {
-              cache: "force-cache",
-            });
+            const r = await fetch(`/api/route-shapes?code=${encodeURIComponent(code)}`);
             const j = (await r.json()) as {
               shapes?: { dir?: string; polyline: string; startStop?: string | null; endStop?: string | null }[];
             };
@@ -133,5 +141,8 @@ export function useRouteOverview(
     legs,
     box,
     reload: detail.reload,
+    /** ★ v3.7.0（C5）：折叠栏按需查询透传 */
+    loadFold: detail.loadFold,
+    foldState: detail.foldState,
   };
 }

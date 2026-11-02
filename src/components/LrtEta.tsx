@@ -21,9 +21,7 @@
  */
 import RouteStack from "./RouteStack";
 import Icon from "./ui/Icon";
-import { TierBadge } from "./RoutePieces";
 import { pickCatchTier } from "@/lib/recommend/catch-up";
-import { TIER_TEXT, type CatchTier } from "@/lib/recommend/types";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 /** 秒级读秒线路：石排湾线/横琴线（班次稀疏，倒计时需精确到秒）；
@@ -442,9 +440,10 @@ export function LrtEtaInline({
    */
   mainMs?: number;
   /**
-   * ★ 2026-09-27（用户需求 2）：邻班「怎样走才能赶上」的档位上下文——
-   *   有值时每班附 `TierBadge`（档位 = `pickCatchTier(walkMin, 该班剩余秒, walkDistM)`；
-   *   全档不可及 → 「赶不上」）。`walkMin` = 到上车站的步行分钟（卡级 `walkOut.minutes`）。
+   * ★ 2026-09-27（用户需求 2）：邻班「能不能赶上」的判据上下文。
+   *   v3.7.0 S4：只用来判「赶不上」（`pickCatchTier` 全档不可及），
+   *   **不再渲染速度档文案/档位色阶**（全站隐藏，见 `RoutePieces.TierBadge`）。
+   *   `walkMin` = 到上车站的步行分钟（卡级 `walkOut.minutes`）。
    */
   tierCtx?: { walkMin: number; walkDistM?: number | null };
 }) {
@@ -526,13 +525,13 @@ export function LrtEtaInline({
             `${Math.floor(remainSec / 60)} 分钟`
           )}
         </span>
-        {tierCtx &&
-          !gone &&
-          (tier ? (
-            <TierBadge tier={tier} tierText={TIER_TEXT[tier as CatchTier]} />
-          ) : (
-            <span className="rc-neighbor__miss">赶不上</span>
-          ))}
+        {/*
+          ★ v3.7.0 S4：速度档文案全站隐藏（「全力冲刺/小跑/正常走…能赶上」整块不渲染，
+          `TierBadge` 也不再接受档位 ⇒ 不可能残留档位色阶）。
+          ⚠️ 「赶不上」**保留**：它绑的是该班**真实开出时刻** + 步行所需时间，
+          属于「时间提示」，不是速度档文案。判据：`tier === null` = 连冲刺都赶不上。
+        */}
+        {tierCtx && !gone && !tier && <span className="rc-neighbor__miss">赶不上</span>}
       </span>
     );
   };

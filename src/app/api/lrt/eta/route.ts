@@ -9,7 +9,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
 import { queryLrtDepartures } from "@/lib/lrt/next-departures";
 
-export const preferredRegion = "sin1";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {

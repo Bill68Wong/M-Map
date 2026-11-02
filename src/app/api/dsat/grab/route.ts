@@ -7,7 +7,6 @@ import { API_ERROR, errorResponse } from "@/lib/http/errors";
 import { hasInternalToken } from "@/lib/security/internal-token";
 
 /** 就近部署：Supabase 新加坡池化器 → sin1 */
-export const preferredRegion = "sin1";
 
 /**
  * POST /api/dsat/grab { sessionId, station?, route?, stage?, atStation? }

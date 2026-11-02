@@ -43,7 +43,7 @@ export default function RouteDetailSheet({
   degraded = false,
   onClose,
 }: RouteDetailSheetProps) {
-  const { phase, body, reload } = useDetailBody(card, true);
+  const { phase, body, reload, foldState, loadFold } = useDetailBody(card, true);
 
   return (
     <div className="detail-sheet" role="dialog" aria-modal="true" aria-label={`路线详情 ${odLabel}`}>
@@ -66,6 +66,9 @@ export default function RouteDetailSheet({
           phase={phase}
           body={body}
           reload={reload}
+          /* ★ v3.7.0（C5）：折叠栏展开才查实时报站（与主页链同一套三态判据） */
+          foldState={foldState}
+          onLoadFold={loadFold}
         />
       </div>
 

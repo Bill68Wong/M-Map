@@ -339,7 +339,17 @@ export default function NavShell({
    *   `maximumAge: 0` ⇒ 只用新鲜坐标（避免陈旧点导致蓝点/读数跳变）。
    */
   const gpsIntervalMs = ridePhase === "riding" ? 1_500 : navActive ? 3_000 : 10_000;
-  const userFixR = useUserFix({ enabled: true, intervalMs: gpsIntervalMs, maximumAge: 0 });
+  /**
+   * ★ v3.7.0 S2（#11 / S2「候车期粗定位」）：`coarse` **只在候车期**开 ——
+   *   候车时允许复用 30s 内的系统缓存坐标（出点快、省电）；**乘车期必须 `false`**
+   *   （riding 要新鲜高精度坐标，否则蓝点/报站读数会跳）。浏览态维持既有 `maximumAge: 0`。
+   */
+  const userFixR = useUserFix({
+    enabled: true,
+    intervalMs: gpsIntervalMs,
+    maximumAge: 0,
+    coarse: navActive && ridePhase !== "riding",
+  });
 
   /**
    * ★ T8（P0）：把 `useUserFix` 的坐标镜像进 `fixPos`，让它成为「当前位置」的备用来源。
@@ -385,6 +395,11 @@ export default function NavShell({
     walkActive,
     userFix: userFixR.fix,
     onRequestGps: userFixR.start,
+    /**
+     * ★ v3.7.0 S2（AC2.3）：定位轴状态只用于**候车暂停时的文案分档**
+     *   （拒权 → 去设置 / 无信号 → 走两步 / 超时 → 再等），不参与任何判定。
+     */
+    geo: userFixR.geo,
   });
 
   /** 阶段镜像（GPS 节流用；避免 userFix↔ride 循环依赖） */
@@ -1009,9 +1024,10 @@ export default function NavShell({
     return {
       label: leg.kind === "lrt" ? `轻轨 ${leg.route.replace(/^LRT-/, "")}` : `${leg.route} 路`,
       color: colors[leg.route],
-      fetchedAt: ride.lastUpdateTs > 0 ? new Date(ride.lastUpdateTs).toISOString() : null,
+      // ★ v3.7.0 S2（D5）：车辆卡上的「数据时间」只能取**车辆帧**时刻
+      fetchedAt: ride.lastVehicleTs > 0 ? new Date(ride.lastVehicleTs).toISOString() : null,
     };
-  }, [detailActive, detailCard, ride.legIndex, ride.lastUpdateTs, colors]);
+  }, [detailActive, detailCard, ride.legIndex, ride.lastVehicleTs, colors]);
 
   return (
     <section className="nav-shell nav-shell--full">
@@ -1288,6 +1304,9 @@ export default function NavShell({
                 /* ★ v3.6.0 S4：观测钩子改用唯一车辆来源（`ov.vehicles` 已删除） */
                 vehicles: ride.mapVehicles.length,
                 reload: ov.reload,
+                /** ★ v3.7.0（C5）：折叠栏「本站台其他线路」展开才查实时报站（首包省 ~3s） */
+                foldState: ov.foldState,
+                onLoadFold: ov.loadFold,
                 /**
                  * ★ 2026-09-24：导航追踪态 + 可切换方案上下文。
                  * ★ T1：**步行段活跃时传 `null`** ——

@@ -46,7 +46,6 @@ import { withTimeout, numOrNull, mainCode, stripCodePrefix } from "@/lib/nav/dsa
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 export const maxDuration = 15;
 
 /** 整体超时兜底（毫秒）：两个 DSAT 调用各自另有超时，这里再兜一层，到点按「无数据」返回 */

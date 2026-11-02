@@ -8,7 +8,6 @@
  *    server component 与 client component 都能直接 import。
  */
 import Icon from "@/components/ui/Icon";
-import type { CatchTier } from "@/lib/recommend/types";
 
 /** 澳门时刻 HH:MM（与服务端 hhmm 同口径：+8h 后取当日余秒） */
 export function macauClock(ms: number): string {
@@ -17,22 +16,18 @@ export function macauClock(ms: number): string {
 }
 
 /**
- * 赶车分档徽章：5 档配色。
- * ★ v1.0.6：**不再有「本班赶不上，等下一班」这一档** —— 首段赶不上的路线已被整条剔除
- *   （见 `model.ts#modelOption`）。这里只可能在 5 档之间取值，兜底返回 null。
+ * ★ v3.3.0（AC-107）→ ★ v3.7.0 S4 收紧：取本段「赶车提示」文案。
  *
- * ★ v1.1.8：签名由「收整个 card」改为「收 tier/tierText」——
- *   详情页的「后续班车」也要画徽章，收 card 无法复用。
- */
-/**
- * ★ v3.3.0（AC-107）：取本段「赶车提示」文案 —— `RideLegView.catchHint`（带时刻变体）**优先**，
- * 回落既有 `tierText`。合并式：同一 `TierBadge` 胶囊同时承载档位色与「可赶上 HH:MM」。
+ * 旧版是「`catchHint` 优先、回落 `tierText`」的**合并式**；v3.7.0 起速度档文案全站隐藏
+ * （见 `TierBadge`），回落分支已无渲染出口 ⇒ 这里**只返回 `catchHint`**：
+ *   · `text` 为空 = 本段没有真实到站时刻 ⇒ 调用方不渲染任何胶囊（AC4.2 不臆造时刻）；
+ *   · `isHint` 保留（调用方 JSX 与测试钩子仍按它判断）。
  */
 export function catchHintOf(leg: { tierText?: string; catchHint?: string }): {
   text: string;
   isHint: boolean;
 } {
-  return { text: leg.catchHint ?? leg.tierText ?? "", isHint: !!leg.catchHint };
+  return { text: leg.catchHint ?? "", isHint: !!leg.catchHint };
 }
 
 /**
@@ -62,23 +57,27 @@ export function dirTextOf(name?: string | null): string | null {
   return name.endsWith("方向") ? name : `${name}方向`;
 }
 
-export function TierBadge({
-  tier,
-  tierText,
-  catchHint = false,
-}: {
-  tier: CatchTier | null;
-  tierText: string;
-  /**
-   * ★ v3.3.0（AC-107）：本胶囊承载**赶车提示**（「走快一点可赶上 HH:MM 那班」）。
-   *   合并式 —— 文案由后端放进 `catchHint`/`tierText`，本组件只加观测钩子 `data-catch-hint="on"`。
-   *   ⚠️ 纯展示文本（不是独立 `role`，随卡片 DOM 天然可读）。
-   */
-  catchHint?: boolean;
-}) {
-  if (tier === null || !tierText) return null;
+/**
+ * 赶车提示胶囊（★ v3.7.0 S4 收敛为**只显示真实时刻**）
+ *
+ * ── 为什么删掉 `tier` ──────────────────────────────────────────────────
+ *   负责人按**内容**定的口径：「保留一切时间，隐藏的是『全力冲刺有机会赶上 / 小跑能赶上 /
+ *   正常走能赶上』这类文案标签」。⇒ 本组件只剩一种可渲染内容：`catchHint`
+ *   （带真实时刻的「走快一点可赶上 HH:MM 那班」）。
+ *
+ *   · 判据必须是 `catchHint`（是否赶车提示），**不是** `tier !== null` ——
+ *     否则会把「可赶上 HH:MM」一起隐藏掉（AC4.1 / AC4.2）；
+ *   · **档位色阶一并去掉**：`rc-tier--{tier}` 若留着，等于把被删掉的信息挪进颜色通道，
+ *     色觉障碍用户反而失去兜底（AC4.4）。故 `tier` 参数**整体移除**，
+ *     让任何调用方都无法再传档位、也无法再拿到档位颜色。
+ *   · 保留 `.rc-tier` 基础样式（中性底色胶囊）：它是「时刻提示」的容器，不是档位编码。
+ *
+ * 观测钩子：渲染出来即 `data-catch-hint="on"`（测试用它定位胶囊后断言文案里无速度档词）。
+ */
+export function TierBadge({ tierText, catchHint = false }: { tierText: string; catchHint?: boolean }) {
+  if (!catchHint || !tierText) return null;
   return (
-    <span className={`rc-tier rc-tier--${tier}`} data-catch-hint={catchHint ? "on" : undefined}>
+    <span className="rc-tier" data-catch-hint="on">
       {tierText}
     </span>
   );

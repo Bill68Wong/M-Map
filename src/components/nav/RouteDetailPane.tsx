@@ -18,7 +18,7 @@ import NavDetailBody from "./NavDetailBody";
 import { snapshotOfCard, routeSegsOfCard } from "@/lib/favorites/snapshot";
 import type { FavoriteEndpoint } from "@/lib/favorites/types";
 import type { RecommendCard } from "@/lib/recommend/types";
-import type { DetailBody } from "./useDetailBody";
+import type { DetailBody, FoldState } from "./useDetailBody";
 import type { RideTrackView } from "./useRideTracking";
 
 export interface RouteDetailPaneProps {
@@ -35,6 +35,13 @@ export interface RouteDetailPaneProps {
   phase: "loading" | "ready" | "failed";
   body: DetailBody | null;
   reload: () => void;
+  /**
+   * ★ v3.7.0（C5）：折叠栏「本站台其他线路」的实时报站改为**展开时才查**。
+   *   `foldState` 是唯一渲染判据（`idle/loading` 不得说「暂无到站信息」）；
+   *   `onLoadFold` 由折叠栏首次展开时调用（幂等）。
+   */
+  foldState?: FoldState;
+  onLoadFold?: () => void;
   /** ★ 2026-09-24：导航追踪态（主页链注入；收藏薄壳不传 = 静态详情） */
   track?: RideTrackView | null;
   /** ★ 2026-09-24：目的地坐标（GCJ-02；可切换方案查询用） */
@@ -63,6 +70,8 @@ export default function RouteDetailPane({
   phase,
   body,
   reload,
+  foldState,
+  onLoadFold,
   track = null,
   destCoord = null,
   onSwitchCard,
@@ -110,6 +119,9 @@ export default function RouteDetailPane({
           strips={body.strips}
           otherRoutes={body.otherRoutes}
           foldLive={body.foldLive}
+          /** ★ v3.7.0（C5）：三态判据 + 按需取数入口（原样透传给折叠栏） */
+          foldState={foldState}
+          onLoadFold={onLoadFold}
           stationLabel={body.stationLabel}
           colors={colors}
           destLabel={destLabel}

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
 
-export const preferredRegion = "sin1";
 
 /** GET /api/free/[id] —— 会话详情 + 逐站事件（结束页汇总用） */
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {

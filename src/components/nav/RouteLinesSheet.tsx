@@ -37,7 +37,13 @@ export default function RouteLinesSheet({ onPick, onClose }: RouteLinesSheetProp
 
   useEffect(() => {
     let alive = true;
-    fetch("/api/route-lines", { cache: "force-cache" })
+    /**
+     * ★ v3.7.0（P2 · 去强缓存）：不再传 `cache: "force-cache"`。
+     *   服务端已给 `/api/route-lines` 下发 `s-maxage` + 浏览器可见 `max-age` ⇒ 浏览器自己缓存；
+     *   再叠 `force-cache` 会造成「两层缓存各管一段」，发版后拿不到新线路清单（同 09-21 事故）。
+     *   URL 里既有的 `?v=` 保留（结构变更时的强制失效手段），但不新增手写版本号。
+     */
+    fetch("/api/route-lines")
       .then((r) => r.json())
       .then((j: { lines?: RouteLineItem[]; error?: string }) => {
         if (!alive) return;

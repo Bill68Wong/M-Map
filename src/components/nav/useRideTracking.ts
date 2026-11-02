@@ -46,6 +46,12 @@ import type { RecommendCard, SegmentStrip } from "@/lib/recommend/types";
 import { COOLDOWN_VEHICLE_SEC, useCooldown } from "./useCooldown";
 import type { VehicleLite } from "./VehicleMarker";
 import type { UserFix } from "./useUserFix";
+import { noteVehFail, noteVehFrame, retainVehTicker } from "./observe-hooks";
+import { useResumeRefresh } from "./useResumeRefresh";
+import { createVehicleMatcher, usableMedium } from "./vehicle-match-run";
+import { MATCH_VEHICLE_ENABLED } from "@/lib/nav/match-vehicle";
+import type { GeoState } from "./observe-hooks";
+import { noteOfPausedGeo } from "./geo-note";
 
 /** 轮询间隔（毫秒）——与官网地图 15s 刷新同量级 */
 const POLL_MS = 12_000;
@@ -82,7 +88,27 @@ const NOTE_FETCH_FAIL = "车辆数据获取失败，稍后自动重试";
  *   为什么不能继续写「正在检测车辆」：GPS 拒权/长时间无帧时系统已不再判定，
  *   界面若仍说"正在检测"，用户会以为"车还没来"，实际是"我不看了"。
  */
-const NOTE_GPS_UNAVAILABLE = "定位不可用 · 自动上车判断已暂停，上车后请点「手动标记上车」";
+/**
+ * ★ v3.7.0 S2（AC2.3）：定位文案全部抽到 `geo-note.ts`（纯函数、可单测、过文案门禁）。
+ *   `NOTE_GPS_UNAVAILABLE` 的「ok 兜底」分支也已在那里，本文件只调 `noteOfPausedGeo(geo)`。
+ */
+
+/**
+ * ★ v3.7.0 S3：本轮车牌是怎么来的（观测钩子 `.nav-actions[data-board-match]` 的取值源）。
+ *   `none`      = 还没锁上（或已退回等车态）；
+ *   `auto`      = 系统自动锁定（**含**高置信与中置信两种，后者另由 `data-match-pending="1"` 区分）；
+ *   `confirmed` = **用户确认**过某辆车 —— 当前**没有**这个界面，故该值不会出现；
+ *   `corrected` = 用户点「不是这辆」后重锁；
+ *   `manual`    = 用户手动标记上车 / 手动选车。
+ *
+ * ⚠️ 中置信**不得**占用 `confirmed`（team-lead 裁决）：`confirmed` 若同时代表
+ *   「系统不确定（需纠错）」与「用户已确认（无需纠错）」，两件**语义相反**的事共用一个值，
+ *   验收与排障都再分不开。故中置信 = `auto` + 独立属性 `data-match-pending="1"`。
+ *   将来落地 Q5 轻确认时，`confirmed` 才被真正使用，两者永不打架。
+ */
+export type BoardMatch = "none" | "auto" | "confirmed" | "corrected" | "manual";
+/** ★ v3.7.0 S3：匹配来源（常态；与 `BoardMatch` 事件语义正交，故必须是两个独立属性） */
+export type MatchSource = "gps" | "gps+vehicle" | "vehicle" | "manual";
 
 export type RidePhase = "off" | "boarding" | "riding" | "done";
 
@@ -145,10 +171,43 @@ export interface RideTrackView {
   autoNote: string;
   /** 进度来源（车辆 / GPS 驱动）——供来源标注与站条 */
   progressSource: "vehicle" | "gps";
+  /**
+   * ★ v3.7.0 S3（`data-board-match`）：车牌是怎么锁上的（**事件语义**，跃迁时可断言）。
+   *   中置信也是 `auto`，另由 `matchPending`（`data-match-pending`）区分 —— 见 `BoardMatch` 注释。
+   */
+  boardMatch: BoardMatch;
+  /**
+   * ★ v3.7.0 S3（`data-match-source`）：匹配来源（**常态语义**）。
+   *   与 `boardMatch` 是两个独立属性 —— 测试要求在「`none→auto` 跃迁瞬间」读本值，
+   *   此刻必须是 `gps`/`gps+vehicle`；跃迁之后读到 `vehicle` 属正常后置状态。
+   */
+  matchSource: MatchSource;
+  /**
+   * ★ v3.7.0 S3（`data-match-pending`）：**中置信**（证据不足、只标注不据此报站）。
+   *   与 `boardMatch="auto"` 配对使用；`confirmed` 留给将来的「用户确认」，不重载。
+   */
+  matchPending: boolean;
+  /**
+   * ★ v3.7.0 S3：中置信匹配出的车牌 —— 只展示（「车牌待确认」）。
+   *   语义红线：此时 `plate` 仍为 `null` ⇒ `progressSource` 是 `gps`，报站读数**不**由它推出。
+   */
+  pendingPlate: string | null;
   /** 安全网检出 */
   anomaly: "none" | "not_boarded" | "alighted";
-  /** 上次数据帧时刻（ms）——新鲜度用 */
-  lastUpdateTs: number;
+  /**
+   * ★ v3.7.0 S2（D5 修复）：上次**车辆数据**帧时刻（ms）—— 新鲜度只认这一个。
+   *
+   * 旧字段 `lastUpdateTs` 被「车辆帧」与「GPS 帧」**双双写入**（`fetchFrame` 与 GPS effect），
+   * 而读取方（`RouteSheet` 的「上次更新：N 秒前」）把它当车辆新鲜度用 ⇒ 车辆接口连续失败
+   * 但 GPS 正常时，界面永远显示 0~3 秒（车辆坐标其实已 3 分钟没更新）。
+   * 现在拆成两个字段并**删除旧名**（让 tsc 强制暴露所有读取点）：
+   *   · `lastVehicleTs` —— **只有** `fetchFrame` 成功时写（`0` = 本次会话还没拿到过车辆帧）；
+   *   · `lastFixTs`     —— **只有**用户定位帧采纳时写。
+   * ⚠️ 任何「数据多久没更新」的 UI 只能读 `lastVehicleTs`。
+   */
+  lastVehicleTs: number;
+  /** ★ v3.7.0 S2：上次**用户定位**帧时刻（ms）——「定位多久没动」只能读这个 */
+  lastFixTs: number;
   /** ★ 本批：地图蓝点（riding 用投影点；非 riding = null ⇒ 宿主回落原始 GPS） */
   youDot: RideYouDot | null;
   /** ★ 本批：纵条段内插值用户点 */
@@ -193,6 +252,23 @@ export interface UseRideTrackingOpts {
   userFix?: UserFix | null;
   /** ★ 新增：在用户手势内申请 GPS（useUserFix.start；开始导航 / 手动上车时调用） */
   onRequestGps?: () => void;
+  /**
+   * ★ v3.7.0 S2（AC2.3）：定位轴状态（`useUserFix` 的 `geo`）。
+   *
+   * 只用一处：候车态「判定已暂停」时**按它选文案** —— 拒权/无信号/超时三种情况
+   * 用户要做的动作完全不同（去设置 / 走两步 / 再等），一句「定位不可用」说不清。
+   * ⚠️ 它**不参与**任何判定逻辑（上车判定仍只看 `fixes`），只是文案分档的依据。
+   */
+  geo?: GeoState;
+  /**
+   * ★ v3.7.0 S3：**车辆匹配开关的调用侧覆盖**（缺省 = `MATCH_VEHICLE_ENABLED`，现为 `false`）。
+   *
+   * 为什么要有这个口子：总开关是**编译期常量**，真机灰度要验证「匹配是否真的锁对车」时
+   * 不该改动库里的常量（那会让线上与测试环境的差异无从追溯）。这里留一个可传参的入口，
+   * 灰度期由宿主（`NavShell`）传 `true`、验证完删掉那一行即可 —— 行为改动**在 diff 里可见**。
+   * ⚠️ 关闭时（缺省）本引擎**一次都不判、也不多发请求**，行为与改前完全一致。
+   */
+  matchEnabled?: boolean;
 }
 
 function hintOf(v: TrackVehicle): string {
@@ -245,7 +321,24 @@ function setTraveledAttr(
 }
 
 export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
-  const { card, legs, anchors, strips, active, walkActive = false, userFix = null, onRequestGps } = opts;
+  const {
+    card,
+    legs,
+    anchors,
+    strips,
+    active,
+    walkActive = false,
+    userFix = null,
+    onRequestGps,
+    geo,
+    matchEnabled = MATCH_VEHICLE_ENABLED,
+  } = opts;
+  /**
+   * 匹配开关的**最新值镜像**：`fetchFrame` / 轮询 effect 都是长跑闭包，
+   * 把开关塞进依赖会重建定时器（与 `walkActive` 同一类问题）⇒ 用 ref 保证「立刻生效且不抖动」。
+   */
+  const matchOnRef = useRef(matchEnabled);
+  matchOnRef.current = matchEnabled;
   /**
    * ★ 一条导航流（T1）：步行活跃的**最新值镜像**。
    *   自动上车的两个触发源（12s 轮询 effect / GPS 帧 effect）都是长跑定时器，
@@ -275,7 +368,27 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   const [autoNote, setAutoNote] = useState("");
   const [progressSource, setProgressSource] = useState<"vehicle" | "gps">("vehicle");
   const [anomaly, setAnomaly] = useState<Anomaly>("none");
-  const [lastUpdateTs, setLastUpdateTs] = useState(0);
+  /**
+   * ★ v3.7.0 S2：**两个独立的新鲜度时间戳**（D5）——
+   *   `lastVehicleTs` 只有车辆帧写入、`lastFixTs` 只有定位帧写入。禁止合并回一个。
+   */
+  const [lastVehicleTs, setLastVehicleTs] = useState(0);
+  const [lastFixTs, setLastFixTs] = useState(0);
+  /**
+   * ★ v3.7.0 S3：匹配态（`data-board-match` / `data-match-source` / 「车牌待确认」）。
+   *   三者在 `switchToRiding` / `repick` / `onNotBoard` / 匹配命中处同步写入。
+   */
+  const [boardMatch, setBoardMatch] = useState<BoardMatch>("none");
+  const [matchSource, setMatchSource] = useState<MatchSource>("gps");
+  /** ★ 中置信：`boardMatch="auto"` + 本标记（不占用 `confirmed`，见 `BoardMatch` 注释） */
+  const [matchPending, setMatchPending] = useState(false);
+  const [pendingPlate, setPendingPlate] = useState<string | null>(null);
+  /**
+   * ★ v3.7.0 S3：车辆匹配器的跨帧状态（用户里程环 / 车牌→里程环 / 排除名单）。
+   *   `useRef` + 惰性创建 ⇒ 不参与渲染，纯 12s 一次的计算。
+   */
+  const matcherRef = useRef<ReturnType<typeof createVehicleMatcher> | null>(null);
+  if (matcherRef.current === null) matcherRef.current = createVehicleMatcher();
   /** ★ 本批：车辆帧序号（`mapVehicles` 随 12s 帧重算，AC-46） */
   const [listTick, setListTick] = useState(0);
   /** ★ 本批：站点里程阶梯版本（ladder 就绪后触发 `youAt` 重算） */
@@ -468,7 +581,14 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     setAutoNote("");
     setProgressSource("vehicle");
     setAnomaly("none");
-    setLastUpdateTs(0);
+    setLastVehicleTs(0);
+    setLastFixTs(0);
+    // ★ v3.7.0 S3：匹配态与匹配器历史一起清（排除名单只对本段有效）
+    setBoardMatch("none");
+    setMatchSource("gps");
+    setMatchPending(false);
+    setPendingPlate(null);
+    matcherRef.current?.reset();
     vehicleRef.current = null;
     missRef.current = 0;
     alarmRef.current = "none";
@@ -585,7 +705,7 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
           `/api/route-vehicles?code=${encodeURIComponent(leg.route)}&dir=${encodeURIComponent(dir)}&kind=bus&progress=1`,
           { cache: "no-store" },
         );
-        const j = (await r.json()) as { vehicles?: VehicleLite[]; company?: string | null };
+        const j = (await r.json()) as { vehicles?: VehicleLite[]; company?: string | null; fetchedAt?: string };
         const lites = j.vehicles ?? [];
         listLiteRef.current = lites; // ★ T6：UI 用（含站名 / 末班）
         const list: TrackVehicle[] = lites.map((v) => ({
@@ -599,11 +719,90 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         }));
         listRef.current = list;
         lastCompanyRef.current = j.company ?? null; // ★ 本批：帧顶层运营商（mapVehicles 涂装色）
-        setLastUpdateTs(Date.now());
+        // ★ v3.7.0 S2：车辆帧时间戳（**唯一**写入点）+ 观测钩子 `data-veh` / `data-veh-age`
+        //   `fetchedAt` 只作「帧标识」判断数据有没有真的更新（不做跨时钟减法，见 observe-hooks）
+        setLastVehicleTs(Date.now());
+        noteVehFrame(j.fetchedAt ?? null);
         setListTick((t) => t + 1); // ★ 本批：触发 mapVehicles 重算（AC-46）
 
         const boardMain = stopsBoard(strips, legIndex) || mainOf(anchors?.[legIndex]?.board?.code ?? "");
         if (!lockPlate) {
+          /**
+           * ══════════════════════════════════════════════════════════════════
+           * ★ v3.7.0 S3（ADR C10）：**上车后才开始导航**的车辆匹配
+           * ══════════════════════════════════════════════════════════════════
+           * 为什么只能在这里接管：`riding` 且没有车牌时，既有链路只能走 GPS 推算
+           * （`progressSource="gps"`）—— 地图上找不到自己坐的车、也报不了站。
+           * 根因是**候选池口径**（`rankBoardingVehicles` 只取上车站附近），
+           * 所以这里换成 `matchVehicle` 的池子（本线路本方向**全部在途车**）。
+           *
+           * 三条纪律：
+           *   · **只在车辆帧到达时算**（12s 一次）；GPS 帧只喂历史样本，不跑算法；
+           *   · **本分支不碰判定层** —— `if (!lockPlate)` 之下的候车「锚定 + 过站过滤」仍在
+           *     `phase === "boarding"` 时原样执行（本分支只拦 `riding`）。
+           *     前端对 `boarding-detect.ts` / `track.ts` 的改动 = **0 行**。
+           *     ℹ️ `progress.ts` 本轮**被后端改过**（三源版本令牌 + TTL 分级：几何/里程 120s、
+           *     跳时长 600s；对外行为不变）。它的意义：服务端 `p` 与客户端 `leg.colored`
+           *     现在**必然同版本几何**（改道后令牌变、缓存键跟着变）⇒ 里程轴两边能对齐。
+           *     这也是 `vehicleMileOf` 必须同传 `colored` 的另一半理由。
+           *   · 开关 `MATCH_VEHICLE_ENABLED` 默认 false ⇒ 关闭时本段**直接 return**，
+           *     行为与改前完全一致（不多发请求、不多算一次）。
+           */
+          if (phase === "riding") {
+            if (!matchOnRef.current) return;
+            const latestFix = fixesRef.current[fixesRef.current.length - 1] ?? null;
+            const distNow = lrtStateRef.current;
+            const res = matcherRef.current!.run({
+              colored: leg.colored,
+              ladder: ladderRef.current,
+              stopMains,
+              vehicles: list,
+              // GPS 里程不可信（连续丢帧）⇒ 不当作锚，让算法自己的硬门否决
+              dUser: distNow.dist > 0 && distNow.badStreak < 2 ? distNow.dist : null,
+              nowMs: Date.now(),
+              userAccuracyM: latestFix?.accuracy ?? null,
+            });
+            /** 供「不是这辆」翻候选：用本帧排名，别再依赖候车阶段留下的旧名单 */
+            if (res.ranking.length) {
+              const byPlate = new Map(list.map((x) => [x.plate, x]));
+              setCandidates(
+                res.ranking
+                  .filter((r) => byPlate.has(r.plate))
+                  .map((r) => ({ plate: r.plate, hint: hintOf(byPlate.get(r.plate)!) })),
+              );
+            }
+            if (res.confidence === "high" && res.plate) {
+              // 高置信：锁牌 + 进度改由车辆驱动（报站读数这才有依据）
+              vehicleRef.current = list.find((x) => x.plate === res.plate) ?? null;
+              missRef.current = 0;
+              setPlate(res.plate);
+              setPendingPlate(null);
+              setMatchPending(false);
+              setProgressSource("vehicle");
+              setBoardMatch("auto");
+              // 跃迁瞬间读到的来源必须是「定位+车辆」：匹配的证据本身就是用户自身位移
+              setMatchSource("gps+vehicle");
+              setNote("");
+              setAutoNote(`已对上车辆 · ${res.plate}`);
+            } else if (usableMedium(res)) {
+              /**
+               * 中置信：**只标注，不锁牌**（`plate` 保持 null）。
+               *
+               * ① 为什么不能设 `plate`：`plate` 一旦有值，轮询 effect 会走 `fetchFrame(plate)`
+               *    ⇒ `progressOf` 从车牌推出报站值 ⇒ 违反契约「medium 不得据以报站」。
+               *    所以用独立的 `pendingPlate` 只做**展示**，进度与报站继续走 GPS。
+               * ② 为什么 `boardMatch` 是 `auto` 而不是 `confirmed`（team-lead 裁决）：
+               *    `confirmed` 留给「用户确认」。若中置信占用它，同一个值会同时代表
+               *    「系统不确定（可能需要纠错）」与「人已确认（无需纠错）」两件**相反**的事，
+               *    将来做 Q5 轻确认时再也分不开 ⇒ 用独立 `matchPending`（`data-match-pending`）区分。
+               */
+              setPendingPlate(res.plate);
+              setMatchPending(true);
+              setBoardMatch("auto");
+              setMatchSource("gps+vehicle");
+            }
+            return;
+          }
           /**
            * ★ 候车『锚定 + 过站过滤』（纯逻辑在 `lib/nav/track.ts`，此处只接线）：
            *   ① 首帧没有锚 ⇒ 先锚定（取排序第一名），作为几何判据基准；
@@ -660,6 +859,13 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         // ★ 本批（07 §c.4 裁定）：**视觉层（已驶过灰线 + 蓝点）一律用 GPS 切割**
         //   —— 车辆帧**不再**更新 `traveled`（逻辑层进度仍以车辆为权威）。
       } catch {
+        /**
+         * ★ v3.7.0 S2：**失败不清空** `listRef` / `listLiteRef`（D3/D7）——
+         *   断网时保留上一帧车辆，UI 才有东西可显示（并靠
+         *   `body[data-veh=failed|stale]` + `data-veh-age` 标注陈旧）。
+         *   ⚠️ 此处**不得**写 `setLastVehicleTs` —— 失败不是新帧。
+         */
+        noteVehFail();
         setNote(NOTE_FETCH_FAIL);
       } finally {
         setTraveling(false);
@@ -677,6 +883,16 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       setPhase("riding");
       setPlate(nextPlate);
       setProgressSource(source);
+      /**
+       * ★ v3.7.0 S3：自动上车（R1/R2/轻轨）成功 = `auto`；来源按有无车牌投影
+       *   —— 有牌 ⇒ `vehicle`（车辆信号参与且已锁定），无牌 ⇒ `gps`（纯定位推算）。
+       *   ⚠️ 这一条**不是**匹配算法的分支（那是 `plate === null` 时的独立路径），
+       *      两者互斥：能自动上车就不会走到匹配，反之匹配锁上后也不会再判上车。
+       */
+      setBoardMatch("auto");
+      setMatchSource(nextPlate ? "vehicle" : "gps");
+      setMatchPending(false); // 自动上车（R1/R2/轻轨）不是"中置信"，无待确认语义
+      setPendingPlate(null);
       setAutoSwitched(true);
       setNote(source === "gps" ? "" : "");
       setAutoNote(
@@ -737,6 +953,23 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     }
   }, [phase, active, legs, legIndex, strips, anchors, boardPos, switchToRiding]);
 
+  /**
+   * ★ v3.7.0 S2（D1）：**恢复补刷**的唯一挂载点。
+   *
+   * 两个轮询 effect（候车 / 乘车）各自把自己的「立刻打一帧并重置 12s 计时」函数登进
+   * `resumeKickRef`；本 hook 在 `visibilitychange→visible` / `online` / `pageshow(persisted)`
+   * 时调它一次（内部 2s 去抖，防「回前台三事件连发」造成请求风暴，AC2.5）。
+   *
+   * ⚠️ 这里**只增加"何时触发"的入口**，不改 `phase` 状态机与 `tryAuto` 的调用时机语义。
+   */
+  const resumeKickRef = useRef<(() => void) | null>(null);
+  useResumeRefresh(
+    useCallback(() => {
+      resumeKickRef.current?.();
+    }, []),
+    active && (phase === "boarding" || phase === "riding"),
+  );
+
   /* 候车态：拉候选（★ 本批：**12s 持续轮询**，非只拉一帧 —— 上车灵敏度，AC-56）；
      并在车辆帧到位时尝试自动切换。purpose 复用 `live_pos`（服务端只记账、不参与熔断）。 */
   useEffect(() => {
@@ -749,17 +982,53 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
      *   走进站台后 `walkActive` 变 false ⇒ 本 effect 重跑 ⇒ 立刻拉一帧 + 恢复轮询。
      */
     if (walkActive) return;
-    void (async () => {
-      await fetchFrame(null);
-      tryAuto();
-    })();
-    const t = window.setInterval(() => {
-      void (async () => {
+    let cancelled = false;
+    let timer: number | null = null;
+    /**
+     * ★ v3.7.0 S2：**同一时刻只允许一帧在飞**。
+     *   否则「定时器刚打出去 + 用户此刻回前台」会在几毫秒内连打两次
+     *   （AC2.5 要求同源 2s 窗口内 ≤1 次）。
+     */
+    let inFlight = false;
+    /** 一轮 = 拉帧 + 尝试自动上车（保持既有的串行顺序） */
+    const round = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
         await fetchFrame(null);
-        tryAuto();
-      })();
-    }, POLL_MS);
-    return () => window.clearInterval(t);
+      } finally {
+        inFlight = false;
+      }
+      if (cancelled) return;
+      tryAuto();
+    };
+    /**
+     * ★ v3.7.0 S2：轮询改用 **setTimeout 链**而不是 `setInterval` ——
+     *   恢复补刷时必须能"取消待触发的那一次 + 从此刻重新计 12s"，
+     *   `setInterval` 做不到（会出现「刚补刷完 1 秒又自动打一次」）。
+     */
+    const schedule = (ms: number) => {
+      if (timer != null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        void round().then(() => {
+          if (!cancelled) schedule(POLL_MS);
+        });
+      }, ms);
+    };
+    const kick = () => {
+      if (cancelled) return;
+      void round().then(() => {
+        if (!cancelled) schedule(POLL_MS); // 补刷后重置 12s
+      });
+    };
+    schedule(0);
+    resumeKickRef.current = kick;
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+      if (resumeKickRef.current === kick) resumeKickRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, active, legIndex, walkActive]);
 
@@ -769,13 +1038,112 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     tryAuto();
   }, [userFix, phase, tryAuto]);
 
-  /* 轮询（riding 且有车牌） */
+  /* 轮询（riding 且有车牌）—— ★ v3.7.0 S2：同样接恢复补刷 */
   useEffect(() => {
     if (phase !== "riding" || !plate || !active) return;
-    void fetchFrame(plate);
-    const t = window.setInterval(() => void fetchFrame(plate), POLL_MS);
-    return () => window.clearInterval(t);
+    let cancelled = false;
+    let timer: number | null = null;
+    /** ★ v3.7.0 S2：同一时刻只允许一帧在飞（防「定时器 + 回前台补刷」双打，AC2.5） */
+    let inFlight = false;
+    const pull = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await fetchFrame(plate);
+      } finally {
+        inFlight = false;
+      }
+    };
+    const schedule = (ms: number) => {
+      if (timer != null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        if (cancelled) return;
+        void pull().then(() => {
+          if (!cancelled) schedule(POLL_MS);
+        });
+      }, ms);
+    };
+    const kick = () => {
+      if (cancelled) return;
+      void pull().then(() => {
+        if (!cancelled) schedule(POLL_MS);
+      });
+    };
+    schedule(0);
+    resumeKickRef.current = kick;
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+      if (resumeKickRef.current === kick) resumeKickRef.current = null;
+    };
   }, [phase, plate, active, fetchFrame]);
+
+  /**
+   * ★ v3.7.0 S3：**riding 但没有车牌时的轮询**（原实现此路径完全没有请求）。
+   *
+   * 没有它，匹配算法就是「有算法没数据」：`riding && !plate` 时既有的轮询 effect
+   * 因 `!plate` 直接 return ⇒ 车辆帧永不更新 ⇒ `vehicleHistory` 永远只有 0~1 帧 ⇒
+   * `frames` 到不了高置信门槛 ⇒ 永远锁不上（这正是架构评审说的「入口在、没接上」）。
+   *
+   * · 走 `fetchFrame(null)`：拿**该线路该方向全部在途车**（匹配的候选池口径），
+   *   而不是上车站附近那几辆；`phase === "riding"` 分支里直接跑算法并 return，
+   *   不会再进入候车的锚定/过站过滤逻辑；
+   * · 只在开关打开时才轮询 —— 关闭时不多发一次请求（`MATCH_VEHICLE_ENABLED` 现为 false）；
+   * · 同样接回前台/网络恢复补刷，也同样做「同一时刻只允许一帧在飞」。
+   */
+  useEffect(() => {
+    if (!matchOnRef.current || phase !== "riding" || plate || !active) return;
+    let cancelled = false;
+    let timer: number | null = null;
+    let inFlight = false;
+    const pull = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await fetchFrame(null);
+      } finally {
+        inFlight = false;
+      }
+    };
+    const schedule = (ms: number) => {
+      if (timer != null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        if (cancelled) return;
+        void pull().then(() => {
+          if (!cancelled) schedule(POLL_MS);
+        });
+      }, ms);
+    };
+    const kick = () => {
+      if (cancelled) return;
+      void pull().then(() => {
+        if (!cancelled) schedule(POLL_MS);
+      });
+    };
+    schedule(POLL_MS); // 不抢首发：切到 riding 时刚拿到过一帧（候车轮询的最后一帧）
+    resumeKickRef.current = kick;
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+      if (resumeKickRef.current === kick) resumeKickRef.current = null;
+    };
+  }, [phase, plate, active, fetchFrame]);
+
+  /**
+   * ★ v3.7.0 S2：`data-veh` / `data-veh-age` 的心跳（单例、引用计数）。
+   *   年龄必须每秒递增，否则「车辆数据已 5 分钟没更新」在钩子上永远看不出变化（AC2.4）。
+   *
+   *   ⚠️ 依赖只放 `active`（**不放 `phase`**）：boarding→riding 会让 phase 变，
+   *   若挂在 phase 上就会「释放一次 + 重新持有」，导致属性被移除后要等下一帧
+   *   （≤12s）才恢复 —— 上车瞬间 `data-veh` 消失会被测试判成「数据丢失」。
+   *   导航态整体结束（`active=false`）才释放并清场。
+   */
+  useEffect(() => {
+    if (!active) return;
+    return retainVehTicker();
+  }, [active]);
 
   /* GPS 驱动推进（无车牌 / 轻轨）：用 userFix 推站序进度；★ 视觉层（已驶过灰线）**一律 GPS 切割** */
   useEffect(() => {
@@ -809,6 +1177,14 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         if (res.progress.kind !== "lost") setProg(res.progress);
         if (res.frozen && res.badStreak >= 2) setNote(NOTE_LRT_WEAK);
         else if (!res.frozen && note === NOTE_LRT_WEAK) setNote("");
+        /**
+         * ★ v3.7.0 S3：把这一帧的用户沿线里程喂给匹配器（**只喂历史，不跑算法**）。
+         *   `matchVehicle` 要「用户里程-时间」序列做逐帧比对与 S4，单点撑不住；
+         *   算法本身 12s 一次、在车辆帧里跑（见 `fetchFrame` 的 riding 分支）。
+         */
+        if (matchOnRef.current) {
+          matcherRef.current!.noteUser(userFix.ts, res.distNow > 0 ? res.distNow : null);
+        }
       } else {
         void ensureLadder();
       }
@@ -854,7 +1230,9 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         );
       }
     }
-    setLastUpdateTs(Date.now());
+    // ★ v3.7.0 S2（D5）：这里是 **GPS 帧** effect ⇒ 只能写定位时间戳。
+    //   旧版在此写 `lastUpdateTs`（车辆新鲜度）⇒ 车辆接口失败时界面仍显示「刚刚更新」。
+    setLastFixTs(Date.now());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userFix, phase, active, progressSource, plate, legs, legIndex]);
 
@@ -1045,6 +1423,11 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         setPhase("riding");
         setPlate(ranked[0].plate);
         setProgressSource("vehicle");
+        /* ★ v3.7.0 S3：用户显式标记上车 ⇒ `manual`（与自动判定的 `auto` 可区分） */
+        setBoardMatch("manual");
+        setMatchSource("manual");
+        setMatchPending(false);
+        setPendingPlate(null);
         ridingStartIdxRef.current = -1;
         setListTick((t) => t + 1);
         ladderRef.current = null;
@@ -1060,6 +1443,11 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   const repick = useCallback((p: string) => {
     setPlate(p);
     setProgressSource("vehicle");
+    /* ★ v3.7.0 S3：纠错后重锁 ⇒ `corrected`（测试据此断言「不是这辆」真的生效） */
+    setBoardMatch("corrected");
+    setMatchSource("vehicle");
+    setMatchPending(false);
+    setPendingPlate(null);
     missRef.current = 0;
     setNote("");
     setProg(null);
@@ -1222,6 +1610,11 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   /** 安全网纠错：「我没上车」→ 回等车（保留方案） */  const onNotBoard = useCallback(() => {
     setPhase("boarding");
     setPlate(null);
+    /* ★ v3.7.0 S3：「我没上车」⇒ 匹配态归零（回等车态重新开始，历史与排除名单保留在本段内） */
+    setBoardMatch("none");
+    setMatchSource("gps");
+    setMatchPending(false);
+    setPendingPlate(null);
     setProg(null);
     clearTraveled();
     setAlarm("none");
@@ -1246,6 +1639,12 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
 
   /** 「不是这辆」→ 换候选第 1（无候选 → 回等车） */
   const onNotThisBus = useCallback(() => {
+    /**
+     * ★ v3.7.0 S3：把当前车牌登记为「已排除」——匹配算法的不变量要求排除名单
+     *   **不得复用**（同一段里被否掉的车不能再被选回来）。放在这里而不是 `repick` 里，
+     *   因为 `repick` 也服务「手动选车」，那种情况不是否定。
+     */
+    if (plate) matcherRef.current?.exclude(plate);
     const cand = candidates.find((c) => c.plate !== plate) ?? null;
     if (cand) repick(cand.plate);
     else onNotBoard();
@@ -1303,14 +1702,21 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
      * ★ v3.6.0（AC-25a）：paused 时**强制覆盖**提示文案 —— 不能把"未判定"渲染成"正在检测"。
      *   放在返回值里派生（而非塞进 `note` state）：候车轮询会不断改写 `note`，
      *   写进 state 会被 `NOTE_NO_VEHICLES` / `NOTE_FETCH_FAIL` 覆盖掉。
+     * ★ v3.7.0 S2（AC2.3）：再按**定位轴状态**分档 —— 拒权/无信号/超时三种情况用户要做的事
+     *   完全不同（去设置 / 走两步 / 再等），一句「定位不可用」说不清。见 `noteOfPausedGeo`。
      */
-    note: phase === "boarding" && boardPaused ? NOTE_GPS_UNAVAILABLE : note,
+    note: phase === "boarding" && boardPaused ? noteOfPausedGeo(geo) : note,
     candidates,
     autoSwitched,
     autoNote,
     progressSource,
+    boardMatch,
+    matchSource,
+    matchPending,
+    pendingPlate,
     anomaly,
-    lastUpdateTs,
+    lastVehicleTs,
+    lastFixTs,
     youDot,
     youAt,
     mapVehicles,

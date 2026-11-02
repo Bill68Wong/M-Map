@@ -1,6 +1,6 @@
 {
   "name": "must-dengxiao",
-  "version": "3.6.1",
+  "version": "3.8.0",
   "private": true,
   "description": "M Map · 澳门巴士 / 轻轨全澳导航：全屏地图、路线收藏与实时报站（数据来源：澳门交通事务局 DSAT）",
   "scripts": {

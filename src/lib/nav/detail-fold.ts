@@ -86,12 +86,20 @@ export async function foldLiveAt(
  * ★ 2026-09-24 重构（用户口径）：站台 = **第一程「上车站」**（原为末程下车站——「都搞错了」）。
  *   目的：用户在站台等车/没赶上本班时，可就地看**同一站台**还有哪些线路可换乘到目的地。
  * `card` 只用到 `rides[].route/board/boardLabel`（结构兼容 `RecommendCard`）。
+ *
+ * ★ v3.7.0（C5）：`opts.live = false` ⇒ **不查 DSAT**（`foldLive` 恒 `{}`），
+ *   仅返回线路清单与站台名。**缺省 `true`** = 行为与改动前一字不差（不传 opts 的调用方零影响）。
+ *   为什么要有这个开关：1.6KB 的折叠栏数据实测要 **3.1s**（`BUCKET_TIMEOUT_MS`），
+ *   而折叠栏默认**折叠**、用户看不见 ⇒ 拿 3.1s 换一个不展示的内容，且它挡在
+ *   `route-shapes` 前面把「开始导航」链拉到 3.8s（见 01-技术调研 §2.1）。
+ *   当前唯一调用方 `POST /api/nav/detail-body` 显式传 `{ live: card 需要时 }`。
  */
 export async function foldDataOfCard(
   pool: Pool,
   st: RecStatic,
   card: { rides: { route: string; board: string; boardLabel?: string }[] },
   nowMs: number,
+  opts?: { live?: boolean },
 ): Promise<{
   otherRoutes: string[];
   foldLive: Record<string, string>;
@@ -100,7 +108,10 @@ export async function foldDataOfCard(
   const firstRide = card.rides[0];
   const firstBoardMain = firstRide ? mainCodeOf(firstRide.board) : null;
   const otherRoutes = firstBoardMain ? otherRoutesAt(st, firstBoardMain, card.rides.map((r) => r.route)) : [];
-  const foldLive = firstBoardMain ? await foldLiveAt(pool, st, firstBoardMain, otherRoutes, nowMs) : {};
+  // ⚠️ 缺省 `live !== false` ⇒ 不传 opts 的调用方行为**一字不变**（页面 SSR 仍走实时）
+  const wantLive = opts?.live !== false;
+  const foldLive =
+    firstBoardMain && wantLive ? await foldLiveAt(pool, st, firstBoardMain, otherRoutes, nowMs) : {};
   return {
     otherRoutes,
     foldLive,

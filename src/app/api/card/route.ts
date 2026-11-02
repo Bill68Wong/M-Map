@@ -8,8 +8,8 @@
  *     · 每段载具的**逐站站序 + 逐跳预测时长**（供纵向站条）
  *   一趟拿齐 = 详情页不依赖前一页、不冻结数据、可分享可刷新。
  *
- * ⚠️ 与 `/api/recommend` 同规格：nodejs / force-dynamic / preferredRegion=sin1。
- *    实测线上函数真身在 iad1（美东）、主库在新加坡 → 指定 sin1 抹掉跨区 RTT。
+ * ⚠️ 与 `/api/recommend` 同规格：nodejs / force-dynamic。函数区域由项目级
+ *    `vercel.json: "regions": ["hkg1"]`（v3.7.0 · ADR C1）决定，勿在 route 里写 `preferredRegion`。
  */
 import { NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
@@ -19,7 +19,6 @@ import { API_ERROR } from "@/lib/http/errors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 export const maxDuration = 30;
 
 export async function GET(req: Request) {

@@ -3,21 +3,17 @@
 /**
  * 吸底操作条（src/components/nav/NavTrackBar.tsx，2026-09-25 · v2.14 · 06 §2.1 / AC-16/23/24）
  *
- * ── 结构（吸底，含安全区）────────────────────────────────────────────
- *   状态行：`● 状态 · 车牌/线路` + **来源标签**（AC-23）+ 右侧「即将到达 / 新鲜度」
- *   （★ 本批 AC-33：**去掉重复的「下一站」** —— 下一站唯一来源 = 纵条 `.navstrip__badge`）；
- *   按钮行：主按钮（我已下车）+ 文字纠错（不是这辆 / 还没到）+ 图标刷新。
+ * 结构：状态行 = `● 状态 · 车牌/线路` + **来源标签**（AC-23）+ 右侧「即将到达 / 新鲜度」
+ * （★ 本批 AC-33：**去掉重复的「下一站」** —— 下一站唯一来源 = 纵条 `.navstrip__badge`）；
+ * 按钮行 = 主按钮（我已下车）+ 文字纠错（不是这辆 / 还没到）+ 图标刷新。
  *
- * ── 挂载位置（★ 本批）────────────────────────────────────────────────
- *   由 `RouteSheet` 渲染在 **`.route-sheet__actions-slot`**（面板根，`transform` 同上下文，AC-58）；
- *   本组件只负责内容，不再自持 `position: sticky` 定位。
+ * 挂载：由 `RouteSheet` 渲染在 **`.route-sheet__actions-slot`**（面板根、`transform` 同上下文，
+ * AC-58）；本组件只负责内容，不自持 `position: sticky`。
  *
- * ── 常驻纠错入口（07 §1.5）────────────────────────────────────────────
- *   安全网检出 `anomaly` 时**不静默**：状态行右侧给中性提示 + 对应纠错按钮高亮。
- *   手动通道始终可用（`手动标记上车` 弱样式，等车态）。
+ * 常驻纠错（07 §1.5）：安全网检出 `anomaly` 时**不静默** —— 状态行右侧中性提示 + 对应按钮高亮；
+ * 手动通道始终可用（等车态「手动标记上车」弱样式）。
  *
- * ── 纪律 ──────────────────────────────────────────────────────────────
- *   全 Token 上色；单行 nowrap；决策点 ≤4；来源/新鲜度不占主按钮位。
+ * 纪律：全 Token 上色；单行 nowrap；决策点 ≤4；来源/新鲜度不占主按钮位。
  */
 import type { ReactNode } from "react";
 import Icon from "@/components/ui/Icon";
@@ -39,19 +35,17 @@ export interface NavTrackBarProps {
   lrt: boolean;
   traveling: boolean;
   /**
-   * ★ v3.6.0 S4：车辆刷新冷却剩余秒数（0 = 可刷新）。
-   *   与 `traveling` 一起构成刷新键的禁用条件 —— 冷却来自 `useCooldown` 的时间戳，
+   * ★ v3.6.0 S4：车辆刷新冷却剩余秒数（0 = 可刷新）。冷却来自 `useCooldown` 的时间戳，
    *   不是请求状态（旧版只挡 `traveling`，等于「一次 HTTP 往返」就成了冷却）。
    */
   coolingSec?: number;
   /**
-   * ★ S4 评审 advisory 3：刷新作用域（观测钩子 `data-cooldown` 用）。
+   * ★ S4 advisory 3：刷新作用域（观测钩子 `data-cooldown`）。
    *   `"lrt"` ⇒ 该腿刷不出任何东西（`fetchFrame` 对非 bus 腿直接 return）⇒ `off`。
-   *   行为已由上层门控保证；本属性只补观测钩子，供 e2e 稳定断言。
    */
   refreshScope?: "bus" | "lrt";
   /**
-   * ★ v3.6.0（AC-25a）：自动上车判定的实际状态。
+   * ★ v3.6.0（AC-25a）：自动上车判定实际状态。
    *   `paused`（拒权/超时/连续低精度）⇒ 文案必须说"已暂停"，**不得**再说"正在检测"。
    */
   boardDetect?: "on" | "paused";
@@ -63,6 +57,19 @@ export interface NavTrackBarProps {
   freshSec: number | null;
   /** ★ 本批：自动下车瞬态（用于 `data-track-state='alighted'`，AC-55/56） */
   justAlighted?: boolean;
+  /**
+   * ★ v3.7.0 S3 三个**独立**观测属性（事件 / 状态 / 置信，合并就无法断言跃迁）：
+   *   `boardMatch` → `data-board-match`：`none|auto|confirmed|corrected|manual`
+   *     （`confirmed` = **用户确认**，当前无此界面故不出现；断言挂 `none→auto` 那次回调）；
+   *   `matchSource` → `data-match-source`：`gps|gps+vehicle|vehicle|manual`
+   *     （稳态读到 `vehicle` 是正常后置值）；
+   *   `matchPending` → `data-match-pending="1"`：**中置信**（证据不足，只标注不据此报站）。
+   */
+  boardMatch?: "none" | "auto" | "confirmed" | "corrected" | "manual";
+  matchSource?: "gps" | "gps+vehicle" | "vehicle" | "manual";
+  matchPending?: boolean;
+  /** ★ v3.7.0 S3：中置信车牌 —— **只展示、不驱动报站**（`plate` 仍为 null，进度走 GPS） */
+  pendingPlate?: string | null;
   onStart: () => void;
   onBoard: () => void;
   onAlight: () => void;
@@ -99,6 +106,10 @@ export default function NavTrackBar(props: NavTrackBarProps) {
     note,
     freshSec,
     justAlighted = false,
+    boardMatch = "none",
+    matchSource = "gps",
+    matchPending = false,
+    pendingPlate = null,
     onStart,
     onBoard,
     onAlight,
@@ -144,11 +155,17 @@ export default function NavTrackBar(props: NavTrackBarProps) {
       left = (
         <>
           乘车中 ·{" "}
-      {/**
-       * ★ v3.6.1：有牌号 ⇒ 车牌标签（sm 档）；**无牌号时回落的是线路名，绝不能套车牌马甲**。
-       *   外层 `<b>` 一并去掉：`.plate` 自带 700，再套 `<b>` 会合成双重加粗。
-       */}
-      {plate ? <span className="plate plate--sm">{plate}</span> : <b>{routeLabel}</b>}
+      {/* ★ v3.6.1：有牌号 ⇒ 车牌标签；无牌号回落**线路名**（绝不能套车牌马甲，外层也别再套 `<b>`）。v3.7.0 S3：中置信（`plate` 为 null）⇒ 车牌 + 「待确认」；contract：medium 不得据以报站 */}
+      {plate ? (
+        <span className="plate plate--sm">{plate}</span>
+      ) : pendingPlate ? (
+        <>
+          <span className="plate plate--sm">{pendingPlate}</span>
+          <span className="nav-actions__sub"> · 车牌待确认</span>
+        </>
+      ) : (
+        <b>{routeLabel}</b>
+      )}
           {!plate && lrt && <span className="nav-actions__sub"> · {routeLabel}</span>}
         </>
       );
@@ -171,6 +188,16 @@ export default function NavTrackBar(props: NavTrackBarProps) {
       data-nav-phase={phase}
       data-track-state={justAlighted ? "alighted" : phase}
       data-board-detect={phase === "boarding" || phase === "off" ? boardDetect : undefined}
+      /**
+       * ★ v3.7.0 S3：两个**独立**观测属性（一个事件、一个状态，合并就无法断言跃迁）。
+       *   · `data-board-match` 取值 `none|auto|confirmed|corrected|manual`；
+       *   · `data-match-source` 取值 `gps|gps+vehicle|vehicle|manual` ——
+       *     `vehicle` 在**稳态**出现是正常的（锁牌后进度本就来自车辆）；
+       *     断言只能挂在 `data-board-match` 由 `none → auto/confirmed` 的**那一次回调**里。
+       */
+      data-board-match={boardMatch}
+      data-match-source={matchSource}
+      data-match-pending={matchPending ? "1" : undefined}
     >
       <div className="nav-actions__staterow">
         <span className="nav-actions__dot" aria-hidden="true" />

@@ -16,7 +16,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RecommendCard } from "@/lib/recommend/types";
 import type { PrefMode } from "@/lib/recommend/score";
 import { errorTextOf } from "@/lib/ui/error-text";
+import { clearSmoothMem } from "@/lib/eta-smooth";
 import { mergeCardsStable } from "./merge-cards";
+
+/**
+ * 自动重拉的防抖窗口（ms）。
+ * 5s 的取值理由：① 比一次 `/api/nav` 的 P90（冷态 8s 上限内、热态 ~1.5s）略长，
+ * 面板开合抖动（收起又立刻打开）不会打出重复请求；② 远小于「数据开始不可信」的量级
+ * （车辆 12s 一帧、到站读数秒级变化）⇒ 超过它就必须重拉，不能拿旧数字骗人。
+ */
+const LOAD_DEDUPE_MS = 5_000;
 
 /** ★ 本批（需求⑧ / AC-52/53）：偏好档类型沿用后端 `score.ts`（唯一真源；避免跨层重复定义）。 */
 export type { PrefMode };
@@ -71,8 +80,24 @@ export function useRecommend(
   const [phase, setPhase] = useState<"idle" | "loading" | "ready" | "failed">("idle");
   const [data, setData] = useState<RecommendData | null>(null);
   const [err, setErr] = useState("");
-  /** 已发起过加载的 query+prefs（防同一组合反复自动重拉；失败由「重试」手动触发） */
-  const loadedQueryRef = useRef<string | null>(null);
+  /**
+   * ★ v3.7.0（P1 · 负责人投诉的「同一个起终点不会再刷新」）—— 已加载标记改为**带时刻**。
+   *
+   * 旧实现 `loadedQueryRef.current === fullQuery ⇒ return` 里**没有任何时间因素**，而
+   * `fullQuery` 由 `StepSheet.queryOf` 生成的**确定性字符串**（不含时间戳）；本 hook 又挂在
+   * `RouteSheet` 内**不卸载**。后果（与负责人描述完全一致）：
+   *   搜完 A→B、收起面板，20 分钟后再点同一 OD ⇒ **一个请求都不发**，
+   *   屏幕上仍是 20 分钟前的车辆位置、到站站数、以及已经过去的到达时刻。
+   *   （点刷新才对、F5 也对 —— 因为那两条路走的是 `reload()` / 重新挂载。）
+   *
+   * 现在：**同一个 q 且距上次加载 < 5s** 才跳过（纯防抖），**超过 5s 一律重拉**。
+   *
+   * ⚠️⚠️ **绝对不要把时间戳拼进 `fullQuery`**：它同时是 `mergedForRef` 的守卫键
+   *   （`mergeCardsStable` 只对「同一批方案」成立）。掺时间 ⇒ merge 永不命中 ⇒
+   *   列表每次整体替换、顺序乱跳、旧条件残留 —— 那正是 2026-10-29 commit `3b7096f`
+   *   修掉的阻断缺陷。时间因素只能放在本 ref 里，不许进键。
+   */
+  const loadedAtRef = useRef<{ q: string; at: number } | null>(null);
   /**
    * ★★ S4 评审阻断 ①（**必须**，别简化成"prev 存在就 merge"）：
    *   merge 只对「**同一 query** 的刷新」成立。`prev` 的生命周期跨 OD、跨偏好、跨轻轨优先开关，
@@ -100,7 +125,7 @@ export function useRecommend(
 
   const load = useCallback(async (q: string, opts?: { nocache?: boolean }) => {
     const id = ++reqIdRef.current;
-    loadedQueryRef.current = q;
+    loadedAtRef.current = { q, at: Date.now() };
     setPhase("loading");
     setErr("");
     try {
@@ -120,6 +145,14 @@ export function useRecommend(
        */
       const sameQuery = mergedForRef.current === q;
       mergedForRef.current = q;
+      /**
+       * ★ v3.7.0（顺手项）：**OD 真的变了**才清一次报站平滑记忆。
+       *   平滑记忆键是 `线路|车牌|等车站`（不含 OD）⇒ 两条行程共用同车同站时，
+       *   后一条会继承前一条的封顶值（「还有 N 站」偏高且降不下来）。
+       *   位置选择理由：这里正好有"query 是否变化"的判定（`sameQuery`），
+       *   且每次加载只经过一次 ⇒ 不会频繁清空（同行程内的平滑不受影响）。
+       */
+      if (!sameQuery) clearSmoothMem();
       setData((prev) => ({
         cards: prev && sameQuery ? mergeCardsStable(prev.cards, nextCards) : nextCards,
         colors: j.colors ?? prev?.colors ?? {},
@@ -139,10 +172,15 @@ export function useRecommend(
     }
   }, []);
 
-  // 打开时（含首次）拉取；同一 query+prefs 只自动拉一次（关闭再开 = 秒显上次结果）
+  /**
+   * 打开时（含首次）拉取。
+   * ★ v3.7.0（P1）：**同一 query 只在 5s 内免重拉**；超过 5s（含"收起面板 20 分钟后再点同一 OD"）
+   *   一律重拉 —— 否则车辆位置/到站站数/到达时刻都会停在很久以前。见 `loadedAtRef` 的注释。
+   */
   useEffect(() => {
     if (!open || !fullQuery) return;
-    if (loadedQueryRef.current === fullQuery) return;
+    const prev = loadedAtRef.current;
+    if (prev && prev.q === fullQuery && Date.now() - prev.at < LOAD_DEDUPE_MS) return;
     void load(fullQuery);
   }, [open, fullQuery, load]);
 

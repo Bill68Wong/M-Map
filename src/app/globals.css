@@ -8552,3 +8552,225 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
   gap: var(--space-2);
   margin-top: var(--space-2);
 }
+
+/* ============================================================================
+   ══ v3.8.0 开屏/加载 SVG 动画（迭代-导航优化-20261102 · 05 设计规格 v1.2）══
+   数值唯一来源 = 05-设计-开屏与加载动画-规格.md（毫秒级分镜 §3 / 关键帧 §4 / 循环 §5）。
+   红线（违反 = 打回）：
+   · 每条 animation 显式 fill-mode: both —— 全局杀开关（本文件 :541，0.01ms 瞬播完）
+     下省略 fill-mode ⇒ 跳回初始帧 ⇒ 用户看到空 M（静默缺陷）；裸 forwards 又会让
+     delay 期露自然样式（钉提前以 scale(1) 可见），故统一 both（= backwards+forwards）。
+   · 涟漪禁 filter: blur()（逐帧重绘，低端 Android 掉帧）——只许 scale+opacity。
+   · 颜色全走 class token；var() 禁止写进 SVG 表现属性（w3c/svgwg#1031）。
+   · 站环 <circle> 禁用 pathLength（WebKit bug 区），dasharray 写真实值 28.90；
+     路线 <path> 用 pathLength="1" 归一化（免 JS 算长度）。
+   ============================================================================ */
+:root {
+  --brand-dot: #ffffff; /* 光点·浅色主题（白 = 唯一例外色，等同 --accent-on 语义） */
+  --ease-travel: cubic-bezier(0.45, 0.05, 0.55, 0.95); /* 描边/光点共用：对称 ease-in-out，两者进度锁定 */
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --brand-dot: #1b4d8f; /* 深色主题：深底亮蓝路线上必须用深点才可见 */
+  }
+}
+
+/* 站环（开屏脉冲目标）。BrandMark 沿用 brand-mark__route；此处为动画新增的独立 class。 */
+.brand-mark__station {
+  stroke: var(--brand-route);
+}
+
+/* 新增动画元素取色（沿用 .brand-mark__* 的 class 绑定模式；var() 禁入表现属性） */
+/* D4：offset-path / offset-rotate 必须在**公共类**上（叙事版与循环版共用）；
+   只写在 --narrative 下会让循环版光点恒留在 SVG 原点（屏幕坐标不动）⇒ 加载态语义丢失。 */
+.brand-anim__dot        {
+  fill: var(--brand-dot);
+  offset-path: path("M12 48 L12 16 L30 34 L48 16");
+  offset-rotate: 0deg; /* 圆点无需旋转 */
+}
+.brand-anim__hole-flash { fill: var(--brand-route); } /* 深色下即亮蓝：顺带补偿深底钉绿 2.97:1 */
+.brand-anim__ripple     { stroke: var(--brand-route); fill: none; }
+
+/* ── 覆盖层（全屏叙事版容器）──────────────────────────────────────────
+   z-index 200 > 全站最高层（车辆层 130；项目显式数字层级纪律），随容器移除释放。
+   背景与系统静态开屏同色（--bg）⇒ 静态层→动画层切换除 M 外像素级一致。 */
+.brand-splash__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  /* 段 8：860–960ms 整层淡出。交接顺序恒定：内容就绪（SSR）→ 淡出 → 移除容器。 */
+  animation: brand-splash-exit 100ms cubic-bezier(0.4, 0, 1, 1) 860ms both;
+}
+.brand-splash__mark {
+  width: min(48vw, 200px);
+  height: min(48vw, 200px);
+}
+/* 跳过淡出（≤120ms）：由 JS 以【内联 animation】覆盖段 8 的延迟动画后启用。
+   为什么不用 transition/inline opacity：CSS 动画的 fill 值 sits above inline style，
+   段 8 的 backwards fill 会把 inline opacity 压住 ⇒ 点了没反应。 */
+@keyframes brand-splash-skip { to { opacity: 0; } }
+
+/* ── 段 2：M 描边生长（0–600ms；pathLength="1" 归一化，见组件标记）── */
+.brand-anim--narrative .brand-mark__route {
+  stroke-dasharray: 1;
+  animation: brand-anim-route 600ms var(--ease-travel) 0ms both;
+}
+@keyframes brand-anim-route {
+  from { stroke-dashoffset: 1; opacity: 0; } /* opacity 同时消掉圆头 cap 在 offset=全长时残留的首点小圆 */
+  1%   { opacity: 1; }
+  to   { stroke-dashoffset: 0; opacity: 1; }
+}
+
+/* ── 段 2'/4：光点行进 + 钻孔 ─────────────────────────────────────────
+   与描边同时长、同缓动、同 path 字符串 ⇒ 进度锁定（错位在折角处被放大到肉眼可见）。
+   光点 cx/cy 缺省 (0,0)：offset-path 把锚点（SVG 缺省 transform-origin = 0 0）钉到路径点，
+   段 4 的 scale(0.35) 围绕局部原点收缩 ⇒ 原地缩小，不会飞向角落。勿给它写 cx/cy。 */
+.brand-anim--narrative .brand-anim__dot {
+  animation:
+    brand-anim-dot-travel 600ms var(--ease-travel) 0ms both,
+    brand-anim-dot-in    100ms linear            0ms both,
+    brand-anim-dot-drill  80ms ease-in          580ms both;
+}
+@keyframes brand-anim-dot-travel { from { offset-distance: 0%; } to { offset-distance: 100%; } }
+@keyframes brand-anim-dot-in     { from { opacity: 0; } to { opacity: 1; } }
+@keyframes brand-anim-dot-drill  { to { transform: scale(0.35); opacity: 0; } }
+
+/* offset-path 降级（iOS 15-）：不支持时光点回常规布局位「乱飞」而非停在路径起点
+   ⇒ 直接隐藏光点（路线描边叙事保留；静态 logo 即降级出口）。
+   @supports 检测本身 Safari 13.1+ 可用，放心用。 */
+@supports not (offset-path: path("M0 0")) {
+  .brand-anim__dot { display: none; }
+}
+
+/* ── 段 3：折点站环脉冲（光点到达折点 ≈370ms 时触发 120ms，峰值对齐）── */
+.brand-anim--narrative .brand-mark__station:nth-of-type(2) {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: brand-anim-pulse 120ms var(--ease-standard) 310ms both;
+}
+@keyframes brand-anim-pulse { 50% { transform: scale(1.15); } }
+
+/* ── 段 5：钉帽孔内点亮（580–700ms；深底钉绿 2.97:1 的时序补偿）── */
+.brand-anim__hole-flash { animation: brand-anim-flash 120ms ease-out 580ms both; }
+@keyframes brand-anim-flash { 0% { opacity: 0; } 40% { opacity: 0.9; } to { opacity: 0; } }
+
+/* ── 段 6：钉弹跳（600–860ms；显式 scale 关键帧，禁弹性 bezier）──
+   transform-box: view-box ⇒ transform-origin 按 viewBox 用户单位解析（钉尖 48px 46px）；
+   不设 transform-box 时 origin 相对元素自身包围盒 ⇒ 钉会从错误位置缩放。 */
+.brand-anim--narrative .brand-mark__pin {
+  transform-box: view-box;
+  transform-origin: 48px 46px;
+  animation: brand-anim-pin 260ms var(--ease-standard) 600ms both;
+}
+@keyframes brand-anim-pin {
+  0%   { transform: scale(0); }
+  55%  { transform: scale(1.06); } /* overshoot */
+  78%  { transform: scale(0.97); }
+  100% { transform: scale(1); }
+}
+
+/* ── 段 7：涟漪（800–940ms；仅 scale+opacity 可合成，禁 blur）── */
+.brand-anim__ripple {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: brand-anim-ripple 140ms ease-out 800ms both;
+}
+@keyframes brand-anim-ripple { from { transform: scale(0.18); opacity: 0; } 8% { opacity: 0.45; } to { transform: scale(1); opacity: 0; } }
+
+/* ── 段 8：整层淡出（§4.5；移除由 JS 在动画结束后做）── */
+/* 段 8 淡出后必须穿点击：即使 JS 的 animationend / 兜底计时器都失效，
+   残留层也不能挡住用户操作（fail-open 兜底；遮挡型缺陷从「点不动」降级为「看得见的残影」）。 */
+@keyframes brand-splash-exit { to { opacity: 0; pointer-events: none; } }
+
+/* ── 加载小循环（BrandRouteLoader；路线/站环/钉全程静态常驻，唯一变量是光点）──
+   两条光点动画同为 1200ms linear ⇒ 永不失步；淡入/淡出的分段缓动写在 keyframes 内
+   （per-keyframe timing-function），travel 保持全程 linear（匀速 = 通勤感 + 循环 seam 无顿挫）。 */
+.brand-loader {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.brand-loader__label {
+  font-size: 13px;
+  color: var(--on-surface-var, inherit);
+}
+.brand-anim--loop .brand-anim__dot {
+  animation:
+    brand-anim-loop-travel 1200ms linear 0ms infinite both,
+    brand-anim-loop-fade   1200ms linear 0ms infinite both;
+}
+@keyframes brand-anim-loop-travel { from { offset-distance: 0%; } to { offset-distance: 100%; } }
+@keyframes brand-anim-loop-fade {
+  0%     { opacity: 0; transform: scale(1); animation-timing-function: ease-out; } /* 0–140ms 淡入 */
+  11.67% { opacity: 1; animation-timing-function: linear; }                          /* 140ms 淡入完成 */
+  88.33% { opacity: 1; transform: scale(1); animation-timing-function: ease-in; }    /* 1060ms 起淡出 */
+  100%   { opacity: 0; transform: scale(0.35); }                                     /* 1200ms 钻孔；与下圈 0% 的 opacity:0 跨 seam 连续 */
+}
+/* 折点站环脉冲：每圈一次。★ D5：同叙事版理由，窗口从 832–1012ms 前移到 744–906ms
+   （1200ms 内 = 62%–75.5%，峰值 68% = 816ms）。 */
+.brand-anim--loop .brand-mark__station:nth-of-type(2) {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: brand-anim-loop-pulse 1200ms var(--ease-standard) 0ms infinite both;
+}
+@keyframes brand-anim-loop-pulse {
+  0%, 62% { transform: scale(1); }
+  68%     { transform: scale(1.15); } /* 816ms 峰值 */
+  75.5%   { transform: scale(1); }    /* 906ms 收 */
+  100%    { transform: scale(1); }
+}
+/* 钉呼吸：每圈一次（240ms）。设计原值 1160–1400ms 跨 seam ⇒ 在 1200ms 循环内平移为
+   0–200ms（差 40ms 不可感知）；这样 reduced-motion 终态 = scale(1)，与首屏 BrandMark 构图精确同源
+   （若按原值写，fill-mode both 会把终态冻在 scale(1.025) ⇒ 与静态 mark 差 2.5%）。 */
+.brand-anim--loop .brand-mark__pin {
+  transform-box: view-box;
+  transform-origin: 48px 46px;
+  animation: brand-anim-loop-pin 1200ms var(--ease-standard) 0ms infinite both;
+}
+@keyframes brand-anim-loop-pin {
+  0%   { transform: scale(1); animation-timing-function: ease-out; }
+  6.67%  { transform: scale(1.05); animation-timing-function: ease-in-out; } /* 80ms 峰 */
+  16.67% { transform: scale(1); }                                            /* 200ms 收 */
+  100% { transform: scale(1); }
+}
+
+/* ── D1（P0）：`prefers-reduced-motion` 专用降级 ────────────────────────────
+   全局杀开关（本文件 :541）只清 `animation-duration`、**不清 `animation-delay`**。
+   钉是 `delay:600ms + fill:both` ⇒ 0–600ms 被 backwards 分支钉在 `scale(0)`
+   （用户看到：钉凭空消失 600ms → 蹦出来 → 860ms 才淡出，总耗时 901ms）。
+   ⇒ reduced-motion 下必须**整段禁用 mark 内动画**，直接呈现「静止末帧完整 logo」；
+      覆盖层立即淡出（100ms），总耗时从 901ms 降到 100ms。
+   ⚠️ 覆盖层必须沿用同名 `brand-splash-exit`：JS 靠 `animationend` 移除容器。
+   ⚠️ 每条子属性单独 `!important`（简写敌不过全局 `animation-duration: 0.01ms !important`
+      之外的特异性竞争，显式逐条写最稳）。 */
+@media (prefers-reduced-motion: reduce) {
+  .brand-splash__mark,
+  .brand-splash__mark * { animation: none !important; }
+  .brand-anim__dot,
+  .brand-anim__hole-flash,
+  .brand-anim__ripple { opacity: 0 !important; }
+  .brand-splash__overlay {
+    animation-name: brand-splash-exit !important;
+    animation-duration: 100ms !important;
+    animation-delay: 0ms !important;
+    animation-timing-function: linear !important;
+    animation-fill-mode: both !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* ══ D1 补充说明（实现细节）════════════════════════════════════════════════
+   缺陷成因：全局杀开关（:541）只压 animation-duration 到 0.01ms，**不清 animation-delay**。
+   而开屏各段都有 delay（脉冲 310ms / 亮点 580ms / 钉 600ms / 涟漪 800ms）⇒ duration 归零后
+   元素仍要等到各自 delay 到点才跳到末帧 ⇒ reduced 用户会看到一个「缺了钉子」的 logo 挂 600ms，
+   比不做动画更糟，且完全静默（tsc/build/普通断言全绿）。
+
+   ⚠️ 必须沿用 `brand-splash-exit` 这个 keyframes 名：BrandSplash 的 animationend
+      靠 `e.animationName === "brand-splash-exit"` 匹配，改名 ⇒ 容器永不移除。
+   ⚠️ 覆盖层逐条属性写 `!important`（不用 shorthand）：全局 `animation-duration: ... !important`
+      会与 shorthand 竞争，逐条显式写最稳。
+   ⚠️ 上面的 @media 块是唯一实现，**不要重复定义第二个**（本文件曾出现两份，后者覆盖前者
+      导致 per-property !important 失效）。 */

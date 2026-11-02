@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
 import { type FreeEventType } from "@/lib/free-shared";
 
-export const preferredRegion = "sin1";
 
 /**
  * POST /api/free/[id]/events { type, station }

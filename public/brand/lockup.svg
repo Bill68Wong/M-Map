@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 156 64" width="156" height="64" role="img" aria-label="M Map 澳搭車 横排标志">
-  <title>M Map · 澳搭車 · 横排组合（浅底）</title>
-  <desc>横排组合：标志 + 英文名 M Map + 中文名「澳搭車」。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 156 64" width="156" height="64" role="img" aria-label="M Map 横排标志">
+  <title>M Map · 横排组合（浅底）</title>
+  <desc>横排组合：标志 + 产品名 M Map。</desc>
   <defs>
     <mask id="mm-hole-lockup" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
       <rect x="0" y="0" width="64" height="64" fill="#fff"/>
@@ -15,9 +15,7 @@
     </g>
     <circle cx="12" cy="48" r="4.6" fill="none" stroke="var(--brand-route, #1b4d8f)" stroke-width="2.2"/><circle cx="30" cy="34" r="4.6" fill="none" stroke="var(--brand-route, #1b4d8f)" stroke-width="2.2"/>
   </g>
-  <text x="66" y="31" font-family="var(--font-display, &quot;Barlow&quot;, &quot;Noto Sans SC&quot;, sans-serif)"
+  <text x="66" y="41" font-family="var(--font-display, &quot;Barlow&quot;, &quot;Noto Sans SC&quot;, sans-serif)"
         font-size="30" font-weight="700" letter-spacing="-0.015em" textLength="80" lengthAdjust="spacing"
         fill="var(--brand-fg, #0f1720)">M Map</text>
-  <text x="66" y="52" font-family="&quot;Noto Sans SC&quot;, var(--font-body, sans-serif)"
-        font-size="15" font-weight="500" letter-spacing="0.02em" fill="var(--brand-muted, #5a6472)">澳搭車</text>
 </svg>

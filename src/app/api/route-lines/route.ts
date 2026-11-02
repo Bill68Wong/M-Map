@@ -23,8 +23,18 @@ import { API_ERROR } from "@/lib/http/errors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 export const maxDuration = 15;
+
+/**
+ * ★ v3.7.0（缓存专项）：本接口是**线路元数据**（码 / kind / 展示名 / 主题色），
+ *   不含任何实时量（无车辆、无到站时刻）⇒ 符合缓存红线，允许 CDN 与浏览器双层缓存。
+ *
+ * ⚠️ **必须同时给 `max-age`**：只写 `s-maxage` 时 Vercel 会把它从浏览器可见头里剥掉，
+ *   前端拿不到浏览器缓存 ⇒ 只能退回 `force-cache`（现存违规的成因）。缓存只应在一层管。
+ */
+const CACHE_HEADER = {
+  "Cache-Control": "public, max-age=3600, s-maxage=3600, stale-while-revalidate=86400",
+};
 
 interface Row {
   code: string;
@@ -62,15 +72,18 @@ export async function GET() {
       }
       return 0;
     });
-    return NextResponse.json({
-      lines: rows.map((r) => ({
-        code: r.code,
-        kind: r.kind === "lrt" ? "lrt" : "bus",
-        // 轻轨标签去掉 `LRT-` 前缀（与站点卡口径一致：只显示中文名）
-        label: r.kind === "lrt" ? r.code.replace(/^LRT-/, "") : r.code,
-        color: r.color ?? "#276299",
-      })),
-    });
+    return NextResponse.json(
+      {
+        lines: rows.map((r) => ({
+          code: r.code,
+          kind: r.kind === "lrt" ? "lrt" : "bus",
+          // 轻轨标签去掉 `LRT-` 前缀（与站点卡口径一致：只显示中文名）
+          label: r.kind === "lrt" ? r.code.replace(/^LRT-/, "") : r.code,
+          color: r.color ?? "#276299",
+        })),
+      },
+      { headers: CACHE_HEADER },
+    );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[api/route-lines] 失败：", msg);

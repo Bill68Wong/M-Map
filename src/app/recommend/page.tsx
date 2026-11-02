@@ -7,7 +7,7 @@
  * 流式：页壳立刻可见，卡片区用 `<Suspense>` 包住 —— 骨架先出，`recommend()` 算完即填
  *   （DSAT 实时 + 轻轨时刻表要 ~0.3s）。所以「点首页卡 → 看到 5 张卡」的首屏感知 = 骨架即刻。
  *
- * ⚠️ `preferredRegion="sin1"`：与 Supabase 主库同区，抹掉跨区 RTT（见计划 §六）。
+ * ⚠️ 函数区域由项目级 `vercel.json: "regions": ["hkg1"]`（v3.7.0 · ADR C1）决定。
  * ⚠️ `force-dynamic`：绝不能静态化/缓存 —— 结果含「现在」的实时班次。
  * 座区只从 `?zone=` 读（切换入口在首页，见计划 §7.1）。
  */
@@ -21,7 +21,6 @@ import { DEFAULT_ZONE, SCHOOL_ZONES, type SchoolZone } from "@/lib/recommend/typ
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 
 const ZONE_VALUES = SCHOOL_ZONES.map((z) => z.value);
 

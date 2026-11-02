@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
 import { freeStopsOf, grabFreeVehicle } from "@/lib/free-ride";
 
-export const preferredRegion = "sin1";
 
 /**
  * POST /api/free/start { route, dir, boardStation }

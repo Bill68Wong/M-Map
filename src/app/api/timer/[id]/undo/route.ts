@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
 
 /** 就近部署：Supabase 新加坡池化器 → sin1 */
-export const preferredRegion = "sin1";
 
 /**
  * POST /api/timer/[id]/undo
