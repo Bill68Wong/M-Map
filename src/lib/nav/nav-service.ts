@@ -99,7 +99,17 @@ export interface NavInput {
 
 export interface NavStats {
   staticMs: number;
+  /** 高德 s=0 主策略耗时（**不含**多策略补查，见 `multiStrategyMs`） */
   transitMs: number;
+  /**
+   * ★ v3.7.0（C13）：s=7/s=8 **多策略按需补查**耗时（毫秒），未触发补查时恒 0。
+   *
+   * 为什么单独计量而不并入 `transitMs`：`transitMs` 是既有的「高德主调用」口径，
+   * 已被历次基线测量与测试引用；补查是**条件分支**（仅当 s=0 候选 < 阈值），
+   * 并入会让同一字段在两次请求间代表不同含义 ⇒ 归因永远算不清。
+   * 实测：只要 `strategiesUsed` 含 7/8，「未埋点」就从 59–741ms 跳到 817–4022ms。
+   */
+  multiStrategyMs: number;
   transitOk: boolean;
   transitFromCache: boolean;
   amapPlans: number;
@@ -441,6 +451,8 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
     }
   }
   const transitMs = Date.now() - tTransit;
+  /** ★ v3.7.0（C13）：补查耗时；未触发 = 0（0 与「很快」不混淆：触发时必然 > 0） */
+  let multiStrategyMs = 0;
 
   if (transitOk) {
     const parsed = parseAndBridge(rawPlans, origin, dest, bridgeCtx);
@@ -450,7 +462,10 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
     // ★ 多策略按需补查：s=0 可用候选偏少 ⇒ 并行补 s=7/s=8，按指纹合并去重（s=0 优先保留）。
     //   ⚠️ fixture 模式（测试/回放）不补查；补查整体失败静默降级为「只有 s=0 结果」。
     if (!input.transitFixture && bridgedSeeds.length < MULTI_STRATEGY_WHEN_BELOW) {
+      // ★ v3.7.0（C13）：这段 2 次额外高德调用此前落在所有埋点之外（不可见）
+      const tMulti = Date.now();
       const extra = await fetchMultiStrategySeeds(pool, origin, dest, bridgeCtx, nowMs, input.noCache);
+      multiStrategyMs = Date.now() - tMulti;
       bridgedSeeds = mergeSeedsByFingerprint(bridgedSeeds, extra.seeds);
       dropped = [...dropped, ...extra.dropped];
       strategiesUsed.push(...extra.strategiesUsed);
@@ -644,6 +659,7 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
     stats: {
       staticMs,
       transitMs,
+      multiStrategyMs,
       transitOk,
       transitFromCache: fromCache,
       amapPlans: amapTotal,

@@ -3,7 +3,6 @@ import { getPool } from "@/lib/db";
 import { deriveRouteDir } from "@/lib/dsat/eta";
 
 /** 就近部署：Supabase 新加坡池化器 → sin1 */
-export const preferredRegion = "sin1";
 
 /** GET /api/timer/[id]：会话详情 + 方案分段 + 事件 + 站名表（向导恢复用） */
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {

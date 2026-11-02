@@ -118,7 +118,7 @@ export default function RecommendCard({
   const press = usePressGuard();
   const colorOf = (c: string) => colors[c] ?? null;
   const first = card.rides[0];
-  /** ★ v3.3.0（AC-107）：赶车提示（合并式）—— 后端 `catchHint` 优先、回落 `tierText` */
+  /** ★ v3.7.0 S4：只有真实时刻提示（`catchHint`）；速度档文案全站隐藏 */
   const firstHint = first ? catchHintOf(first) : { text: "", isHint: false };
   /** ★ 本批（AC-50）：换乘可行性（观测钩子 H8 取值） */
   const transferFeasible = transferFeasibleOf(card);
@@ -248,12 +248,9 @@ export default function RecommendCard({
                 <EtaText text={first.liveText || `等 ${Math.round(first.waitMin)} 分`} />
               )
             }
-            /* ★ v3.3.0（AC-107）：赶车提示 = **合并式** TierBadge（带时刻文案进 `catchHint`，
-               回落到既有 `tierText`）—— 零新增元素/零新增行。 */
+            /* ★ v3.7.0 S4：速度档文案全站隐藏（含其色阶）；只有真实时刻提示才渲染胶囊 */
             aside={
-              firstHint.text ? (
-                <TierBadge tier={first.tier} tierText={firstHint.text} catchHint={firstHint.isHint} />
-              ) : null
+              firstHint.text ? <TierBadge tierText={firstHint.text} catchHint={firstHint.isHint} /> : null
             }
           />
         )}
@@ -298,9 +295,9 @@ export default function RecommendCard({
                   后续班车还有 <b>{a.stopsAway}</b> 站
                 </span>
               </span>
-              <span className="rc-altrow__right">
-                <span className={`rc-tier rc-tier--${a.tier}`}>{a.tierText}</span>
-              </span>
+              {/* ★ v3.7.0 S4：速度档文案（`a.tierText`）与其档位色阶一并移除 ——
+                  只删文案而留色阶 = 把信息挪进颜色通道，色觉障碍用户失去兜底。
+                  这一侧原本只放档位徽章，故整个右侧容器一起去掉。 */}
             </div>
           ))}
         </div>

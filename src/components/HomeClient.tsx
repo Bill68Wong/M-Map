@@ -45,7 +45,7 @@ export default function HomeClient({
   if (dbError) {
     return (
       <main className="page">
-        {/* ★ v3.0.0 品牌更名：产品名「MUST登校」→ 英文「M Map」（中文品牌名「澳搭車」，见 public/brand/lockup.svg） */}
+        {/* ★ v3.0.0 品牌更名：产品名「MUST登校」→「M Map」；★ v3.8.0 起取消中文品牌名，统一「M Map」 */}
         <h1 className="h-headline" style={{ marginBottom: 8 }}>
           M Map
         </h1>
@@ -110,7 +110,7 @@ export default function HomeClient({
   return (
     <main className="page">
       <header style={{ marginBottom: 16, padding: "4px 2px" }}>
-        {/* 品牌名「M Map」；中文品牌名「澳搭車」（横排标志见 public/brand/lockup.svg） */}
+        {/* 品牌名「M Map」（★ v3.8.0 起取消中文品牌名，统一「M Map」） */}
         <h1 className="h-headline">M Map</h1>
         <p className="t-label t-muted" style={{ marginTop: 2 }}>
           选方向 → 立刻看到最快路线

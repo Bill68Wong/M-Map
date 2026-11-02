@@ -117,7 +117,7 @@ export default function CardDetailClient({
 
   const card = data.card;
   const first = card.rides[0];
-  /** ★ v3.3.0（AC-107）：赶车提示（合并式）—— 后端 `catchHint` 优先、回落 `tierText` */
+  /** ★ v3.7.0 S4：只有真实时刻提示（`catchHint`）；速度档文案全站隐藏 */
   const firstHint = first ? catchHintOf(first) : { text: "", isHint: false };
   const colorOf = (c: string) => data.colors[c] ?? null;
   const zoneOr = zone ?? DEFAULT_ZONE;
@@ -231,9 +231,9 @@ export default function CardDetailClient({
                   <EtaText text={first.liveText || `等 ${Math.round(first.waitMin)} 分`} />
                 </span>
               )}
-              {/* ★ v3.3.0（AC-107）：赶车提示（合并式 TierBadge，同推荐卡槽位） */}
+              {/* ★ v3.7.0 S4：速度档文案全站隐藏；只在有真实时刻（`catchHint`）时渲染胶囊 */}
               {firstHint.text && (
-                <TierBadge tier={first.tier} tierText={firstHint.text} catchHint={firstHint.isHint} />
+                <TierBadge tierText={firstHint.text} catchHint={firstHint.isHint} />
               )}
             </div>
             <p className="rc-fold__meta">
@@ -256,8 +256,8 @@ export default function CardDetailClient({
                   还有 <b>{a.stopsAway}</b> 站 · {a.waitText}
                 </span>
                 <span className="rc-altrow__right">
+                  {/* ★ v3.7.0 S4：后续班次的「档位文案 + 档位色阶」一并移除；总时长保留 */}
                   全程 {a.totalMin} 分
-                  <span className={`rc-tier rc-tier--${a.tier}`}>{a.tierText}</span>
                 </span>
               </div>
             ))}
@@ -290,8 +290,8 @@ export default function CardDetailClient({
                   {rp.minutes !== null ? (
                     <>
                       全程 {Math.round(rp.minutes)} 分
-                      {/* ★ v2.0.1 回退：不再有「需等下一班」→ `tier` 恢复为非空五档（见 model.ts 顶部说明） */}
-                      {rp.tierText && <span className={`rc-tier rc-tier--${rp.tier}`}>{rp.tierText}</span>}
+                      {/* ★ v3.7.0 S4：速度档文案（`rp.tierText`）+ 档位色阶一并移除；
+                          旧注释「`tier` 恢复为非空五档」的视觉呈现已不再需要 */}
                     </>
                   ) : rp.inPlan ? (
                     // 在方案表里，但本轮没有在途车（收车 / 不在营运时段）→ 不编数字

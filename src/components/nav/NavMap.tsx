@@ -29,6 +29,7 @@
  * ⚠️ 文案：界面文案一律**简体**（站名/线路名才用繁体）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import BrandRouteLoader from "@/components/brand/BrandRouteLoader";
 import { isInsideRings, loadMacauDistrict, maskOuterRing, type MacauDistrict } from "@/lib/amap/district";
 import { type ColoredLeg, type LL } from "@/lib/nav/route-overview";
 import { loadAMap } from "./amap-loader";
@@ -1275,9 +1276,15 @@ export default function NavMap({
     let cancelled = false;
     void (async () => {
       try {
-        const r = await fetch(`/api/route-shapes?code=${encodeURIComponent(routeLine.code)}`, {
-          cache: "force-cache",
-        });
+        /**
+         * ★ v3.7.0（P2 · 去强缓存）：**不再传 `cache: "force-cache"`**。
+         *   服务端已给 `/api/route-shapes` 下发 `Cache-Control: public, s-maxage=3600,
+         *   stale-while-revalidate=86400`（浏览器可见 `max-age`）⇒ 浏览器按 HTTP 语义自己缓存。
+         *   再叠一层 `force-cache` = 「两层缓存各管一段、谁也不知道哪层旧」，
+         *   与 2026-09-21 那次「收藏页进导航拿到旧数据、刷新才生效」的事故同形。
+         *   ⚠️ 只改 `cache` 这一个选项，不要动调用结构（引用稳定性见下方 effect 依赖）。
+         */
+        const r = await fetch(`/api/route-shapes?code=${encodeURIComponent(routeLine.code)}`);
         const j = (await r.json()) as {
           color?: string;
           stops?: string[];
@@ -1615,8 +1622,14 @@ export default function NavMap({
           双击恢复 `restore()`、定位键重跑**全部保留**（「定位」能力由页面级 `.nav-locate-fab` 承担）。 */}
       {phase === "loading" && (
         <div className="nav-map__cover">
-          <span className="rc-sk rc-sk--big" />
-          <span className="nav-map__cover-text">{locating ? "定位中…" : "地图加载中…"}</span>
+          {/* ★ v3.8.0：48px 小 M 循环动画（含内部 >300ms 门控：地图快就绪则不闪）。
+              `active` 绑**真实地图加载信号** phase，不绑开屏状态 ——
+              绑开屏会让「开屏撤走 → 300ms 门到点」之间出现空窗，正是要避免的。
+              ★ a11y：文案必须**作为 `label` 传入**（落在组件内 `role="status" aria-live="polite"`
+                里）。若留在组件外的 span，live region 内容为空 ⇒ 屏幕阅读器什么都不播，
+                且「定位中…」→「地图加载中…」的切换也听不到（静默缺陷，视觉全绿）。
+                字号一致（--fs-label = 13px），视觉零变化。 */}
+          <BrandRouteLoader active size={48} slot="map-cover" label={locating ? "定位中…" : "地图加载中…"} />
         </div>
       )}
       {phase === "failed" && (

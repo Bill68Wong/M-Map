@@ -37,7 +37,6 @@ import { API_ERROR, errorResponse } from "@/lib/http/errors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 export const maxDuration = 15;
 
 /** 取一个必填坐标；缺失/非有限/越界 ⇒ null */

@@ -55,7 +55,6 @@ import {
 /** 就近部署：Supabase 新加坡池化器 → sin1；pg/DSAT 需要 Node 运行时；请求期动态执行 */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 export const maxDuration = 30;
 
 /** 整体超时兜底（毫秒）——超过即按「无实时数据」返回，不阻塞卡片 */

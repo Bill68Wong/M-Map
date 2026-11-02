@@ -16,10 +16,23 @@
  *   · 环线消歧：同一站有多个里程候选 → 取「包含车辆里程的最小区间」；再不行取最近中点；
  *   · 任何一环缺失（无几何/无里程/无 md）→ 该车**不出 progress 字段**（调用方降级）——
  *     宁缺勿错，绝不猜；
- *   · 缓存 TTL 10 分钟（几何/里程/时长三源；Serverless 实例级，重算后最多陈旧 10 分钟）。
+ *   · ★ v3.7.0（缓存专项 · AC5.7）：三份缓存的**键里带三源版本令牌**
+ *     （`route_shapes.fetched_at` + `route_station_mileage.updated_at` + `route_hop_stats.updated_at`，
+ *     见 `progress-freshness.ts#versionTokenOf`）⇒ 改道 / 重算里程 / 重算时长后**立即**失效。
+ *     TTL（几何 120s / 跳时长 600s）只作内存上界，**不是**新鲜度的唯一手段。
+ * ─────────────────────────────────────────────────────────────────────
+ * ⚠️⚠️ **`p` 是形状派生量，参与「锁哪辆车」的判定**（不是纯视觉）：`p` 的分子分母都来自
+ *   本文件的两张表，与里程原点无关（所以客户端在 `leg.colored` 轴上插值是自洽的）。
+ *   若改道后 shape 缓存还是旧折线、客户端却用新折线 ⇒ 同一位置的 `p` 不同 ⇒ 误差可达
+ *   改道长度的一半（与 σ_p=60m 同量级）⇒ 位置项判负。
+ *   ⇒ 失效方向是**拒绝锁车**（旧+旧 ≈ 50~100m 不过线；旧+新 ≈ `p` 越界被 clamp 在端点、
+ *     偏差一整段），**不是锁错车**。但代码兜不住「改了道却忘了重建里程表」这种运维遗漏
+ *     （两表都"新"、令牌一致，但里程内容没重算）⇒ 靠 `/api/health?warm=1` 的 `versionDrift` 暴露。
+ *     **运维 SOP：改道后必须跑 `npm run db:station-mileage`。**
  */
 import type { Pool } from "pg";
 import { PROGRESS_H, PROGRESS_W, progressTypeOf } from "./progress-params";
+import { versionTokenOf } from "./progress-freshness";
 
 export interface VehicleProgress {
   /** 区间内相对进度（0 = 刚离站，1 = 即将到站） */
@@ -56,7 +69,20 @@ interface ShapeRec {
   cum: number[];
 }
 
-const TTL = 10 * 60_000;
+/**
+ * 缓存 TTL **分级**（v3.7.0 · AC5.7）。TTL **只作内存上界**，新鲜度由键里的三源版本令牌负责：
+ *   · 令牌：数据变 ⇒ 键变 ⇒ 立即失效（正确性）；   · TTL：键不变时的回收上界（容量 / 兜底）。
+ * · **几何 / 里程 = 120s**：二者共同决定 `p` 的分子分母 ⇒ 键万一没变（令牌查询失败退化成
+ *   30s 桶时），陈旧窗口也还有个 2 分钟的上限。
+ * · **跳时长 = 600s**：`md` 是**统计量**，不参与几何、不参与 `p` 的分母，只影响 `remainSecD`；
+ *   三者绑同一 TTL 会让 hop 白多查 5 倍。
+ *
+ * ⚠️ **契约**：`attachProgress` / `locateSegmentOf` 都是**同一个令牌 + 同批**取三者 ⇒
+ *   `p` 的分子分母必然同版本。**不许**给其中一份单独的令牌或单独一次查询，否则同一辆车
+ *   拿到的 `p` 会跨越两个版本（旧折线 + 新里程表）⇒ 偏差可达一整段。
+ */
+const TTL_GEOM_MS = 120_000;
+const TTL_HOP_MS = 600_000;
 const shapeCache = new Map<string, { at: number; rec: ShapeRec | null }>();
 const mileCache = new Map<string, { at: number; map: Map<string, number[]> }>();
 const hopCache = new Map<string, { at: number; map: Map<string, number> }>();
@@ -69,10 +95,11 @@ function havM(a: [number, number], b: [number, number]): number {
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
 }
 
-async function getShape(pool: Pool, route: string, dir: string): Promise<ShapeRec | null> {
-  const key = `${route}|${dir}`;
+async function getShape(pool: Pool, route: string, dir: string, ver: string): Promise<ShapeRec | null> {
+  // ★ 键含版本令牌 ⇒ 改道 / 重算里程后**立即**失效，不必等 TTL 到点
+  const key = `${route}|${dir}|${ver}`;
   const hit = shapeCache.get(key);
-  if (hit && Date.now() - hit.at < TTL) return hit.rec;
+  if (hit && Date.now() - hit.at < TTL_GEOM_MS) return hit.rec;
   let rec: ShapeRec | null = null;
   try {
     const r = await pool.query(`SELECT polyline FROM route_shapes WHERE route_code = $1 AND dsat_dir = $2 LIMIT 1`, [route, dir]);
@@ -86,14 +113,15 @@ async function getShape(pool: Pool, route: string, dir: string): Promise<ShapeRe
   } catch (e) {
     console.warn("[progress] route_shapes 读取失败：", (e as Error).message);
   }
-  shapeCache.set(key, { at: Date.now(), rec });
+  // ⚠️ 失败/空结果**不入缓存**：旧实现会把 null 也缓存 10 分钟 ⇒ 一次库抖动让进度模型瞎 10 分钟
+  if (rec) shapeCache.set(key, { at: Date.now(), rec });
   return rec;
 }
 
-async function getMiles(pool: Pool, route: string, dir: string): Promise<Map<string, number[]>> {
-  const key = `${route}|${dir}`;
+async function getMiles(pool: Pool, route: string, dir: string, ver: string): Promise<Map<string, number[]>> {
+  const key = `${route}|${dir}|${ver}`;
   const hit = mileCache.get(key);
-  if (hit && Date.now() - hit.at < TTL) return hit.map;
+  if (hit && Date.now() - hit.at < TTL_GEOM_MS) return hit.map;
   const map = new Map<string, number[]>();
   try {
     const r = await pool.query(
@@ -108,13 +136,14 @@ async function getMiles(pool: Pool, route: string, dir: string): Promise<Map<str
   } catch (e) {
     console.warn("[progress] route_station_mileage 读取失败：", (e as Error).message);
   }
-  mileCache.set(key, { at: Date.now(), map });
+  if (map.size) mileCache.set(key, { at: Date.now(), map });
   return map;
 }
 
-async function getHops(pool: Pool, route: string): Promise<Map<string, number>> {
-  const hit = hopCache.get(route);
-  if (hit && Date.now() - hit.at < TTL) return hit.map;
+async function getHops(pool: Pool, route: string, ver: string): Promise<Map<string, number>> {
+  const key = `${route}|${ver}`;
+  const hit = hopCache.get(key);
+  if (hit && Date.now() - hit.at < TTL_HOP_MS) return hit.map;
   const map = new Map<string, number>();
   try {
     const r = await pool.query(
@@ -127,7 +156,7 @@ async function getHops(pool: Pool, route: string): Promise<Map<string, number>> 
   } catch (e) {
     console.warn("[progress] route_hop_stats 读取失败：", (e as Error).message);
   }
-  hopCache.set(route, { at: Date.now(), map });
+  if (map.size) hopCache.set(key, { at: Date.now(), map });
   return map;
 }
 
@@ -159,7 +188,13 @@ export async function attachProgress(
   vehicles: { lat: number; lng: number; status: string; interval: { from: { code: string }; to: { code: string } } | null; progress?: VehicleProgress }[],
 ): Promise<void> {
   if (!vehicles.length) return;
-  const [shape, miles, hops] = await Promise.all([getShape(pool, route, dir), getMiles(pool, route, dir), getHops(pool, route)]);
+  // ⚠️ 三者共用**同一个令牌**（否则 `p` 的分子分母会来自两个版本，见 `TTL_GEOM_MS` 上的契约说明）
+  const ver = await versionTokenOf(pool, route, dir);
+  const [shape, miles, hops] = await Promise.all([
+    getShape(pool, route, dir, ver),
+    getMiles(pool, route, dir, ver),
+    getHops(pool, route, ver),
+  ]);
   if (!shape || !miles.size || !hops.size) return;
 
   for (const v of vehicles) {
@@ -221,7 +256,13 @@ export async function locateSegmentOf(
   lat: number,
   lng: number,
 ): Promise<VehicleSegmentLocation | null> {
-  const [shape, miles, hops] = await Promise.all([getShape(pool, route, dir), getMiles(pool, route, dir), getHops(pool, route)]);
+  // ⚠️ 三者共用**同一个令牌**（否则 `p` 的分子分母会来自两个版本，见 `TTL_GEOM_MS` 上的契约说明）
+  const ver = await versionTokenOf(pool, route, dir);
+  const [shape, miles, hops] = await Promise.all([
+    getShape(pool, route, dir, ver),
+    getMiles(pool, route, dir, ver),
+    getHops(pool, route, ver),
+  ]);
   if (!shape || !miles.size || !hops.size) return null;
 
   const stations: { m: number; main: string }[] = [];

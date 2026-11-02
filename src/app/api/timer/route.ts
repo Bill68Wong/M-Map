@@ -3,7 +3,6 @@ import { getPool } from "@/lib/db";
 import { deriveRouteDir } from "@/lib/dsat/eta";
 
 /** 就近部署：Supabase 新加坡池化器 → sin1 */
-export const preferredRegion = "sin1";
 
 /** 座区取值白名单（与 src/lib/recommend/types.ts 的 SchoolZone 对齐） */
 const SCHOOL_ZONE_VALUES = ["B/C", "N/O", "R"];

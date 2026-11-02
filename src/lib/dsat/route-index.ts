@@ -154,3 +154,21 @@ export async function loadRouteIndex(pool: Pool, force = false): Promise<RouteIn
   g.__routeIndexCache = { ts: Date.now(), idx };
   return idx;
 }
+
+/**
+ * ★ v3.7.0（缓存专项）：观测用 —— 进程内站序索引的**年龄（秒）**。
+ *
+ * 为什么要暴露：站序缓存 300s，而「改了站序但没发版」会让旧站序持续服务到 TTL 结束。
+ * 有了这个读数，「旧站序枚举」一旦发生就可观测，不必改机制
+ * （一次部署会重建实例、`globalThis` 自然清空）。
+ *
+ * @returns 秒；**从未装载过 ⇒ `null`**（不返回 0 —— 0 会被读成「刚刚装载」）
+ */
+export function routeIndexAgeSecOf(nowMs: number = Date.now()): number | null {
+  const c = g.__routeIndexCache;
+  if (!c) return null;
+  return Math.max(0, Math.round((nowMs - c.ts) / 1000));
+}
+
+/** 站序索引的 TTL（秒）—— 供 `/api/health` 与文档对齐，避免两处数字漂移 */
+export const ROUTE_INDEX_TTL_SEC = CACHE_TTL_MS / 1000;

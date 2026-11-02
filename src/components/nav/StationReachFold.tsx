@@ -21,9 +21,12 @@ import type { RecommendCard } from "@/lib/recommend/types";
 
 export interface ReachFoldItem {
   route: string;
-  /** 实时报站文案（空串 = 无数据） */
+  /** 实时报站文案（空串 = **没有数据或还没查** —— 必须结合 `foldState` 才能说结论） */
   live: string;
 }
+
+/** 折叠栏查询状态（与 `useDetailBody.FoldState` 同构；此处单独声明避免展示层依赖数据层实现） */
+export type ReachFoldState = "idle" | "loading" | "loaded" | "failed";
 
 /** `POST /api/nav/switch-plans` 的 `plans[]` 子集（客户端消费） */
 interface SwitchPlanLite {
@@ -42,18 +45,43 @@ export default function StationReachFold({
   colors,
   switchCtx = null,
   onOpenCard,
+  /**
+   * ★ v3.7.0（C5）：折叠栏实时报站改为**展开时才查**（服务端首包不再查 DSAT，省 ~3s）。
+   *   `foldState` 是「能不能说没有班次」的唯一判据 —— 缺省 `idle`（未查询）；
+   *   若调用方漏传，宁可留空也不显示「暂无到站信息」（把"没查"说成"没有"是更糟的错误）。
+   */
+  foldState = "idle",
+  onLoadFold,
 }: {
   stationLabel: string;
   items: ReachFoldItem[];
   colors: Record<string, string>;
   switchCtx?: { card: RecommendCard; dest: { lng: number; lat: number; name?: string } } | null;
   onOpenCard?: (card: RecommendCard) => void;
+  foldState?: ReachFoldState;
+  onLoadFold?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [plans, setPlans] = useState<SwitchPlanLite[]>([]);
   const [planPhase, setPlanPhase] = useState<"idle" | "loading" | "ready" | "failed">("idle");
   const keyRef = useRef("");
   const seqRef = useRef(0);
+  /** 回调镜像：`onLoadFold` 每次渲染可能换引用，但不该因此重复触发取数 */
+  const onLoadFoldRef = useRef(onLoadFold);
+  onLoadFoldRef.current = onLoadFold;
+
+  /**
+   * ★ v3.7.0（C5）：**展开才请求**（按需的全部意义就在这）。
+   *
+   * 幂等放在数据层（`useDetailBody.loadFold` 内有"同卡只问一次"的守卫），
+   * 这里**不重复实现**：折叠→再展开会再调一次，但已被守卫吃掉，不会产生第二个请求。
+   * 这样换卡后（本组件的 `open` 若还开着）也不会被本地旧标记锁死。
+   * ⚠️ 不要挪到渲染期或折叠按钮 onClick 之外 —— 展开前预取就失去按需意义。
+   */
+  useEffect(() => {
+    if (!open) return;
+    onLoadFoldRef.current?.();
+  }, [open]);
 
   useEffect(() => {
     if (!open || !switchCtx) return;
@@ -103,6 +131,23 @@ export default function StationReachFold({
     const order = sortRouteOptions(items.map((it) => it.route).filter((r) => !planRoutes.has(r)));
     return order.map((r) => byRoute.get(r)!).filter(Boolean);
   }, [items, planRoutes]);
+
+  /**
+   * ★ v3.7.0（C5）：**三态渲染**（原来 `it.live || "暂无到站信息"` 会把"没查"说成"没有班次"）。
+   *
+   *   · 有文案            ⇒ 照常显示（时间提示一律保留）；
+   *   · `loading`         ⇒ 「正在获取…」（有反馈，不下结论）；
+   *   · `loaded` 且为空   ⇒ 这时候才**允许**说「暂无到站信息」（确实查过、确实没有）；
+   *   · `idle` / `failed` ⇒ **留空**（没查过 / 查失败 ⇒ 我们不知道，不编结论）。
+   *
+   * ⚠️ 判据是「查没查」(`foldState`)，不是「数据是否为空」—— 别退化回 `||`。
+   */
+  const liveTextOf = (live: string): string => {
+    if (live) return live;
+    if (foldState === "loading") return "正在获取…";
+    if (foldState === "loaded") return "暂无到站信息";
+    return "";
+  };
 
   if (!items.length) return null;
 
@@ -188,7 +233,8 @@ export default function StationReachFold({
               {restItems.map((it) => (
                 <div className="nav-fold-lrow" key={it.route}>
                   <RouteStack codes={[it.route]} colorOf={(c) => colors[c] ?? null} size="sm" />
-                  <span className="nav-fold-lrow__live">{it.live || "暂无到站信息"}</span>
+                  {/* ★ v3.7.0（C5）：三态由 `liveTextOf` 统一判定（未查询/失败 ⇒ 留空，不撒谎） */}
+                  <span className="nav-fold-lrow__live">{liveTextOf(it.live)}</span>
                 </div>
               ))}
             </>

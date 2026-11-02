@@ -22,7 +22,6 @@ import type { NavPoint } from "@/lib/nav/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 
 /** 线路码 → 主题色（供搜索结果/收藏的线路标签渲染，§11.6） */
 async function loadRouteColors(): Promise<Record<string, string>> {
@@ -46,6 +45,9 @@ export default async function Home({
   // ★ AC-16：自定义地图样式 ID（隐藏底图自带公交站点）；**空字符串 = 用默认样式（降级安全）**
   const mapStyleId = (process.env.AMAP_MAP_STYLE_ID ?? "").trim();
   const colors = await loadRouteColors();
+
+  // ★ v3.8.0 开屏动画已上移到根 `layout.tsx`（挂本页会让深链进内页/分享链接整页加载不播）。
+  //   本页不再参与开屏逻辑，也不读 cookie。
 
   // 地点对收藏回放：URL 带 `fromLng…&toLng…` → 预填起终点（进「可出发」态）
   const sp = await searchParams;

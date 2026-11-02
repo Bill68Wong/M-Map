@@ -38,7 +38,7 @@ import RouteResultPane from "./RouteResultPane";
 import { useRecommend, type PrefMode } from "./useRecommend";
 import { COOLDOWN_RECOMMEND_SEC, useCooldown } from "./useCooldown";
 import { useSnapSheet } from "./useSnapSheet";
-import type { DetailBody } from "./useDetailBody";
+import type { DetailBody, FoldState } from "./useDetailBody";
 import type { RideTrackView } from "./useRideTracking";
 import { DETENTS, detentIndex, type Detent } from "./sheet-detents";
 import type { FavoriteEndpoint } from "@/lib/favorites/types";
@@ -53,6 +53,13 @@ export interface RouteSheetDetail {
   /** 该详情当前在途车辆数（观测钩子 `data-live` 用） */
   vehicles: number;
   reload: () => void;
+  /**
+   * ★ v3.7.0（C5）：折叠栏「本站台其他线路」的实时报站改为**展开时才查**（首包省 ~3s）。
+   *   `foldState` = 三/四态判据（`idle/loading` 不得显示「暂无到站信息」）；
+   *   `onLoadFold` = 折叠栏首次展开时调用（幂等，宿主 `useRouteOverview` 透传）。
+   */
+  foldState?: FoldState;
+  onLoadFold?: () => void;
   /** ★ 2026-09-24：导航追踪态（宿主注入；缺省 = 静态详情） */
   track?: RideTrackView | null;
   /** ★ 目的地坐标（可切换方案查询用） */
@@ -145,7 +152,11 @@ export default function RouteSheet({
       : detail?.card?.rides?.[detail.track?.legIndex ?? 0]?.kind === "lrt"
         ? "lrt"
         : "bus";
-  /** 新鲜度（AC-24）：每秒重算「上次更新：N 秒前」 */
+  /**
+   * 新鲜度（AC-24）：每秒重算「上次更新：N 秒前」。
+   * ★ v3.7.0 S2（D5）：**只读 `lastVehicleTs`**（车辆帧专用）—— 旧字段被 GPS 帧污染，
+   *   车辆接口失败而 GPS 正常时会永远显示 0~3 秒（静默算错，不是崩溃）。
+   */
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     if (dTrack?.phase !== "riding") return;
@@ -153,7 +164,9 @@ export default function RouteSheet({
     return () => window.clearInterval(t);
   }, [dTrack?.phase]);
   const dFreshSec =
-    dTrack && dTrack.lastUpdateTs > 0 ? Math.max(0, Math.floor((nowMs - dTrack.lastUpdateTs) / 1000)) : null;
+    dTrack && dTrack.lastVehicleTs > 0
+      ? Math.max(0, Math.floor((nowMs - dTrack.lastVehicleTs) / 1000))
+      : null;
 
   /** 详情吸底操作条（挂面板根 `.route-sheet__actions-slot`） */
   const detailActions: ReactNode =
@@ -180,6 +193,11 @@ export default function RouteSheet({
         note={dTrack.note}
         freshSec={dFreshSec}
         justAlighted={dTrack.justAlighted}
+        /* ★ v3.7.0 S3：匹配态四件套（`data-board-match` / `data-match-source` / `data-match-pending` / 待确认车牌） */
+        boardMatch={dTrack.boardMatch}
+        matchSource={dTrack.matchSource}
+        matchPending={dTrack.matchPending}
+        pendingPlate={dTrack.pendingPlate}
         onStart={dTrack.onStart}
         onBoard={dTrack.onBoard}
         onAlight={dTrack.onAlight}
@@ -482,6 +500,9 @@ export default function RouteSheet({
               phase={detail.phase === "idle" ? "loading" : detail.phase}
               body={detail.body}
               reload={detail.reload}
+              /* ★ v3.7.0（C5）：折叠栏按需查询（三态判据 + 取数入口） */
+              foldState={detail.foldState}
+              onLoadFold={detail.onLoadFold}
               track={detail.track ?? null}
               destCoord={detail.destCoord ?? null}
               onSwitchCard={detail.onSwitchCard}

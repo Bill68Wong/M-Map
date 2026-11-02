@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
 
-export const preferredRegion = "sin1";
 
 /**
  * GET /api/free/rides —— 自由记站历史行程列表（v0.22.0，/free/history 页用）

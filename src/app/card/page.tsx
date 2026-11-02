@@ -21,7 +21,6 @@ import { parseCardQuery } from "@/lib/recommend/card-link";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 
 const labelOf = (slug: string) => PLACE_SHORT[slug] ?? slug;
 

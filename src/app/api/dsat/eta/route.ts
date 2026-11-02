@@ -14,7 +14,6 @@ import {
 } from "@/lib/amap/rate-limit";
 
 /** 就近部署：Supabase 新加坡池化器 → sin1 */
-export const preferredRegion = "sin1";
 
 /**
  * GET /api/dsat/eta?station=T358&routes=26,51A&dir=0&dest=C688[&force=1]

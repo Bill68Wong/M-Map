@@ -254,16 +254,27 @@ const g = globalThis as unknown as {
  *
  * 「不报错」恰恰是「一直没缓存」的证据 ⇒ 必须有**外部可探测**的状态，只打日志没人看。
  * 状态语义：
- *   `ok`               = payload ≤ 2MB，Data Cache 应正常写入
- *   `skipped-oversize` = payload > 2MB，生产会静默跳过（现状）
+ *   `ok`               = payload ≤ 1.8MB，Data Cache 正常写入且有裕量
+ *   `oversize-warning` = 1.8MB < payload ≤ 2MB ⇒ **快触顶**（v3.7.0 新增，见下）
+ *   `skipped-oversize` = payload > 2MB，生产会静默跳过（已超限）
  *   `error`            = Data Cache 层抛错（dev 超限 / incrementalCache 缺失），已回落直查
  *   `not-run`          = 本次进程还没装载过静态数据
+ *
+ * ★ v3.7.0（缓存专项 RL9）：新增 `oversize-warning` —— 只报「已经超了」是不够的。
+ *   现状实测约 1.20MB，但最大那张表占 76%：涨到约 3.8 万行就会再次触顶 2MB，然后**静默不写入**。
+ *   ⇒ 1.8MB 设预警线（≈1.5 倍当前体积），并打 `console.error`（**不是 warn**：
+ *     本项目已经吃过一次「只 warn ⇒ 三年没发现」的亏，warn 在这个仓库等于静音）。
  * ══════════════════════════════════════════════════════════════════════ */
 
 /** Next 单条缓存上限（2MB）——与 `incremental-cache` 的硬编码一致 */
 const DATA_CACHE_ITEM_LIMIT = 2 * 1024 * 1024;
+/**
+ * 体积预警线（1.8MB）。取值依据：当前实测 ≈1.20MB，最大表占 76% ⇒ 该表行数增长 50% 即触顶；
+ * 1.8MB 相当于「再涨 50%」的位置，留出一次发版周期的反应时间。
+ */
+const DATA_CACHE_WARN_BYTES = Math.round(1.8 * 1024 * 1024);
 /** 观测状态（外部经 /api/health GET 读取；不落库、不进客户端包） */
-export type StaticCacheStatus = "ok" | "skipped-oversize" | "error" | "not-run";
+export type StaticCacheStatus = "ok" | "oversize-warning" | "skipped-oversize" | "error" | "not-run";
 export interface StaticCacheObs {
   status: StaticCacheStatus;
   /** 按 Next 真实口径估算的 itemSize（body 先 stringify 再被外层 stringify，引号二次转义） */
@@ -357,8 +368,28 @@ async function loadStaticsUncached(): Promise<RecStatic> {
   // ⚠️ 体积估算在**cache-miss 路径**才执行（约每 60s 一次/实例），不在每请求路径。
   //    复刻 Next 的 2MB 判定口径（含 body 二次 stringify 的引号转义膨胀，实测系数 ≈1.19）。
   const sizeBytes = predictedItemSize(rows);
+  /**
+   * 状态优先级：已超限 > 回落 > 快超限 > 正常。
+   * `fallbackUsed` 排在预警前面：Data Cache 都没走通时，「体积快超了」不是当下要处理的问题。
+   */
+  const status: StaticCacheStatus =
+    sizeBytes > DATA_CACHE_ITEM_LIMIT
+      ? "skipped-oversize"
+      : fallbackUsed
+        ? "error"
+        : sizeBytes > DATA_CACHE_WARN_BYTES
+          ? "oversize-warning"
+          : "ok";
+  if (status === "skipped-oversize" || status === "oversize-warning") {
+    // ⚠️ 有意用 error 级别：warn 在本仓库等于静音（v3.6.1 之前「只 warn」导致缓存三年没写入）
+    console.error(
+      `[recommend/query] 静态数据体积${status === "skipped-oversize" ? "已超 2MB 上限（缓存不会写入）" : "接近 2MB 上限（预警）"}：` +
+        `${(sizeBytes / 1024 / 1024).toFixed(2)}MB / 上限 2.00MB · 预警线 1.80MB · ` +
+        `segmentStats=${rows.seg?.length ?? 0} 行`,
+    );
+  }
   g.__staticCacheObs = {
-    status: sizeBytes > DATA_CACHE_ITEM_LIMIT ? "skipped-oversize" : fallbackUsed ? "error" : "ok",
+    status,
     sizeBytes,
     limitBytes: DATA_CACHE_ITEM_LIMIT,
     fallbackUsed,

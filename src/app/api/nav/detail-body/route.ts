@@ -8,7 +8,11 @@
  *   且**用哪张卡就显示哪张**（planId 不参与定位，从根上消除「点 51 显示 56」）。
  *
  * ── 输入 / 输出 ────────────────────────────────────────────────────────
- *   输入：JSON `{ card: RecommendCard }`（结构同 `/api/nav` 响应的 cards[] 元素）
+ *   输入：JSON `{ card: RecommendCard, fold?: boolean }`（结构同 `/api/nav` 响应的 cards[] 元素）
+ *   ★ v3.7.0（C5）：`fold` 缺省 **false** ⇒ 不查 DSAT 报站（`foldLive` 恒 `{}`）。
+ *     需要折叠栏实时时显式传 `fold: true`（或 `?fold=1`，两种写法等价，兼容契约文档）。
+ *     理由：折叠栏默认折叠、用户看不见，却要 3.1s（`BUCKET_TIMEOUT_MS`）并挡在 route-shapes 前。
+ *   ⚠️ 响应结构**不变** ⇒ 老前端（不传 `fold`）拿到 `foldLive: {}` 也不会崩。
  *   输出：`{ ok, strips, otherRoutes, foldLive, stationLabel, legs }`
  *   · ★ 2026-09-23 改版：新增 `legs[]`（路线总览逐段几何锚点；契约见附录 A.1）——
  *     与 `card.rides` **一一对应、同序**，每段含线路主题色 + 上/下车站坐标（**GCJ-02**）。
@@ -44,7 +48,6 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 export const maxDuration = 30;
 
 /** 路线总览的逐段几何锚点（与 card.rides 一一对应、同序；见附录 A.1.2） */
@@ -162,7 +165,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const body = (await req.json()) as { card?: RecommendCard };
+    const body = (await req.json()) as { card?: RecommendCard; fold?: boolean };
     const card = body?.card;
     // 浅校验：必须有非空 rides，且逐条含 route / board / alight 字符串
     if (!card || !Array.isArray(card.rides) || !card.rides.length) {
@@ -180,6 +183,14 @@ export async function POST(req: Request) {
     }
 
     const pool = getPool();
+    /**
+     * ★ v3.7.0（C5）：「本站台其他线路」实时报站改为**按需**。
+     *   缺省 `false` ⇒ 不查 DSAT（`foldLive` 返回 `{}`），只有显式 `fold=true` /
+     *   `?fold=1` 才查 —— 折叠栏默认折叠，为不展示的内容付 3.1s 没有道理（01-技术调研 §2.1）。
+     *   ⚠️ 响应结构**不变**（`foldLive` 字段仍存在，值为 `{}`）⇒ 老前端不会崩。
+     */
+    const wantFold =
+      body?.fold === true || new URL(req.url).searchParams.get("fold") === "1";
     // ★ 静态索引与 leg 几何互相独立 ⇒ 并行（缩短 p95）；leg 内部查询也各自降级
     const [st, legs] = await Promise.all([loadStatics(pool), buildOverviewLegs(pool, card.rides)]);
     const nowMs = Date.now();
@@ -190,7 +201,7 @@ export async function POST(req: Request) {
       nameOf: st.routeIdx.nameOf,
       nowBucket,
     });
-    const fold = await foldDataOfCard(pool, st, card, nowMs);
+    const fold = await foldDataOfCard(pool, st, card, nowMs, { live: wantFold });
 
     return NextResponse.json(
       {

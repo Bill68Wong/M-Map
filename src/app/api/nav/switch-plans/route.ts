@@ -60,7 +60,6 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 export const maxDuration = 30;
 
 /** 内存缓存 TTL（毫秒）——同 `/api/station/eta` 口径 */

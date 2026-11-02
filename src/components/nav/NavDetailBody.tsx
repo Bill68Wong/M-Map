@@ -21,6 +21,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import NavStrip from "./NavStrip";
 import StationReachFold from "./StationReachFold";
+import type { FoldState } from "./useDetailBody";
 import RouteStack from "@/components/RouteStack";
 import { LrtEtaInline } from "@/components/LrtEta";
 import { catchHintOf, directionNameOf, EtaText, Row, TierBadge, macauClock } from "@/components/RoutePieces";
@@ -54,6 +55,13 @@ export interface NavDetailBodyProps {
   otherRoutes: string[];
   /** 其他线路实时报站文案（route → 文案） */
   foldLive: Record<string, string>;
+  /**
+   * ★ v3.7.0（C5）：折叠栏查询状态 —— **唯一**的「能不能说没有班次」的判据。
+   *   缺省 `"idle"`（= 未查询 ⇒ 不显示「暂无到站信息」），宁可留空也不撒谎。
+   */
+  foldState?: FoldState;
+  /** ★ v3.7.0（C5）：折叠栏首次展开时调用（按需取实时报站；幂等） */
+  onLoadFold?: () => void;
   /** 折叠栏站台显示名（null 时不渲染折叠栏） */
   stationLabel: string | null;
   /** 线路码 → 主题色 */
@@ -102,6 +110,9 @@ export default function NavDetailBody({
   strips,
   otherRoutes,
   foldLive,
+  /* ★ v3.7.0（C5）：折叠栏三态 —— 缺省 `idle`（未查询，不显示「暂无到站信息」） */
+  foldState = "idle",
+  onLoadFold,
   stationLabel,
   colors,
   destLabel,
@@ -124,7 +135,7 @@ export default function NavDetailBody({
   const [walkOpen, setWalkOpen] = useState<"out" | "in" | null>(null);
   const colorOf = (c: string) => colors[c] ?? null;
   const first = card.rides[0];
-  /** ★ v3.3.0（AC-107）：赶车提示（合并式）—— 后端 `catchHint` 优先、回落 `tierText` */
+  /** ★ v3.7.0 S4：只有真实时刻提示（`catchHint`）；速度档文案全站隐藏 */
   const firstHint = first ? catchHintOf(first) : { text: "", isHint: false };
   /** ★ v3.3.0（AC-102）：总览栏线路标签 = 与推荐卡同构的分段结构（含段内并行线） */
   const routeSegments = card.rides.map((r) => ({ codes: [r.route, ...(r.parallelRoutes ?? [])] }));
@@ -337,11 +348,9 @@ export default function NavDetailBody({
                 <EtaText text={first.liveText || `等 ${Math.round(first.waitMin)} 分`} />
               )
             }
-            /* ★ v3.3.0（AC-107）：赶车提示（合并式 TierBadge，同推荐卡槽位） */
+            /* ★ v3.7.0 S4：速度档文案全站隐藏；只在有真实时刻（`catchHint`）时渲染胶囊 */
             aside={
-              firstHint.text ? (
-                <TierBadge tier={first.tier} tierText={firstHint.text} catchHint={firstHint.isHint} />
-              ) : null
+              firstHint.text ? <TierBadge tierText={firstHint.text} catchHint={firstHint.isHint} /> : null
             }
           />
         )}
@@ -435,6 +444,9 @@ export default function NavDetailBody({
         <StationReachFold
           stationLabel={stationLabel}
           items={otherRoutes.map((r) => ({ route: r, live: foldLive[r] ?? "" }))}
+          /* ★ v3.7.0（C5）：展开时才查；`foldState` 决定空值该怎么表达 */
+          foldState={foldState}
+          onLoadFold={onLoadFold}
           colors={colors}
           switchCtx={
             destCoord ? { card, dest: { lng: destCoord.lng, lat: destCoord.lat, name: destLabel } } : null

@@ -14,7 +14,6 @@ import FavoritesClient from "@/components/favorites/FavoritesClient";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 
 export const metadata: Metadata = {
   title: "收藏",

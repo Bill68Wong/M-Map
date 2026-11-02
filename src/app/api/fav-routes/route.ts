@@ -32,7 +32,6 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
 export const maxDuration = 15;
 
 /** 允许的 OD slug（与前端 `endpointSlug` 口径一致） */

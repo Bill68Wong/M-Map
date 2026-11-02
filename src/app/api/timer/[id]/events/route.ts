@@ -4,7 +4,6 @@ import { timeBucketOf, type EventType } from "@/lib/timer-flow";
 import { deriveRouteDir } from "@/lib/dsat/eta";
 
 /** 就近部署：Supabase 新加坡池化器 → sin1 */
-export const preferredRegion = "sin1";
 
 const VALID_EVENTS: EventType[] = [
   "depart",

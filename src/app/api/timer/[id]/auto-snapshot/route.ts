@@ -3,7 +3,6 @@ import { getPool } from "@/lib/db";
 import { queryEta, nearestStopsAway } from "@/lib/dsat/eta";
 
 /** 就近部署：Supabase 新加坡池化器 → sin1 */
-export const preferredRegion = "sin1";
 
 /**
  * POST /api/timer/[id]/auto-snapshot
