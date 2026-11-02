@@ -43,13 +43,17 @@ export type PoiCallHook = (
   latencyMs: number,
 ) => void;
 
+/**
+ * ★ 2026-11-02：高德在澳门会把**无地址**的 POI 回成 `address: []`（实测「黑沙海滩草地」
+ *   「黑沙海滩烧烤区」等）；按字符串直接用会在前端 `.trim()` 处崩掉 ⇒ 类型如实声明为数组。
+ */
 export interface AmapTip {
   id?: string;
   name?: string;
   district?: string;
   adcode?: string;
   location?: string;
-  address?: string;
+  address?: string | string[];
   typecode?: string;
 }
 
@@ -59,7 +63,7 @@ export interface AmapPoi {
   district?: string;
   adcode?: string;
   location?: string;
-  address?: string;
+  address?: string | string[];
   typecode?: string;
   cityname?: string;
   adname?: string;
@@ -331,10 +335,23 @@ function poiCategoryBonus(typecode: string | undefined): number {
   return 0; // 交通设施（15x）、餐饮购物等，以及其它类别
 }
 
+/**
+ * 地址归一：高德 `address` 可能是字符串或字符串数组（澳门实测空结果为 `[]`）。
+ * 数组 ⇒ 用空格拼接；归一后为空 ⇒ `undefined`（前端按「无地址」处理，不显示地址行）。
+ */
+function addressOf(a: string | string[] | undefined): string | undefined {
+  if (typeof a === "string") return a.trim() || undefined;
+  if (Array.isArray(a)) {
+    const s = a.filter((x) => typeof x === "string").join(" ").trim();
+    return s || undefined;
+  }
+  return undefined;
+}
+
 function toResults(
   rows: {
     name?: string;
-    address?: string;
+    address?: string | string[];
     district?: string;
     adcode?: string;
     location?: string;
@@ -366,7 +383,7 @@ function toResults(
       r: {
         source: opts.source,
         name: r.name,
-        address: r.address,
+        address: addressOf(r.address),
         district: r.district,
         adcode: r.adcode,
         lng: ll.lng,
