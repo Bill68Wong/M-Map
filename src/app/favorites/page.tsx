@@ -5,7 +5,7 @@
  * ★ v3.3.0（ADR-104）：**系统预置组合清退** ⇒ 不再注入默认种子（`ComboSeeder` 已退役，`presets` 不再使用）；
  *   页壳因此恢复为「零 DB 依赖的纯壳」（原先为种子而做的配色 / 端点坐标查询一并删除）。
  * 挂**页级底部导航**（ADR-003：不挂全局布局）。
- * ⚠️ 本页必须在 `src/middleware.ts` 的公开白名单里（fail-closed，否则路人打不开）。
+ * ⚠️ 本页必须在 `src/proxy.ts` 的公开白名单里（fail-closed，否则路人打不开）。
  */
 import type { Metadata } from "next";
 import BottomNav from "@/components/BottomNav";

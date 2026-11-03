@@ -14,7 +14,7 @@
  *
  * 鉴权：Vercel Cron 请求带 `Authorization: Bearer $CRON_SECRET`。
  *   配了 CRON_SECRET → 必须匹配；未配 → 仅在非 production 放行（本地调试）。
- *   （middleware 已把本路径加入白名单，不走口令门，见 src/middleware.ts）
+ *   （middleware 已把本路径加入白名单，不走口令门，见 src/proxy.ts）
  *
  * 安全：重算本身幂等（清表后全量重算）；仍加内存锁避免重叠执行，
  *   并按顺序串行各步骤（都读 timer_events/segment_samples，串行避免连接竞争）。

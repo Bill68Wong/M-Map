@@ -52,7 +52,18 @@ import {
  * 具体含义见 route-policy.ts 的注释（PAGE_RETIRED / GONE_PREFIXES / SAME_ORIGIN_PREFIXES）。
  */
 
-export function middleware(req: NextRequest) {
+/**
+ * ⚠️ Next 16 起 `middleware` 文件约定被**弃用并改名为 `proxy`**（官方版本历史：
+ *   「v16.0.0 Middleware is deprecated and renamed to Proxy」）。本文件随之改名，
+ *   导出函数也由 `middleware` 改为 `proxy`。
+ *
+ *   运行时差异：`proxy` 固定跑 **Node.js runtime 且不可配置**（不再支持 edge）。
+ *   本文件只用到 `NextRequest` / `NextResponse` / `nextUrl` 与纯同步判定，
+ *   **不依赖任何 edge 专有能力** ⇒ 改名无行为风险。
+ *
+ *   `config.matcher` 语义不变，继续生效。
+ */
+export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // ── ① /nav、/nav/detail 已删除（功能并入首页全屏弹窗）→ 308 回首页 ──
