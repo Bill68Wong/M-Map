@@ -933,13 +933,45 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   const tryAuto = useCallback(() => {
     if (phase !== "boarding" || !active) return;
     /**
-     * ★ 一条导航流（T1）**互斥落地**：步行段活跃 ⇒ 绝不自动上车。
-     *   用户还在走去车站的路上，此时车到站/离站的判据全部无意义（人车分离的起点还没发生）。
-     *   `switchToRiding` 只被本函数（自动）与手动 `board` 调用 —— 手动是用户显式意图，不拦。
+     * ★ v3.10.0 修复「上车后才点开始导航 ⇒ 卡步行段」（负责人反馈）。
+     *
+     * ── 旧版为什么会死锁（`if (walkActiveRef.current) return;`）──────────────
+     *   v3.8.0 T1 把会话起点从「站在站台按开始导航」提前到「出门就开始走」⇒
+     *   用户**在车上**点开始时也会先进入步行出发段（`walkSeg="out"`）。
+     *   旧版此处硬封 ⇒ `autoBoardOf`（内含 `r2Of` 的速度判定）**永不执行**；
+     *   而清步行段的唯一出口是 `walkFollow.phase === "arrived"`
+     *   （`arrived(remainM)` = 沿步行路径走到终点 30m 内）⇒
+     *   用户在车上不沿步行路径走 ⇒ 永不 arrived ⇒ 死锁：
+     *   永远是步行段 + 横幅「已偏离路线 N 米」（提示正确但无用：用户不该走）。
+     *
+     * ── 放开后为何不会误判**步行**用户（三条同向收紧）────────────────────────
+     *   ① **速度门 8 km/h** 是「步行 / 车速」的契约分界（`R2_SPEED_MIN_KMH_FLEX`，
+     *      架构已双向实测：5.5 会把快走判成已上车，故取 8）——
+     *      正常步行 5~6、快走 6~7 全部 < 8，`r2Of` 直接不命中；
+     *   ② **位移门 60m** 使短时跑动无法命中：10 km/h 需连续沿线跑 21.6s、8 km/h 需 27s；
+     *   ③ **步行段再扣 2 帧**（下方 `need + 2`）：把「跑步赶车」这类真实
+     *      边缘场景所需持续时长再拉长约 3s。
+     *   ⇒ 仅「持续高速沿线路移动」（= 在车上）能命中。
+     *
+     * ── 与 v3.8.1「步行段降频轮询」不冲突 ─────────────────────────────────
+     *   那条改的是**拉车辆帧**的间隔（`schedule(walkActive ? POLL_MS*5 : 0)`），
+     *   本条改的是**上车判定的准入**，两者独立。
      */
-    if (walkActiveRef.current) return;
     const leg = legs[legIndex];
     if (!leg) return;
+    /**
+     * ⚠️ **时序假设（打包器/HMR 变更时重点复核）**：本函数是**纯查询 + 分支**，不写 state、
+     *   不发请求；它依赖的是「被谁按什么顺序调用」，而不是自身内部顺序：
+     *   ① 调用点只有两个 —— `userFix` 变化（3s 一帧）与候车轮询 `round()` 之后；
+     *      两者都发生在 **React commit 之后**的 effect 里，因此读到的 `fixesRef.current` /
+     *      `listRef.current` 是本轮已更新的值（ref 不受渲染时序影响）。
+     *   ② `boardStreakRef.current` 的**跨帧累积**依赖"每帧恰好调用一次" ——
+     *      若某次渲染周期内 tryAuto 被调用两次（HMR 重放 / StrictMode 双调用），
+     *      streak 会**多加一次**，判定提前 1 帧（比漏判更危险的方向）。
+     *   ③ 本函数在 `phase !== "boarding"` 时立即返回，因此 `switchToRiding` 后不会重入。
+     *   ⇒ 升级后验证点：真机上连续 30s 导航，观察 `data-board-match` 是否在
+     *     预期帧数（而非提前 1~2 帧）跳到 `auto`。
+     */
     const boardMain = stopsBoard(strips, legIndex) || mainOf(anchors?.[legIndex]?.board?.code ?? "");
     const res = autoBoardOf({
       legKind: leg.kind,
@@ -958,7 +990,20 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     //   **删除**旧版 `res.reason === "r1"` 特权分支 —— 车辆信号不得单独触发上车。
     boardStreakRef.current = res.streak;
     if (!res.hit) return;
-    if (res.streak >= res.need) {
+    /**
+     * ★ v3.10.0：**步行段加严 2 帧**（详见函数头 ③）。
+     *
+     * 为什么是 2 而不是 1（实测数据，理想直线 + 完美精度的下界）：
+     *   加严 1 帧只把所有触发统一延后 3s，「跑 10 km/h 跑 24s 后站着等车」仍在 30s 误判；
+     *   加严 2 帧使该场景**不触发**（停下后平均速度跌回 8 以下），
+     *   而真实乘车只慢一档：公交 20 km/h 18s→24s、30 km/h 15s→21s、堵车 12 km/h 24s→30s。
+     *   ⇒ 用"公交切换慢 6s"换掉一档常见误判（10 km/h 跑 24s 正是典型赶车强度），划算。
+     *   剩余唯一误判 = 12 km/h 连续跑 24s（约 80m 冲刺），属极端场景，由「我没上车」兜底。
+     *
+     * ⚠️ 清段后（`walkActive=false`）恢复原门槛，不影响站台候车的既有灵敏度。
+     */
+    const need = res.need + (walkActiveRef.current ? 2 : 0);
+    if (res.streak >= need) {
       switchToRiding(res.plate, res.source);
     }
   }, [phase, active, legs, legIndex, strips, anchors, boardPos, switchToRiding]);
@@ -1105,7 +1150,23 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
    * · 同样接回前台/网络恢复补刷，也同样做「同一时刻只允许一帧在飞」。
    */
   useEffect(() => {
-    if (!matchOnRef.current || phase !== "riding" || plate || !active) return;
+    /**
+     * ★ v3.10.0：**「供数据」与「跑匹配」解耦**。
+     *
+     * 旧守卫是 `if (!matchOnRef.current || ...) return;` ⇒ 关闭匹配时整条轮询不跑，
+     * 于是 **riding 且无牌** 时会话完全没有车辆请求（另一条有牌轮询因 `!plate` 也不跑）
+     * ⇒ `listLiteRef` 停在步行段最后一帧 ⇒ `mapVehicles` 返回**过期坐标**
+     * （车冻结在旧位置，比"没有车"更误导）。
+     *
+     * 现在：无牌 riding 一律轮询 —— 目的只是让 `listLiteRef` 持续更新（地图车能动）。
+     * **匹配算法仍受 `MATCH_VEHICLE_ENABLED` 控制**：`fetchFrame` 内部
+     * `if (phase === "riding") { if (!matchOnRef.current) return; }` 已经挡在算之前，
+     * 且该 `return` 发生在 `listLiteRef.current = lites` **之后** ⇒ 数据已更新、匹配未跑。
+     *
+     * ⚠️ 代价（负责人已批准）：打破「关闭匹配时不多发请求」的既有约定 ——
+     *    请求量与"开着匹配"时相同（同线路同方向，12s 一帧）。换来的是地图车不再冻结。
+     */
+    if (phase !== "riding" || plate || !active) return;
     let cancelled = false;
     let timer: number | null = null;
     let inFlight = false;

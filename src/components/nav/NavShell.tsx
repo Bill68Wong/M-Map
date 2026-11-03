@@ -587,6 +587,39 @@ export default function NavShell({
   }, []);
 
   /**
+   * ★ v3.10.0：**进入 riding 后必须清掉「出发段」步行**（`walkSeg === "out"`）。
+   *
+   * ── 为什么需要这条（补的是既有结构性漏洞）────────────────────────────────
+   *   `startSession` 里有一个**反向 gate**：`if (ridePhaseNow === "riding") return;`
+   *   —— 它只防"再次进入步行段"，防不住"已经并存的残留"。
+   *   而 `switchToRiding` 只切 `phase`，**不碰 `walkSeg`**（那是本文件的 state）。
+   *   ⇒ 一旦上车判定在步行段内成功（v3.10.0 解除硬封后这成为可能；手动点
+   *     「手动标记上车」也一样），就会出现「riding + 步行横幅并存」：
+   *     横幅让用户"下车走"，而车正在开 —— 正是本文件 `startSession` 注释里记的
+   *     "车上又开始步行"老问题，只是入口从"再点开始步行"变成了"自动判定成功"。
+   *
+   * ── 为什么只清 `"out"` 不清 `"in"` ─────────────────────────────────────
+   *   末段步行（`"in"`）是 `ride.phase === "done"` 之后才由 `:697` 进入的，
+   *   与 riding 不可能并存；无条件清 null 反而会误杀。
+   *
+   * 顺带解决 team-lead 关心的**次生损害**：死锁期间偏航会自动烧掉"本段唯一一次
+   * 自动重算额度"（`:663-671`）。本 effect 在判定成功的第一时间就 `endWalk()`
+   * ⇒ `autoRecalcRef` 归零 + 偏航横幅卸载 ⇒ 不会再为一段"本不该走的路"烧额度。
+   *
+   * ⚠️ **时序假设（打包器/HMR 变更时重点复核）**：本 effect 依赖
+   *   「`ride.phase` 从 `boarding` 变 `riding` 的那次 commit 之后，`walkSeg` 仍是 `"out"`」
+   *   —— 即两个 state 分属不同组件（`useRideTracking` / 本文件），它们的更新会被 React
+   *   在**同一次或相邻两次** commit 里刷新。若打包器/HMR 导致顺序变化，本 effect 仍会
+   *   在最终状态稳定后的某次 commit 被触发（依赖数组含两者）⇒ 幂等、不会漏。
+   *   ⇒ 升级后验证点：车上点「开始导航」，确认切换后**没有**步行横幅残留。
+   */
+  useEffect(() => {
+    if (ride.phase !== "riding") return;
+    if (walkSeg !== "out") return;
+    endWalk();
+  }, [ride.phase, walkSeg, endWalk]);
+
+  /**
    * ★ T1：**开始/推进一条导航会话**（唯一入口语义）。
    *   · `seg="out"` ⇒ 冻结起点 + 乘车引擎进 boarding + 立刻进入步行出发段（顶栏直接出行走指令，
    *     用户不必再点一次「开始步行」）；
