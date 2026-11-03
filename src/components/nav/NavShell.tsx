@@ -609,6 +609,37 @@ export default function NavShell({
   }, []);
 
   /**
+   * ★ 本批（QA 钩子 · 负责人已批准）：**跳过步行段**的自动化入口。
+   *
+   * ── 为什么需要 ──────────────────────────────────────────────────────────
+   *   步行段给 `RouteSheet` 传的是 `track: walkActive ? null : trackView`（见下方渲染处）
+   *   ⇒ `NavTrackBar` 不挂载 ⇒ 自动化若要「等 `data-nav-phase=boarding` 出现」，
+   *   在步行段内**必然超时**。该现象已定性为**非回归**（版本溯源见 `c93e849` / `0e50f81`）。
+   *   本钩子让 e2e 主动收掉步行段，从而真正跑到乘车态去验断言。
+   *
+   * ── 纪律（四条，缺一不可）──────────────────────────────────────────────
+   *   ① **仅非生产**：`process.env.NODE_ENV` 在 Next 构建期被内联 ⇒ 生产包里这段是死代码
+   *      （同款先例：`src/lib/security/internal-token.ts:27`、`src/app/api/cron/rebuild/route.ts:64`）；
+   *   ② **不整体覆盖 `window.__qa`**：用展开合并，避免踩掉别人挂的键；
+   *   ③ **卸载即摘键**：只删自己那一项，其余原样保留；
+   *   ④ **不改任何产品行为**：唯一效果是把**已有**的 `endWalk` 暴露出去，注册/注销零副作用。
+   *
+   * ⚠️ 不要在这里做「模拟到达目的地」之类的副作用 —— 钩子只做跳段，判定一律交给真实引擎。
+   */
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    const w = window as unknown as { __qa?: Record<string, unknown> };
+    w.__qa = { ...(w.__qa ?? {}), forceWalkArrived: endWalk };
+    return () => {
+      const cur = w.__qa;
+      if (!cur) return;
+      const next = { ...cur };
+      delete next.forceWalkArrived;
+      w.__qa = next;
+    };
+  }, [endWalk]);
+
+  /**
    * ★ v3.10.0：**进入 riding 后必须清掉「出发段」步行**（`walkSeg === "out"`）。
    *
    * ── 为什么需要这条（补的是既有结构性漏洞）────────────────────────────────
