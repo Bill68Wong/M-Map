@@ -22,7 +22,7 @@ import nextTs from "eslint-config-next/typescript";
 const FILES = ["**/*.{js,jsx,mjs,ts,tsx,mts,cts}"];
 
 /**
- * ── 为什么关掉 14 条 React Compiler 规则（保留经典两条）────────────────
+ * ── 为什么关掉 13 条 React Compiler 规则（另 1 条保留 + 经典两条保留）──
  *   `eslint-plugin-react-hooks@7`（Next 16 连带升级 5.2.0 → 7.1.1）把 `recommended`
  *   从「2 条经典规则」扩成「2 条经典 + 14 条 React Compiler 规则」，且 compiler 规则
  *   **默认是 error**。
@@ -42,14 +42,21 @@ const FILES = ["**/*.{js,jsx,mjs,ts,tsx,mts,cts}"];
  *   关闭后实测：**0 error / 0 warning** ⇒ 现有代码在 `rules-of-hooks` 与
  *   `exhaustive-deps` 两条经典规则上是干净的，这两条继续守着。
  *
+ *   **例外**：`react-hooks/static-components` 保留为 `error` —— 它是唯一在本仓
+ *   抓到**真缺陷**的一条（`TimerWizard` 的 `ZoneLocked` 定义在 render 内并以
+ *   `<ZoneLocked />` 挂载 ⇒ 每次渲染都重建组件类型、子树状态被重置）。该处已修复
+ *   （提升到模块级），全仓实测在此规则下 0 违规，故继续用它守着。
+ *
  *   ⚠️ 不要为了"少几行"删掉这个块：删掉即恢复 97 条 error，`npm run lint` 直接红。
  */
 const reactCompilerRulesOff = {
   name: "local/react-compiler-rules-off",
   files: FILES,
   rules: {
-    // 以下 14 条为 React Compiler 规则（v7 新增），统一关闭
-    "react-hooks/static-components": "off",
+    // 以下 13 条为 React Compiler 规则（v7 新增），评估后关闭（理由见上方块注释）
+    // ↑ 唯一保留开启的 compiler 规则：它在升级实测中抓到真问题（TimerWizard 的
+    //   `ZoneLocked` 定义在 render 内），已在 commit 中提升到模块级修复。
+    "react-hooks/static-components": "error",
     "react-hooks/use-memo": "off",
     "react-hooks/preserve-manual-memoization": "off",
     "react-hooks/incompatible-library": "off",
