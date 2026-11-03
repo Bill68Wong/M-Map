@@ -121,6 +121,22 @@ export default function NavTrackBar(props: NavTrackBarProps) {
   } = props;
 
   const isRiding = phase === "riding";
+  /**
+   * ★ v3.10.0：**自动判定进入 riding ⇒ 纠错入口用「我没上车」（而非「不是这辆」）**。
+   *
+   * 背景：v3.10.0 解除了步行段的上车判定硬封，用户在车上点「开始导航」时会由速度判定
+   * 自动切入 riding。该判定可能因「沿公交线路跑步/骑行」误判（负责人已知悉并接受，
+   * 条件是有回退入口）。
+   *
+   * 用 `boardMatch === "auto"` 作为判据是**精确**的，不是近似：
+   *   · `switchToRiding`（自动路径）⇒ `setBoardMatch("auto")`；
+   *   · 手动 `board()`（bus 且有候选车）⇒ 显式覆盖为 `"manual"` + `setAutoSwitched(false)`；
+   *   ⇒ `"auto"` ⟺ 「本次 riding 由系统自动判定」。
+   *
+   * 语义上也更对：自动判定被否定时，用户要表达的是"这不是我上的车（整段判定作废）"
+   * → `onNotBoard` 回等车；而"不是这辆（换候选）"只对手动选车有意义。
+   */
+  const correctAuto = anomaly !== "none" || boardMatch === "auto";
   /** AC-23：来源标注仅「乘车中」显示两态（实时定位 / 依据车辆位置）；手动纠正后含「手动」 */
   const sourceTag = isRiding ? SOURCE_LABEL[source] : null;
 
@@ -243,12 +259,13 @@ export default function NavTrackBar(props: NavTrackBarProps) {
               </button>
             ) : (
               !lrt && (
+                /* ★ v3.10.0：`correctAuto` 见组件顶部派生（自动判定进入 ⇒ 「我没上车」） */
                 <button
                   type="button"
                   className={`btn btn--text btn--sm${anomaly !== "none" ? " is-emph" : ""}`}
-                  onClick={anomaly !== "none" ? onNotBoard : onRepick}
+                  onClick={correctAuto ? onNotBoard : onRepick}
                 >
-                  {anomaly === "not_boarded" ? "我没上车" : "不是这辆"}
+                  {correctAuto ? "我没上车" : "不是这辆"}
                 </button>
               )
             )}
