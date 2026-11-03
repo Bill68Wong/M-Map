@@ -65,6 +65,7 @@ import { queryOf } from "./StepSheet";
 import { useRouteVehicles } from "./useRouteVehicles";
 import { useRouteOverview } from "./useRouteOverview";
 import { useRideTracking, type RidePhase, type RideTrackView } from "./useRideTracking";
+import { useNavRemaining } from "./useNavRemaining";
 import { useUserFix } from "./useUserFix";
 import { useNavFrame } from "./useNavFrame";
 /* ★ 步行路径重算的防连点冷却（现成常量，勿新写数字） */
@@ -406,6 +407,27 @@ export default function NavShell({
   useEffect(() => {
     setRidePhase(ride.phase);
   }, [ride.phase]);
+
+  /**
+   * ★ 2026-11-03（需求 1）：**剩余行程服务端重算通道**（顶部总时长 / 到达时刻 / 纵条 同源）。
+   *
+   * 触发方式 = 「车辆帧到达时随取」+「用户点刷新时随取」，**不做独立轮询**：
+   *   · `frameTs` 传 `ride.lastVehicleTs`（每成功一帧车辆数据变一次，`POLL_MS = 12_000`）
+   *     ⇒ 天然搭在既有节拍上，零新增定时器；
+   *   · 该端点走本地静态索引（亚毫秒、不打 DSAT）⇒ 这个频率成本可忽略。
+   *
+   * ⚠️ 与 `ov.reload()` 是**两条独立通道**：本通道只 merge 数据、不置 `loading`，
+   *   因此不会让 `useRouteOverview` 清 `legs`/`box`（否则地图彩段重画、取景被放弃）。
+   */
+  const navRemain = useNavRemaining({
+    card: pane === "detail" ? detailCard?.card ?? null : null,
+    open: rsOpen && pane === "detail",
+    phase: ride.phase,
+    legIndex: ride.legIndex,
+    segRemainSec: ride.segProgress?.segRemainSec ?? null,
+    nextIdx: ride.prog?.nextIdx ?? null,
+    frameTs: ride.lastVehicleTs,
+  });
 
   /* ══════════════════════════════════════════════════════════════════════
      ★ T1 · 一条导航流（步行出发段 → 乘车 → 步行到达段）
@@ -1353,6 +1375,17 @@ export default function NavShell({
                 track: walkActive ? null : trackView,
                 destCoord: { lng: to.lng, lat: to.lat },
                 onSwitchCard: openDetail,
+                /**
+                 * ★ 2026-11-03（需求 1）：**服务端重算的剩余行程**。
+                 *   · `liveRemain` ⇒ 顶部总时长 / 到达时刻 / peek 摘要（①②⑧ 同源）；
+                 *   · `liveStrips` ⇒ **整份替换**纵条（不上补丁）⇒ 与顶部同源，整屏一致；
+                 *   · `reloadRemain` ⇒ 用户点刷新时随取一次（与车辆帧随取同一条通道）。
+                 *   ⚠️ `liveStrips` 只替换纵条，`body.legs`（地图几何）一个字节都不动。
+                 */
+                liveRemain: navRemain.liveRemain,
+                liveStrips: navRemain.liveStrips,
+                liveRemainFail: navRemain.lastFail,
+                reloadRemain: navRemain.refresh,
               }
             : null
         }

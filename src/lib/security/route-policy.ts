@@ -41,6 +41,26 @@ export const GONE_PREFIXES = ["/api/timer", "/api/free"] as const;
  */
 export const SAME_ORIGIN_PREFIXES = ["/api/fav-routes"] as const;
 
+/**
+ * ④ **在 handler 内自做同源校验**的写接口（`isSameOrigin()` 直接在 route 里调，不经中间件）。
+ *
+ * 为什么单独记一份而不是并进 `SAME_ORIGIN_PREFIXES`：中间件那条规则会**额外**要求
+ * `acquireToken()` 两件套（AC-50 A4）。而下列端点是**纯计算、0 外部调用**，
+ * 加一次令牌桶事务等于给亚毫秒端点凭空挂上约 230ms 的 DB 往返（实测值见
+ * `dsat/client.ts:45`）⇒ 属净负收益。它们只需要「挡住别的网站替用户发请求」。
+ *
+ * ⚠️ **本常量是「登记/文档」，刻意不被任何代码消费**（`proxy.ts` 不读它、
+ *    `check-api-guards.ts` 也不读它 —— 后者靠扫描 handler 内是否出现
+ *    `isSameOrigin(` 之类的调用点来判定，见 `GUARD_CALLS`）。
+ *    刻意不消费的理由：一旦让门禁读它，就等于给这些路径开了一条「声明即豁免」的洞；
+ *    而现状是门禁**逐个 handler 验证真调用**，更严。新增路径请同步更新本清单，
+ *    否则「登记」会与实际分叉（这份清单的唯一价值就是让人能一眼看全）。
+ */
+export const HANDLER_SAME_ORIGIN_PATHS = [
+  /** 需求1 / 1-B′：导航中重算剩余时间（只读静态索引 + 内存计算，0 DSAT / 0 高德） */
+  "/api/nav/remaining",
+] as const;
+
 /** 会改数据的 HTTP 方法（只有这些需要同源校验；GET 保持公开只读） */
 export const WRITE_METHODS = ["POST", "PUT", "PATCH", "DELETE"] as const;
 
@@ -55,12 +75,25 @@ export function underPrefix(pathname: string, prefixes: readonly string[]): bool
   return prefixes.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 }
 
-/**
- * 该路径是否属于「已被策略覆盖的写接口」——供门禁脚本判定覆盖率。
+/* ══════════════════════════════════════════════════════════════════════════
+ * ⚠️ 已删除：`coveredByPolicy(pathname)`（2026-11-03，需求1 · 1-B′ 收尾）
  *
- * 注意：这里只回答「是否在已知策略集合内」，**不**代表该接口真有防护实现。
- * 真正的防护校验（令牌 / 限流调用）由 `scripts/check-api-guards.ts` 逐个文件扫描。
- */
-export function coveredByPolicy(pathname: string): boolean {
-  return underPrefix(pathname, GONE_PREFIXES) || underPrefix(pathname, SAME_ORIGIN_PREFIXES);
-}
+ * 它曾导出 `underPrefix(GONE_PREFIXES) || underPrefix(SAME_ORIGIN_PREFIXES)`，
+ * 注释写「供门禁脚本判定覆盖率」—— 但**从 v3.6.0 S2 引入起就零消费方**（出生即死代码），
+ * 且在本文件新增 `HANDLER_SAME_ORIGIN_PATHS` 后，它的语义已与设计意图**不一致**
+ * （对 `/api/nav/remaining` 返回 false，而该路径**确实**已被策略覆盖 —— 只是覆盖在
+ * handler 内而非中间件）。
+ *
+ * ── 为什么是「删」而不是「补上画像 ④」────────────────────────────────
+ *   补上会让它返回 true。一旦将来有人把它接进 `check-api-guards.ts` 当「已覆盖」判据，
+ *   门禁就会**跳过 `GUARD_CALLS` 的调用点扫描** ⇒ 产出**假绿**（"已覆盖"但实际没防护）。
+ *   这比它现在"误报未覆盖"更危险：误报会让人多查一遍，假绿会让人**永远不再查**。
+ *   ⇒ 一个函数如果需要"用之前先读三段注释才安全"，它就不该存在。
+ *
+ * ── 将来若真需要"策略覆盖查询"（不是门禁通过判据）────────────────────
+ *   请**按层级**返回，不要压成一个 boolean：
+ *     `coverageOf(pathname): { middleware: boolean; handler: boolean }`
+ *   并把「门禁是否通过」留给 `GUARD_CALLS` 的**实际调用点扫描** —— 那才是唯一可信判据
+ *   （见本文件 `HANDLER_SAME_ORIGIN_PATHS` 注释与 `check-api-guards.ts` 规则 ③）。
+ *   压成 boolean 必然再次丢掉"覆盖在哪一层"这个关键信息，也就是这次出问题的根源。
+ * ══════════════════════════════════════════════════════════════════════════ */

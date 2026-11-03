@@ -19,6 +19,13 @@
  * ── 阈值（Spec §5 锁定）────────────────────────────────────────────────
  *   · 车辆 stale：**30s**（约束：> 2×`POLL_MS`=24s 且 ≤90s，否则正常抖动会误报）
  *   · 定位 stale：**30s**；精度门 150m（与 `boarding-detect.R2_FIX_MAX_ACC_M` 同口径）
+ *
+ * ── ★ 需求5（2026-11-03）新增（本模块的第二职责：**新鲜度判定内核**）──────
+ *   · `ROUND_TRIP_STALE_MS` / `shouldForceRefresh()` —— 墙钟哨兵阈值与判定（L2）；
+ *   · `INFLIGHT_LEASE_MS` / `inflightGate()`        —— 「请求在飞」的租约制自愈门（L3）；
+ *   · `registerVehSentinel(fn)`                     —— 把哨兵挂在**本模块既有的 1s 心跳**上。
+ *   为什么放这里：这三件事的语义都是「这份观测数据还新鲜吗」，与 `data-veh` 的
+ *   `stale` 判定同源同阈值；放这里可以断言「全仓只有一个 1s 定时器」（哨兵**不新建定时器**）。
  */
 
 /** 定位轴状态（契约 6 值；`low_acc` 与 `stale` 正交，同时发生时 `low_acc` 优先） */
@@ -113,6 +120,11 @@ const VEH_CIRCUIT_MS = 60_000;
 let touched = false;
 let ticker: number | null = null;
 let holders = 0;
+/**
+ * ★ 需求5 L2：墙钟哨兵回调（由 `useRideTracking` 注册；`null` = 当前没有导航态在跑）。
+ *   心跳每次 tick 调一次 —— 本模块只负责「每秒问一次」，判定与补刷入口都在注册方。
+ */
+let sentinel: (() => void) | null = null;
 
 /** 优先级：熔断 open（窗口内）> 请求失败 failed > 超时未更新 stale > fresh */
 function vehStateOf(ageSec: number): VehState {
@@ -164,6 +176,108 @@ export function noteVehFail(circuitOpen = false): void {
 
 function tickVeh(): void {
   publishVeh();
+  /**
+   * ★ 需求5 L2（2026-11-03）：**墙钟哨兵**。
+   *
+   * ── 为什么必须长在心跳里 ─────────────────────────────────────────────
+   *   事件矩阵（L1）在两种情况下必然失效：① 某容器连 `resume` 都不发（OEM 省电 / WebView 壳）；
+   *   ② 事件迟到 14s（trace 实证）。哨兵是**唯一不依赖任何事件**的一层。
+   *   它自己也会被 freeze 冻住 —— 它的价值不是"冻结期间发现"，而是
+   *   **解冻后第一次 tick 立刻发现缺口**（判定写「现在 vs 上一帧」，不写「连续 N 次无变化」）。
+   *
+   * ── 为什么复用本心跳而**不新建定时器** ───────────────────────────────
+   *   本心跳本来就每秒跑（`VEH_TICK_MS`），无新增 CPU / 功耗；且它已被导航态持有
+   *   （`useRideTracking`）。新增一个 5s 定时器只会多一处需要自己证明"不会泄漏"的地方。
+   *
+   * ⚠️ **锚点绝不能用 `lastVehTs`**：它只在帧内容变化时才前移（见 `noteVehFrame`），
+   *   车没动、`fetchedAt` 不变时它不前进 ⇒ 会把「数据没变」误判成「数据过期」，
+   *   每 30s 白刷一次。锚点由注册方（`useRideTracking`）自己持有 —— 那是
+   *   `fetchFrame` 里**无条件**写的时间戳（上一次**成功往返**的时刻），与内容无关。
+   */
+  try {
+    sentinel?.();
+  } catch {
+    /* 哨兵失败不得影响观测心跳与 `data-veh` */
+  }
+}
+
+/* ══════════ 需求5 · L2 墙钟哨兵 + L3 请求自愈门（判定内核，纯函数） ══════════ */
+
+/**
+ * 「距上一次**成功往返**多久算过期」（ms）—— 哨兵阈值。
+ *
+ * 取值理由：必须 **> 2×`POLL_MS`（24s）**，否则正常轮询的抖动（一次慢请求 + 一次调度）
+ * 就会误触发补刷；30s 与观测契约 `VEH_STALE_SEC` 同值，读一个数就能对上「数据已过期」。
+ */
+export const ROUND_TRIP_STALE_MS = VEH_STALE_SEC * 1_000;
+
+/**
+ * 「请求在飞」的租约时长（ms）—— 超时即视为**泄漏**并强制放行。
+ *
+ * 为什么需要：`inFlight` 布尔在 freeze 场景下会永久 `true` —— `finally` 因整页冻结没执行，
+ * 而解冻后第一个到达的补刷请求会被它当场吞掉 ⇒ 之后再无事件 ⇒ 永久冻结。
+ * 时间戳口径把「布尔」变成「有期限的租约」，到点自愈。
+ * 取 15s：`AbortSignal.timeout(8000)` 会在 8s 结束请求，15s 给了「超时 + 一次重试」的余量。
+ */
+export const INFLIGHT_LEASE_MS = 15_000;
+
+/**
+ * 哨兵判定（纯函数，可单测）。
+ *
+ * @param lastFrameAt 上一次**成功往返**的时刻（ms）。**`0` = 本次会话从未成功** ⇒ 必须
+ *   立即算「过期」，不能因为是 0 就一直等（那等于"从没成功过就永远不重试"）。
+ * @param lastKickAt  上一次哨兵补刷的时刻（ms，0 = 还没补刷过）—— 用于抑制风暴。
+ * @param debounceMs  两次补刷之间的最小间隔（缺省 2s，与 `RESUME_DEBOUNCE_MS` 同值）。
+ * @returns `stale` = 该补刷；`fresh` = 刚往返过；`debounced` = 过期但刚补过（等下一次）。
+ */
+export function shouldForceRefresh(o: {
+  lastFrameAt: number;
+  nowMs: number;
+  staleMs?: number;
+  lastKickAt?: number;
+  debounceMs?: number;
+}): "stale" | "fresh" | "debounced" {
+  const staleMs = o.staleMs ?? ROUND_TRIP_STALE_MS;
+  const debounceMs = o.debounceMs ?? 2_000;
+  const gap = o.lastFrameAt > 0 ? o.nowMs - o.lastFrameAt : Number.POSITIVE_INFINITY;
+  if (gap <= staleMs) return "fresh";
+  const kickAt = o.lastKickAt ?? 0;
+  if (kickAt > 0 && o.nowMs - kickAt < debounceMs) return "debounced";
+  return "stale";
+}
+
+/**
+ * 请求自愈门（纯函数，可单测）—— 三个轮询 effect 共用同一套语义。
+ *
+ * @param inflightSince 进入请求的时刻（ms）；**`0` = 空闲**。
+ * @returns `blocked` = 仍在租约内，本次调用应放弃；`renewed` = **租约已过期**，
+ *   视为泄漏已自愈 —— 调用方应把 `inflightSince` 重置为"现在"并**照常发起请求**。
+ */
+export function inflightGate(o: {
+  inflightSince: number;
+  nowMs: number;
+  forceMs?: number;
+}): { blocked: boolean; renewed: boolean } {
+  const forceMs = o.forceMs ?? INFLIGHT_LEASE_MS;
+  if (!o.inflightSince) return { blocked: false, renewed: false };
+  if (o.nowMs - o.inflightSince < forceMs) return { blocked: true, renewed: false };
+  return { blocked: false, renewed: true };
+}
+
+/**
+ * 注册「墙钟哨兵回调」—— 每次心跳调一次（**每秒**），由注册方自己判断要不要补刷。
+ *
+ * 为什么让注册方判断而不是本模块判断：锚点（上次成功往返时刻）与补刷入口
+ * （`resumeKickRef`，随阶段重建）都在 `useRideTracking` 的闭包里。本模块只负责
+ * **"每秒问一次"** 这件事，不持有跨模块的第二份状态（少一份状态 = 少一处失真）。
+ *
+ * @returns 注销函数（在 `useEffect` 的 cleanup 里调用）
+ */
+export function registerVehSentinel(fn: () => void): () => void {
+  sentinel = fn;
+  return () => {
+    if (sentinel === fn) sentinel = null;
+  };
 }
 
 /**

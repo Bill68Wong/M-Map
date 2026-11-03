@@ -58,6 +58,23 @@ export interface RouteDetailPaneProps {
   walkInPreview?: import("./NavDetailBody").WalkPreview;
   /** ★ 2026-09-25：全屏化（导航中隐藏底导、收敛间距） */
   immersive?: boolean;
+  /**
+   * ★ 2026-11-03（需求 1）：服务端重算的剩余行程（透传给 `NavDetailBody`）。
+   *   缺省 `null` ⇒ 客户端兜底（`card.arriveAt` + 当前时刻）。
+   *   契约：总时长 ← `remainingMin`；到达时刻 ← `arriveAt`（两者独立，不互相反算）。
+   */
+  liveRemain?: {
+    remainingMin: number;
+    arriveAt: number;
+    serverNowMs: number;
+    staleSec: number;
+    clockOffsetMs: number;
+    seq: number;
+  } | null;
+  /** ★ 2026-11-03（需求 1）：服务端重算后的整份纵条（整份替换静态 strips） */
+  liveStrips?: import("@/lib/recommend/types").SegmentStrip[] | null;
+  /** ★ 2026-11-03（批 1）：最近一次重算失败形态（`"403:forbidden"` 等）；`null` = 无失败 */
+  liveRemainFail?: string | null;
 }
 
 export default function RouteDetailPane({
@@ -79,6 +96,9 @@ export default function RouteDetailPane({
   walkPreview,
   walkInPreview,
   immersive = false,
+  liveRemain = null,
+  liveStrips = null,
+  liveRemainFail = null,
 }: RouteDetailPaneProps) {
   /** 收藏数据（纯函数在客户端现算：指纹 / 快照 / 流程图结构） */
   const favData = useMemo(() => {
@@ -132,6 +152,10 @@ export default function RouteDetailPane({
           walkPreview={walkPreview}
           walkInPreview={walkInPreview}
           immersive={immersive}
+          /* ★ 2026-11-03（需求 1）：服务端重算值透传（剩余时间 + 整份纵条） */
+          liveRemain={liveRemain}
+          liveStrips={liveStrips}
+          liveRemainFail={liveRemainFail}
         />
       )}
     </div>

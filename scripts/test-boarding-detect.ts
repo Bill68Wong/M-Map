@@ -57,16 +57,25 @@ function eq<T>(actual: T, expected: T, name: string): void {
      量化误差 ≈ ±STEP_M；顶点越稀，位移门的边界越不可靠
      （10m 顶点时「12 km/h × 20s = 66.7m」会被量成 40m ⇒ 假失败）。
      生产环境的 `route_shapes` 顶点是密集的，夹具必须同构，否则测试是测夹具不是测逻辑。
-   ★ 路径向**西**多留 400m：`fixesOf` 的早帧落在起点以西，否则投影距离超 tol 假失败。 */
+
+   ★★ 2026-11-03 修正（需求 6 研判结论）：**`PATH[0]` 必须就是上车站**。
+     本夹具原先从 **−400m** 起，理由是「`fixesOf` 的早帧落在起点以西，否则投影距离超 tol
+     假失败」—— 但这违反生产契约 `colored[0] === board`（`buildColoredLegs` 的分支⑤
+     恒返回 `slice(iBoard, iAlight+1)`，而 `iBoard` 距 board ≤ tolM）。
+     违法代价（实测，见 `docs/迭代-导航优化-20261102/23-*`）：站前那段**根本不存在**的
+     折线让「站前位移」变得可测 ⇒ 造出 v3.10.0「跑 24s 会误判」这个**生产上不可能发生**
+     的结论，进而给真实乘车加了 +6s（需求 6 的立项原因）。
+     ⇒ 现在 `PATH` 从 0 起、只向**前**延伸；需要「站前接近」的用例请让 fix 落在**路线外**
+        （投影会自动钳到 `idx=0`，`distM > tol` 也照实触发 —— 这正是生产行为）。 */
 const BASE_LNG = 113.55;
 const BASE_LAT = 22.15;
 const STEP_M = 2;
 const DEG_PER_M_LNG = 1 / 103_140;
 const PATH: LL[] = Array.from({ length: 1001 }, (_, i) => {
-  const m = -400 + i * STEP_M; // -400m … +1600m
+  const m = i * STEP_M; // 0m（= 上车站）… +2000m
   return [BASE_LNG + m * DEG_PER_M_LNG, BASE_LAT] as LL;
 });
-/** 沿线相对 BASE_LNG 的第 `meters` 米处 */
+/** 沿线相对 BASE_LNG 的第 `meters` 米处（可为负 = 站前，落在**路线外**） */
 const atM = (meters: number): { lng: number; lat: number } => ({
   lng: BASE_LNG + meters * DEG_PER_M_LNG,
   lat: BASE_LAT,
@@ -83,6 +92,21 @@ function fixesOf(startM: number, speedKmh: number, n: number, gapMs: number, end
   }
   return out;
 }
+
+/**
+ * ★ 2026-11-03 新增：**从上车站起、沿线路向前行**的 n 帧。
+ *
+ * 为什么需要它：`PATH[0]` 已改为上车站（守住 `colored[0] === board`），
+ * 因此「已上车并随车前进」的用例**必须**从 0 起向正方向展开；
+ * 旧写法 `fixesOf(0, …)` 会跑到站前（路线外），那在正确几何下本就不该命中。
+ *
+ * @param kmh 车速；@param n 帧数；@param gapMs 帧间隔
+ */
+function fixesFromStation(kmh: number, n: number, gapMs: number, endTs = 100_000): FixLite[] {
+  const mps = kmh / 3.6;
+  return fixesOf(mps * (n - 1) * (gapMs / 1000), kmh, n, gapMs, endTs);
+}
+
 
 /** 基准输入：几何可用、无车、冷却已过、未触发过 */
 function inputOf(patch: Partial<AutoBoardInput> = {}): AutoBoardInput {
@@ -151,7 +175,7 @@ console.log("[① 车辆不得单独触发]");
 /* ══════════ ② 定位主导：纯定位可命中，且需要 3 连帧 ══════════ */
 console.log("\n[② 纯定位主导]");
 {
-  const fixes = fixesOf(0, 20, 3, 10_000); // 20s 走 111m，3 帧
+  const fixes = fixesFromStation(20, 3, 10_000); // 20s 走 111m，3 帧（自上车站向前）
   const r1 = autoBoardOf(inputOf({ fixes, streak: 0 }));
   eq(r1.hit, true, "沿线移动 20km/h × 20s ⇒ 命中");
   eq(r1.need, R2_STREAK_ALONE, "无车佐证 ⇒ need=3");
@@ -168,7 +192,7 @@ console.log("\n[② 纯定位主导]");
 /* ══════════ ③ 车辆辅助：只降门槛（need 2 + 位移 ×0.6） ══════════ */
 console.log("\n[③ 车辆辅助降门槛]");
 {
-  const fixes = fixesOf(0, 20, 3, 10_000);
+  const fixes = fixesFromStation(20, 3, 10_000);
   const withCar = autoBoardOf(inputOf({ fixes, vehicles: [vJustLeft] }));
   eq(withCar.need, R2_STREAK_WITH_VEHICLE, "A1 佐证 ⇒ need=2");
   eq(withCar.plate, "MA0001", "A1 唯一 ⇒ 锁定该车牌");
@@ -191,7 +215,7 @@ console.log("\n[③ 车辆辅助降门槛]");
    *                     gate(alone)    = 60m ⇒ 50<60 不命中
    *   （速度 9 > 8，两条用例速度门都过，差异只可能来自位移门缩放。）
    */
-  const midFixes = fixesOf(0, 9, 3, 10_000); // 20s × 2.5m/s = 50m
+  const midFixes = fixesFromStation(9, 3, 10_000); // 20s × 2.5m/s = 50m（自上车站向前）
   const assisted = autoBoardOf(inputOf({ fixes: midFixes, vehicles: [vJustLeft] }));
   const alone = autoBoardOf(inputOf({ fixes: midFixes, vehicles: [] }));
   eq(assisted.hit, true, `位移 50m 有佐证 ⇒ 命中（门槛 ${R2_DISPLACE_MIN_M}×${R1_ACCEL_DISPLACE_FACTOR}=36m）`);
@@ -204,17 +228,17 @@ console.log("\n[④ 速度门]");
   const stand = autoBoardOf(inputOf({ fixes: fixesOf(0, 0, 4, 10_000) }));
   eq(stand.hit, false, "静止（0km/h）⇒ 不判");
 
-  const slow = autoBoardOf(inputOf({ fixes: fixesOf(0, 3, 4, 12_000) })); // 3km/h 步行
+  const slow = autoBoardOf(inputOf({ fixes: fixesFromStation(3, 4, 12_000) })); // 3km/h 步行
   eq(slow.hit, false, "步行 3km/h ⇒ 不判（低于 5.5 下限）");
 
-  const fast = autoBoardOf(inputOf({ fixes: fixesOf(0, R2_SPEED_MAX_KMH + 20, 4, 10_000) }));
+  const fast = autoBoardOf(inputOf({ fixes: fixesFromStation(R2_SPEED_MAX_KMH + 20, 4, 10_000) }));
   eq(fast.hit, false, `>${R2_SPEED_MAX_KMH}km/h ⇒ 不判（视为投影漂移）`);
 
   /**
    * ⚠️ v3.6.0 起 7 km/h **不再算"随车"**（8 km/h 是步行/车速分界，见 ⑫ 组）——
    *   这里改为「真实车速 12 km/h 必须命中」，与本轮 blocking 改动保持一致。
    */
-  const busSlow = autoBoardOf(inputOf({ fixes: fixesOf(0, 12, 4, 12_000) }));
+  const busSlow = autoBoardOf(inputOf({ fixes: fixesFromStation(12, 4, 12_000) }));
   eq(busSlow.hit, true, "12km/h（真实慢速乘车） ⇒ 命中（改阈值后不得漏判）");
 }
 
@@ -224,13 +248,13 @@ console.log("\n[⑤ 邻线投影门]");
   // 整条轨迹搬到北侧 400m 外（远超 tol=80m）
   const offsetLat = BASE_LAT + 400 / 111_320;
   const offPath = PATH.map(([lng, lat]) => [lng, lat + (offsetLat - BASE_LAT)] as LL);
-  const fixes = fixesOf(0, 20, 3, 10_000).map((f) => ({ ...f, lat: f.lat + (offsetLat - BASE_LAT) }));
+  const fixes = fixesFromStation(20, 3, 10_000).map((f) => ({ ...f, lat: f.lat + (offsetLat - BASE_LAT) }));
   const r = autoBoardOf(inputOf({ colored: offPath, fixes }));
   // 轨迹与采样同时平移 ⇒ 投影距离仍为 0（这是同源平移），应当命中 —— 反向验证门没写死
   eq(r.hit, true, "轨迹与采样同源平移 ⇒ 仍命中（门是相对投影，不是绝对坐标）");
 
   const r2 = autoBoardOf(
-    inputOf({ fixes: fixesOf(0, 20, 3, 10_000).map((f) => ({ ...f, lat: f.lat + 400 / 111_320 })) }),
+    inputOf({ fixes: fixesFromStation(20, 3, 10_000).map((f) => ({ ...f, lat: f.lat + 400 / 111_320 })) }),
   );
   eq(r2.hit, false, `采样离线 ${R2_TOL_M}m 以上 ⇒ 不判`);
 }
@@ -238,7 +262,7 @@ console.log("\n[⑤ 邻线投影门]");
 /* ══════════ ⑥ 硬门：几何 / 冷却 / 单次会话 ══════════ */
 console.log("\n[⑥ 硬门]");
 {
-  const fixes = fixesOf(0, 20, 4, 10_000);
+  const fixes = fixesFromStation(20, 4, 10_000);
 
   eq(autoBoardOf(inputOf({ fixes, colored: [] })).hit, false, "几何缺失（colored 空）⇒ 不判");
   eq(autoBoardOf(inputOf({ fixes, colored: [PATH[0]] })).hit, false, "几何仅 1 点 ⇒ 不判");
@@ -260,14 +284,14 @@ console.log("\n[⑥ 硬门]");
 /* ══════════ ⑦ 轻轨：收紧档、无车牌 ══════════ */
 console.log("\n[⑦ 轻轨]");
 {
-  const fast = fixesOf(0, 40, 4, 10_000);
+  const fast = fixesFromStation(40, 4, 10_000);
   const hit = autoBoardOf(inputOf({ legKind: "lrt", fixes: fast, vehicles: [vJustLeft] }));
   eq(hit.hit, true, "轻轨 40km/h 沿线移动 ⇒ 命中");
   eq(hit.plate, null, "轻轨无逐车数据 ⇒ 不锁车牌");
   eq(hit.source, "gps", "轻轨来源 = gps");
   eq(hit.need, R2_STREAK_ALONE, "轻轨恒需 3 连帧");
 
-  const lightspeed = fixesOf(0, 10, 4, 10_000); // 10 < 12 轻轨下限
+  const lightspeed = fixesFromStation(10, 4, 10_000); // 10 < 12 轻轨下限
   eq(autoBoardOf(inputOf({ legKind: "lrt", fixes: lightspeed })).hit, false, "轻轨 10km/h ⇒ 不判（下限 12）");
 
   eq(
@@ -280,10 +304,10 @@ console.log("\n[⑦ 轻轨]");
 /* ══════════ ⑧ 精度门 ══════════ */
 console.log("\n[⑧ 精度门]");
 {
-  const fixes = fixesOf(0, 20, 3, 10_000).map((f) => ({ ...f, accuracy: R2_FIX_MAX_ACC_M + 10 }));
+  const fixes = fixesFromStation(20, 3, 10_000).map((f) => ({ ...f, accuracy: R2_FIX_MAX_ACC_M + 10 }));
   eq(autoBoardOf(inputOf({ fixes })).hit, false, `所有帧 accuracy > ${R2_FIX_MAX_ACC_M}m ⇒ 全部丢弃，不判`);
 
-  const mixed = fixesOf(0, 20, 5, 10_000).map((f, i) => ({ ...f, accuracy: i < 2 ? 500 : 10 }));
+  const mixed = fixesFromStation(20, 5, 10_000).map((f, i) => ({ ...f, accuracy: i < 2 ? 500 : 10 }));
   eq(autoBoardOf(inputOf({ fixes: mixed })).hit, true, "仅末 3 帧可信 ⇒ 仍可判（不因历史噪点卡死）");
 }
 
@@ -339,7 +363,7 @@ console.log("\n[⑩ 判定是否已暂停]");
 /* ══════════ ⑪ streak 单调性与归零 ══════════ */
 console.log("\n[⑪ streak]");
 {
-  const good = fixesOf(0, 20, 3, 10_000);
+  const good = fixesFromStation(20, 3, 10_000);
   let s = 0;
   const seq: number[] = [];
   for (let i = 0; i < 3; i++) {
@@ -365,7 +389,7 @@ console.log("\n[⑪ streak]");
 console.log("\n[⑫ 步行不得判上车 · 45s 满窗]");
 {
   /** 45s 满窗：4 帧、间隔 15s */
-  const WALK_FIXES = (kmh: number) => fixesOf(0, kmh, 4, 15_000);
+  const WALK_FIXES = (kmh: number) => fixesFromStation(kmh, 4, 15_000);
 
   /** 三种车辆场景：无车 / A1（车刚离站）/ A2（车正停靠） */
   const SCENARIOS: { label: string; vehicles: TrackVehicle[] }[] = [
@@ -398,7 +422,7 @@ console.log("\n[⑫ 步行不得判上车 · 45s 满窗]");
    * 防矫枉过正：真实乘车（12 km/h）不能因为抬高下限而漏判 / 延迟。
    * 20s 窗（3 帧 × 10s）：位移 66.7m ≥ 位移门 max(60, 8/3.6×20=44.4)=60m，速度 12 > 8。
    */
-  const realRide = autoBoardOf(inputOf({ fixes: fixesOf(0, 12, 3, 10_000) }));
+  const realRide = autoBoardOf(inputOf({ fixes: fixesFromStation(12, 3, 10_000) }));
   eq(realRide.hit, true, "真实乘车 12km/h · 20s 窗 ⇒ 必须命中（防矫枉过正）");
 }
 
@@ -439,6 +463,94 @@ console.log("\n[⑭ 换乘后冷却起点]");
     nextLegCooldownOf({ auto: false, progressSource: "vehicle" }),
     "zero",
     "手动下车 + 车辆源 ⇒ 归零",
+  );
+}
+
+/* ══════════ ⑮ `colored[0] === board` 契约及其两个直接后果 ══════════ */
+/**
+ * ★ 2026-11-03 新增（需求 6 研判，见 `docs/迭代-导航优化-20261102/23-*`）。
+ *
+ * 背景：本夹具原先从 **站前 400m** 起，违反生产契约 `colored[0] === board`
+ *   （`buildColoredLegs` 分支⑤ 恒 `slice(iBoard, iAlight+1)`，`iBoard` 距 board ≤ tolM）。
+ *   违法副作用：站前那段不存在的折线让「站前位移」可测 ⇒ 造出 v3.10.0
+ *   「跑 24s 会误判」这个生产上不可能发生的结论，代价是真实乘车 +6s。
+ *
+ * 本组把契约本身、以及由它推出的两条行为一起钉死：
+ *   ① 契约自检 —— 夹具自身必须满足，否则下面「站前不命中」是假验证；
+ *   ② 站前接近 ⇒ **永不命中**（真实几何下是数学必然，不是巧合）；
+ *   ③ 唯一例外 —— `buildColoredLegs` 分支④（起终点同站 ≤50m）给 `degraded=false`
+ *      但 `colored = 整条 shape` ⇒ `colored[0]` **不是**上车站 ⇒ 站前位移可测。
+ */
+console.log("\n[⑮ colored[0] === board 契约]");
+{
+  const p0 = atM(0);
+  ok(
+    PATH[0][0] === p0.lng && PATH[0][1] === p0.lat,
+    "夹具自检：PATH[0] 就是上车站（colored[0] === boardPos）",
+  );
+
+  /**
+   * ② 站前 200m 以 10km/h 走到上车站，然后停住 4 分钟。
+   *    两重拦截（都来自真实几何，与加严帧数无关）：
+   *      (a) 距站 > tolM(80m) 的帧 ⇒ `projs.some(distM > tol)` 直接否决整个窗口；
+   *      (b) 距站 ≤ 80m 的帧全部被钳到 `idx=0` ⇒ `disp = |cum[0]−cum[0]| = 0 < 60m`。
+   *    ⇒ 加 2 帧 / 减 2 帧都不会改变这个结论 —— 这正是 92a8912 加严依据失效的原因。
+   */
+  const approach = (() => {
+    const mps = 10 / 3.6;
+    const out: FixLite[] = [];
+    for (let i = 0; i <= 80; i++) {
+      const m = Math.min(0, -200 + mps * i * 3);
+      const p = atM(m);
+      out.push({ lng: p.lng, lat: p.lat, accuracy: 10, ts: 100_000 + i * 3000 });
+    }
+    return out;
+  })();
+  let approachHit = false;
+  let approachStreak = 0;
+  for (let i = 0; i < approach.length; i++) {
+    const r = autoBoardOf(inputOf({ fixes: approach.slice(0, i + 1), streak: approachStreak }));
+    approachStreak = r.streak;
+    if (r.hit) approachHit = true;
+  }
+  eq(approachHit, false, "站前 200m 走到站台停住 ⇒ 全程不命中（站前位移被钳为 0，与加严无关）");
+
+  /**
+   * ③ 例外：`colored[0]` 不是上车站（分支④ 整线着色）。
+   *    上车站取线中段 +1000m，用户从 +800m 以 10km/h 走近。
+   *    ⚠️ 这条断言的用途是「**钉住例外的存在**」，不是「证明可以判」——
+   *      将来若有人按「站前绝不命中」去删某道护栏，会先撞红这里。
+   */
+  const midBoard = atM(1000);
+  const walkToMid = (() => {
+    const mps = 10 / 3.6;
+    const out: FixLite[] = [];
+    for (let i = 0; i <= 40; i++) {
+      const m = Math.min(1000, 800 + mps * i * 3);
+      const p = atM(m);
+      out.push({ lng: p.lng, lat: p.lat, accuracy: 10, ts: 100_000 + i * 3000 });
+    }
+    return out;
+  })();
+  let branch4Hit = false;
+  let branch4Streak = 0;
+  for (let i = 0; i < walkToMid.length; i++) {
+    const r = autoBoardOf(
+      inputOf({
+        colored: PATH, // 整条 shape（分支④ 的形态）
+        legDegraded: false, // 分支④ 的 degraded 是 false —— 这正是它能绕过 G1 的原因
+        boardPos: { ...midBoard },
+        fixes: walkToMid.slice(0, i + 1),
+        streak: branch4Streak,
+      }),
+    );
+    branch4Streak = r.streak;
+    if (r.hit) branch4Hit = true;
+  }
+  eq(
+    branch4Hit,
+    true,
+    "★ 例外：colored[0] ≠ board（分支④ 整线着色）⇒ 站前接近**可**命中（勿据此放松护栏）",
   );
 }
 

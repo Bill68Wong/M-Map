@@ -24,12 +24,19 @@
  *
  * ⚠️ 挂载位置：必须挂在 `.nav-map-wrap` **之外**（层叠上下文，Spec AC-13 教训）。
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Icon from "@/components/ui/Icon";
 import ComplianceBar from "@/components/nav/ComplianceBar";
 import FavoriteButton from "@/components/favorites/FavoriteButton";
 import RouteStack from "@/components/RouteStack";
 import { macauClock } from "@/components/RoutePieces";
+import {
+  ARRIVE_OVERDUE_TEXT,
+  REMAIN_ARRIVED_TEXT,
+  remainOf,
+  remainServedOf,
+  remainTotalMinOf,
+} from "@/lib/nav/remaining-view";
 import BottomSheet from "./BottomSheet";
 import NavAlarmOverlay from "./NavAlarmOverlay";
 import NavTrackBar from "./NavTrackBar";
@@ -42,7 +49,7 @@ import type { DetailBody, FoldState } from "./useDetailBody";
 import type { RideTrackView } from "./useRideTracking";
 import { DETENTS, detentIndex, type Detent } from "./sheet-detents";
 import type { FavoriteEndpoint } from "@/lib/favorites/types";
-import type { RecommendCard } from "@/lib/recommend/types";
+import type { RecommendCard, SegmentStrip } from "@/lib/recommend/types";
 
 export interface RouteSheetDetail {
   card: RecommendCard;
@@ -66,6 +73,37 @@ export interface RouteSheetDetail {
   destCoord?: { lng: number; lat: number } | null;
   /** ★ 点「切过去」→ 打开新方案导航 */
   onSwitchCard?: (card: RecommendCard, degraded: boolean) => void;
+  /**
+   * ★ 2026-11-03（需求 1）：**服务端重算的剩余行程**（`POST /api/nav/remaining`）。
+   *   缺省 `null` ⇒ 全走客户端兜底（`card.arriveAt` + 当前时刻），首屏即刻可用。
+   *
+   *   契约（team-lead 冻结）：
+   *     · 总时长显示 ← `remainingMin`（相对基准，扣 `staleSec` 与响应后流逝）；
+   *     · 到达时刻显示 ← `arriveAt`（绝对 ms）；**不用 arriveAt 反算总时长**。
+   *   `seq` 每次**真重算**自增 ⇒ `data-recompute-seq`，供 QA 区分「真重算了」与「重渲染同一帧」。
+   */
+  liveRemain?: {
+    remainingMin: number;
+    arriveAt: number;
+    serverNowMs: number;
+    staleSec: number;
+    clockOffsetMs: number;
+    seq: number;
+  } | null;
+  /**
+   * ★ 2026-11-03（需求 1）：**服务端重算后的整份纵条** ⇒ 整份替换静态 `strips`，
+   *   使「顶部剩余」与「纵条各段分钟」同源（整屏一致）。
+   *   ⛔ 红线：只能替换 strips，**绝不能碰 `body.legs`**（否则地图彩段清空重画、取景被放弃）。
+   */
+  liveStrips?: SegmentStrip[] | null;
+  /** ★ 2026-11-03（批 1）：最近一次重算失败形态（`"403:forbidden"` 等）；`null` = 无失败 */
+  liveRemainFail?: string | null;
+  /**
+   * ★ 2026-11-03（需求 1）：**用户点刷新时随取一次剩余行程重算**。
+   *   与「车辆帧到达随取」是同一条通道（`useNavRemaining.refresh`）。
+   *   缺省 ⇒ 只刷车辆帧（旧行为），不报错。
+   */
+  reloadRemain?: () => void;
 }
 
 export interface RouteSheetProps {
@@ -160,14 +198,73 @@ export default function RouteSheet({
    */
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    if (dTrack?.phase !== "riding") return;
+    /**
+     * ★ 2026-11-03（需求 1）：本计时器服务**两处**，门控按「**谁真的要看**」取，不按 pane 全开。
+     *
+     * ── 为什么不是 `pane === "detail"`（我上一版的做法，已收窄）─────────────
+     *   收窄前实测代码结构：`RouteSheet` 的子组件**全部未 memo**
+     *   （全仓 `src/components/nav/*.tsx` 无一处 `React.memo`），且**两个 pane 常驻不卸载**
+     *   （`:551 recommend` / `:573 detail` 都无条件渲染）。
+     *   ⇒ 每次 tick 会连带重渲染：`BottomSheet` / `PrefSwitch` / **`RouteResultPane` → `RecommendCards`**
+     *     （最多 5 张卡 × 后续班次行 ≈ 40 行）/ `RouteDetailPane` → `NavDetailBody` →
+     *     `NavStrip`×(每段 10~30 站) / `StationReachFold` / `NavTrackBar` / `NavAlarmOverlay`。
+     *   其中「recommend pane 也在 tick」是纯浪费 —— 详情态下用户根本看不见它，却每秒 diff 一遍。
+     *
+     * ── 现在的门控（两个消费方各自的最小充分条件）────────────────────────
+     *   ① 新鲜度 `dFreshSec`（AC-24）：`NavTrackBar` 只在 `isRiding` 时用它
+     *      （`NavTrackBar.tsx:182` `if (isRiding && !right && freshSec != null)`）
+     *      ⇒ **只有 `riding` 需要**。
+     *   ② peek 摘要剩余（需求 1）：只有 `detent === "peek"` 时那块摘要才可见
+     *      （其余档位被 `.route-sheet__bar` 占据、peek 层被盖住）
+     *      ⇒ **只有 `peek` 需要**；**必须保留**，否则「peek 收起后数字冻住」= 退回原 bug。
+     *
+     *   ⇒ `riding || detent === "peek"`。`off` / `boarding` / `done` 在 full·half 档**不再 tick**。
+     *
+     * ⚠️ 与拖动的关系：`detent` 是**落定档位**，拖动过程中不变 ⇒ 本 effect 不会因拖动重启。
+     *   拖动期是否 tick 沿用上述条件，与改动前**完全一致**（改动前 `riding` 也照 tick）——
+     *   即本收窄对拖动**零增量**。
+     */
+    const needTick = dTrack?.phase === "riding" || detent === "peek";
+    if (!needTick) return;
+    /**
+     * ★ 进入 tick 条件时**立即校准一次**（不能等 1s 后的首拍）。
+     *
+     * 为什么必须：本组件在 full/half 档不 tick ⇒ `nowMs` 会冻在上次 tick 的值。
+     * 用户从 half 拖到 peek 的那一刻，`nowMs` 可能已陈旧数分钟 ⇒ peek 摘要会先闪一下
+     * **过时的、偏大**的剩余（例如实际剩 3 分却显示 12 分），1 秒后才跳回正确值。
+     * 这种「先显示错值再跳」比晚 1 秒更新更糟 —— 正是「用户不信这个数字」的来源。
+     * 同理：进入 `riding` 的瞬间校准，`freshSec` 才不会先闪一个陈旧岁数。
+     */
+    setNowMs(Date.now());
     const t = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(t);
-  }, [dTrack?.phase]);
+  }, [dTrack?.phase, detent]);
   const dFreshSec =
     dTrack && dTrack.lastVehicleTs > 0
       ? Math.max(0, Math.floor((nowMs - dTrack.lastVehicleTs) / 1000))
       : null;
+
+  /**
+   * ★ 2026-11-03（需求 1）：**peek 摘要的剩余时间 —— 必须与详情头同源同次**。
+   *
+   * 为什么必须同源：`NavDetailBody`（详情头）与这里（peek 摘要）是**同一组数字的
+   *   两个渲染位**。只改一处会立刻出现「面板收起到 peek 后，数字又变回规划时的静态值」——
+   *   本项目已踩过这种「两个真相」缺陷（`RefreshButton` / `useCooldown` 头注都在讲同一件事）。
+   *   ⇒ 同一个派生函数、同一 `nowMs`、同一数据来源（服务端 → 回落 `card.arriveAt`）。
+   */
+  const peekRemain = useMemo(() => {
+    if (!detail) return null;
+    const lr = detail.liveRemain;
+    if (!lr) return remainOf(detail.card.arriveAt, nowMs);
+    return remainServedOf({
+      remainingMin: lr.remainingMin,
+      serverNowMs: lr.serverNowMs,
+      staleSec: lr.staleSec,
+      arriveAtMs: lr.arriveAt,
+      nowMs: nowMs + lr.clockOffsetMs,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.card.arriveAt, detail?.liveRemain, nowMs]);
 
   /** 详情吸底操作条（挂面板根 `.route-sheet__actions-slot`） */
   const detailActions: ReactNode =
@@ -183,12 +280,8 @@ export default function RouteSheet({
           ""
         }
         plate={dTrack.plate}
-        source={dTrack.progressSource === "gps" ? "gps" : dTrack.plate ? "vehicle" : "manual"}
         alarm={dTrack.alarm}
         lrt={dLrt}
-        traveling={dTrack.traveling}
-        coolingSec={dTrack.refreshCoolingSec}
-        refreshScope={refreshScope}
         boardDetect={dTrack.boardDetect}
         anomaly={dTrack.anomaly}
         note={dTrack.note}
@@ -203,7 +296,6 @@ export default function RouteSheet({
         onBoard={dTrack.onBoard}
         onAlight={dTrack.onAlight}
         onRepick={dTrack.onNotThisBus}
-        onRefresh={dTrack.onRefresh}
         onStop={dTrack.onStop}
         onNotBoard={dTrack.onNotBoard}
         onNotArrive={dTrack.onNotArrive}
@@ -253,8 +345,19 @@ export default function RouteSheet({
       recCooldown.start();
       return;
     }
+    /**
+     * ★ 2026-11-03（需求 1）：detail pane 的刷新 = **两件事**，缺一即回到旧缺陷：
+     *   ① `track.onRefresh()` ⇒ 重拉车辆位置帧（站数 / 剩余分钟 / 纵条进度）；
+     *   ② `reloadRemain()`    ⇒ **重算剩余总时长 / 到达时刻 / 整份纵条**（服务端）。
+     * 改造前只有 ①，于是「按钮有反应但不知道刷新了什么」——
+     * `card.totalMin` / `card.arriveAt` 是规划快照，从不参与重算。
+     *
+     * 二者是**两条独立通道**：② 走 `/api/nav/remaining`（只 merge 数据、不置 `loading`），
+     * 不用 `reload()` ⇒ 不会清地图 `legs`/`box`。
+     */
     if (detail?.track?.onRefresh) detail.track.onRefresh();
     else detail?.reload?.();
+    detail?.reloadRemain?.();
   };
 
   /**
@@ -423,18 +526,32 @@ export default function RouteSheet({
       }
       peek={
         pane === "detail" && detail ? (
-          <div className="sheet-peek-summary" data-variant="detail">
+          <div
+            className="sheet-peek-summary"
+            data-variant="detail"
+            data-peek-remain={peekRemain ? remainTotalMinOf(peekRemain) : undefined}
+            data-recompute-seq={detail.liveRemain?.seq ?? 0}
+          >
             <p className="sheet-peek__od">{odLabel}</p>
             <div className="sheet-peek__metric">
-              <span className="sheet-peek__big">
-                {Math.round(detail.card.totalMin)}
-                <span className="sheet-peek__unit">分</span>
-              </span>
+              {/* ★ 2026-11-03（需求 1）：与详情头同源（`peekRemain`），归零切「即将到达」 */}
+              {peekRemain?.arrived ? (
+                <span className="sheet-peek__meta">{REMAIN_ARRIVED_TEXT}</span>
+              ) : (
+                <span className="sheet-peek__big">
+                  {peekRemain ? remainTotalMinOf(peekRemain) : Math.round(detail.card.totalMin)}
+                  <span className="sheet-peek__unit">分</span>
+                </span>
+              )}
               {detail.card.rides.length > 1 && (
                 <span className="sheet-peek__meta">换乘 {detail.card.rides.length - 1} 次</span>
               )}
               <RouteStack codes={detail.card.rides.map((r) => r.route)} colors={colors} size="sm" />
-              <span className="sheet-peek__meta">{macauClock(detail.card.arriveAt)} 抵达</span>
+              <span className="sheet-peek__meta">
+                {peekRemain?.overdue
+                  ? `${ARRIVE_OVERDUE_TEXT} ${macauClock(peekRemain.arriveAtMs)}`
+                  : `${macauClock(peekRemain?.arriveAtMs ?? detail.card.arriveAt)} 抵达`}
+              </span>
               <Icon name="caretUp" size={20} className="sheet-peek__chev" />
             </div>
           </div>
@@ -520,6 +637,10 @@ export default function RouteSheet({
               onWalkExpand={walk?.active ? null : walk?.onExpand}
               walkPreview={walk?.preview}
               walkInPreview={walk?.previewIn}
+              /* ★ 2026-11-03（需求 1）：服务端重算值透传（①②⑧ 与纵条同源） */
+              liveRemain={detail.liveRemain ?? null}
+              liveStrips={detail.liveStrips ?? null}
+              liveRemainFail={detail.liveRemainFail ?? null}
             />
           )}
         </div>

@@ -74,6 +74,16 @@ export interface LineShape {
   startStop: string | null;
   endStop: string | null;
   bounds: [number | null, number | null, number | null, number | null];
+  /**
+   * ★ 4-B−（2026-11-03 需求 4）：本方向**站序**（主码、按 `seq` 升序、相邻重复已折叠）。
+   *
+   * 为什么需要：彩段切割靠「站点坐标 → shape 最近顶点」定锚点。两个站台若物理相距
+   * ~20m 而站序相差若干站，最近顶点会落到**对侧站台那一趟**，几何上无法区分
+   * （两趟都在容差内）⇒ 必须用站序判方向。
+   *
+   * 缺省 / 空数组 = 无站序数据（老缓存、轻轨线）⇒ 消费方**回落旧逻辑**，不得报错。
+   */
+  stations?: { code: string; seq: number }[];
 }
 
 /** `/api/route-shapes` 的响应（`shapes` 空 + `note: "no_shape"` ⇒ 该线无走向数据） */

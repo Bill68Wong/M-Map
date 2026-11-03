@@ -101,13 +101,27 @@ export function useRouteOverview(
           try {
             const r = await fetch(`/api/route-shapes?code=${encodeURIComponent(code)}`);
             const j = (await r.json()) as {
-              shapes?: { dir?: string; polyline: string; startStop?: string | null; endStop?: string | null }[];
+              shapes?: {
+                dir?: string;
+                polyline: string;
+                startStop?: string | null;
+                endStop?: string | null;
+                /** ★ 4-B−：本方向站序（主码、`seq` 升序）。缺省/空 ⇒ 下游回落旧逻辑 */
+                stations?: { code: string; seq: number }[] | null;
+              }[];
             };
             const shapes: RouteShapeLite[] = (j.shapes ?? []).map((s) => ({
               dir: s.dir,
               polyline: s.polyline,
               startStop: s.startStop ?? null,
               endStop: s.endStop ?? null,
+              /**
+               * ★ 4-B−（需求 4）**必须透传**，否则 `pickTripPair` 恒读到 `undefined`
+               *   ⇒ 整条「站序感知配对」是死代码（每段都 `return base`）= 线上无任何改善。
+               *   这正是本轮 P0 的成因：`route-overview.ts` 算法写好了，但这里把字段丢了。
+               *   老缓存响应没有该字段 ⇒ `?? null` ⇒ 下游走「逐字节等价」的回落路径。
+               */
+              stations: s.stations ?? null,
             }));
             return [code, shapes];
           } catch {

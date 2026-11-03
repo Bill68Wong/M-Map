@@ -1,11 +1,17 @@
 "use client";
 
 /**
- * 吸底操作条（src/components/nav/NavTrackBar.tsx，2026-09-25 · v2.14 · 06 §2.1 / AC-16/23/24）
+ * 吸底操作条（src/components/nav/NavTrackBar.tsx，2026-09-25 · v2.14 · 06 §2.1 / AC-16/24）
  *
- * 结构：状态行 = `● 状态 · 车牌/线路` + **来源标签**（AC-23）+ 右侧「即将到达 / 新鲜度」
+ * 结构：状态行 = `● 状态 · 车牌/线路` + 右侧「即将到达 / 新鲜度」
  * （★ 本批 AC-33：**去掉重复的「下一站」** —— 下一站唯一来源 = 纵条 `.navstrip__badge`）；
- * 按钮行 = 主按钮（我已下车）+ 文字纠错（不是这辆 / 还没到）+ 图标刷新。
+ * 按钮行 = 主按钮（我已下车）+ 文字纠错（不是这辆 / 还没到）。
+ * ★ 2026-11-03（负责人拍板）：**底栏刷新键已删** —— 与面板右上刷新键（`RouteSheet` 头部）
+ *   同调 `refreshNow`、共享同一 5s 冷却，属纯重复入口。刷新唯一入口 = 面板右上。
+ * ★ 2026-11-03（负责人拍板）：**三种来源标签（依据车辆位置 / 实时定位 / 手动）全部删除**
+ *   —— 用户明确不要这类标签，AC-23 作废。进度来源仍由数据层 `progressSource` 承担
+ *   （驱动 5 处业务判定，见 `useRideTracking`），且 `data-match-source` 观测属性**保留**
+ *   （QA 断言依赖，与已删的展示标签是两条独立链路）。
  *
  * 挂载：由 `RouteSheet` 渲染在 **`.route-sheet__actions-slot`**（面板根、`transform` 同上下文，
  * AC-58）；本组件只负责内容，不自持 `position: sticky`。
@@ -13,10 +19,9 @@
  * 常驻纠错（07 §1.5）：安全网检出 `anomaly` 时**不静默** —— 状态行右侧中性提示 + 对应按钮高亮；
  * 手动通道始终可用（等车态「手动标记上车」弱样式）。
  *
- * 纪律：全 Token 上色；单行 nowrap；决策点 ≤4；来源/新鲜度不占主按钮位。
+ * 纪律：全 Token 上色；单行 nowrap；决策点 ≤4；新鲜度不占主按钮位。
  */
 import type { ReactNode } from "react";
-import Icon from "@/components/ui/Icon";
 import type { RidePhase } from "./useRideTracking";
 
 export interface NavTrackBarProps {
@@ -28,22 +33,9 @@ export interface NavTrackBarProps {
   /** 下车站显示名 */
   alightLabel: string;
   plate: string | null;
-  /** 进度来源（AC-23；轻轨段恒 gps） */
-  source: "vehicle" | "gps" | "manual";
   alarm: "none" | "soon" | "now";
-  /** 是否轻轨段（决定纠错入口与来源文案） */
+  /** 是否轻轨段（决定纠错入口） */
   lrt: boolean;
-  traveling: boolean;
-  /**
-   * ★ v3.6.0 S4：车辆刷新冷却剩余秒数（0 = 可刷新）。冷却来自 `useCooldown` 的时间戳，
-   *   不是请求状态（旧版只挡 `traveling`，等于「一次 HTTP 往返」就成了冷却）。
-   */
-  coolingSec?: number;
-  /**
-   * ★ S4 advisory 3：刷新作用域（观测钩子 `data-cooldown`）。
-   *   `"lrt"` ⇒ 该腿刷不出任何东西（`fetchFrame` 对非 bus 腿直接 return）⇒ `off`。
-   */
-  refreshScope?: "bus" | "lrt";
   /**
    * ★ v3.6.0（AC-25a）：自动上车判定实际状态。
    *   `paused`（拒权/超时/连续低精度）⇒ 文案必须说"已暂停"，**不得**再说"正在检测"。
@@ -74,19 +66,12 @@ export interface NavTrackBarProps {
   onBoard: () => void;
   onAlight: () => void;
   onRepick: () => void;
-  onRefresh: () => void;
   onStop: () => void;
   /** 「我没上车」（A1 纠错 → 回等车） */
   onNotBoard: () => void;
   /** 「还没到」（误报到站 → 回乘车中） */
   onNotArrive: () => void;
 }
-
-const SOURCE_LABEL: Record<"vehicle" | "gps" | "manual", string> = {
-  vehicle: "依据车辆位置",
-  gps: "实时定位",
-  manual: "手动",
-};
 
 export default function NavTrackBar(props: NavTrackBarProps) {
   const {
@@ -95,12 +80,8 @@ export default function NavTrackBar(props: NavTrackBarProps) {
     boardLabel,
     alightLabel,
     plate,
-    source,
     alarm,
     lrt,
-    traveling,
-    coolingSec = 0,
-    refreshScope = "bus",
     boardDetect = "on",
     anomaly,
     note,
@@ -114,7 +95,6 @@ export default function NavTrackBar(props: NavTrackBarProps) {
     onBoard,
     onAlight,
     onRepick,
-    onRefresh,
     onStop,
     onNotBoard,
     onNotArrive,
@@ -137,8 +117,15 @@ export default function NavTrackBar(props: NavTrackBarProps) {
    * → `onNotBoard` 回等车；而"不是这辆（换候选）"只对手动选车有意义。
    */
   const correctAuto = anomaly !== "none" || boardMatch === "auto";
-  /** AC-23：来源标注仅「乘车中」显示两态（实时定位 / 依据车辆位置）；手动纠正后含「手动」 */
-  const sourceTag = isRiding ? SOURCE_LABEL[source] : null;
+  /**
+   * ★ 2026-11-03（负责人拍板）：**来源标签已删**（原 AC-23 的「依据车辆位置 / 实时定位 / 手动」
+   *   三态展示）。原因：用户明确不要这类标签，且它与「新鲜度」「即将到达」抢同一行位置。
+   *   注意三件事**没有**跟着删：
+   *     · `useRideTracking.progressSource` —— 数据层，驱动 5 处业务判定（报站分派 / 下车冷却 /
+   *       自动下车冻结判据 / 撤销恢复）；
+   *     · `data-match-source` 属性（本组件下方）—— QA 断言依赖，与展示标签是两条独立链路；
+   *     · `.nav-actions__src` 样式 —— 仍被 `anomalyHint` 与 `NavStrip` 的 `waitSrc` 消费。
+   */
 
   // 左：状态文案
   let left: ReactNode = null;
@@ -218,7 +205,6 @@ export default function NavTrackBar(props: NavTrackBarProps) {
       <div className="nav-actions__staterow">
         <span className="nav-actions__dot" aria-hidden="true" />
         {left}
-        {sourceTag && <span className="nav-actions__src">{sourceTag}</span>}
         {anomalyHint && <span className="nav-actions__src">{anomalyHint}</span>}
         {right && <span className="nav-actions__spacer">{right}</span>}
       </div>
@@ -269,32 +255,6 @@ export default function NavTrackBar(props: NavTrackBarProps) {
                 </button>
               )
             )}
-            <button
-              type="button"
-              className="nav-actions__iconbtn"
-              data-cooldown={refreshScope === "bus" ? "on" : "off"}
-              onClick={() => {
-                if (traveling || coolingSec > 0) return;
-                onRefresh();
-              }}
-              /**
-               * ★ v3.6.0 S4：用 `aria-disabled`（**不用原生 `disabled`**）——
-               *   本栏是面板拖动把手附近区域，原生 `disabled` 会**吞掉 pointerdown**
-               *   （`RouteSheet.tsx` 头部同样记过这个坑）⇒ 形成拖拽死区。
-               *   同时把「冷却」纳入禁用条件：旧版只挡 `traveling`（= 一次 HTTP 往返 ≈1s），
-               *   用户看到的就是「一秒冷却一次」。
-               */
-              aria-disabled={traveling || coolingSec > 0 || undefined}
-              aria-label={coolingSec > 0 ? `刷新，${coolingSec} 秒后可再次刷新` : "刷新"}
-              title={coolingSec > 0 ? `${coolingSec} 秒后可再次刷新` : "刷新"}
-            >
-              <Icon name="refresh" size={20} />
-              {coolingSec > 0 && (
-                <span className="nav-actions__cd" aria-hidden="true">
-                  {coolingSec}
-                </span>
-              )}
-            </button>
           </>
         )}
 

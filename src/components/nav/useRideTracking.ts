@@ -29,7 +29,8 @@ import {
   type TrackProgress,
   type TrackVehicle,
 } from "@/lib/nav/track";
-import { advanceLrt, buildLrtLadder, type LrtLadder } from "@/lib/nav/lrt-progress";import { nearestOnPath } from "@/lib/nav/route-overview";
+import { advanceLrt, buildLrtLadder, type LrtLadder } from "@/lib/nav/lrt-progress";
+import { cumDistM, distM, nearestOnPath } from "@/lib/nav/route-overview";
 import { autoAlightOf } from "@/lib/nav/alight-detect";
 import {
   ANOMALY_CONFIRM,
@@ -46,7 +47,7 @@ import type { RecommendCard, SegmentStrip } from "@/lib/recommend/types";
 import { COOLDOWN_VEHICLE_SEC, useCooldown } from "./useCooldown";
 import type { VehicleLite } from "./VehicleMarker";
 import type { UserFix } from "./useUserFix";
-import { noteVehFail, noteVehFrame, retainVehTicker } from "./observe-hooks";
+import { inflightGate, noteVehFail, noteVehFrame, registerVehSentinel, retainVehTicker, shouldForceRefresh } from "./observe-hooks";
 import { useResumeRefresh } from "./useResumeRefresh";
 import { createVehicleMatcher, usableMedium } from "./vehicle-match-run";
 import { MATCH_VEHICLE_ENABLED } from "@/lib/nav/match-vehicle";
@@ -55,6 +56,33 @@ import { noteOfPausedGeo } from "./geo-note";
 
 /** 轮询间隔（毫秒）——与官网地图 15s 刷新同量级 */
 const POLL_MS = 12_000;
+/**
+ * ★ 需求5 L3：单次车辆请求的超时（ms）。
+ *
+ * 为什么必须有：`fetch` 本身**没有超时**。熄屏整页冻结时请求可能永远不 settle ⇒
+ * 它的 `finally` 不执行 ⇒ 「请求在飞」这个标记永久为真 ⇒ 解冻后所有补刷被吞。
+ * 8s 的依据：正常往返 < 1s（同城 API），8s 已远超任何"慢但活着"的情况，
+ * 又把「悬挂」变成「确定失败」——失败会走 `noteVehFail` 且允许下一轮立刻重试。
+ */
+const FETCH_TIMEOUT_MS = 8_000;
+
+/**
+ * ★ 需求5 L2：哨兵补刷的最小间隔（ms）—— 防「请求持续失败」时的每秒重试风暴。
+ * 取值 > `FETCH_TIMEOUT_MS` 的语义面：一次补刷从发出到确定失败最多 8s，
+ * 8s 内不再补第二次，避免请求叠在同一个悬挂请求上。
+ */
+const SENTINEL_KICK_MIN_MS = 8_000;
+
+/**
+ * ★ 需求6：三区判别的两个几何门（米）。
+ *   · `BOARD_NEAR_M = 40`：到上车站的**直线**距离在此内 ⇒ 视为「已到站/刚上车」；
+ *   · `BOARD_ALONG_CLEAR_M = 60`：沿线上车站起算的**沿线**里程超此值 ⇒ 视为「已随车离开」。
+ * 二者与既有判定阈值（速度门 8km/h、位移门 60m、45s 窗口）**没有任何关系，也不得联动调整**。
+ */
+const BOARD_NEAR_M = 40;
+const BOARD_ALONG_CLEAR_M = 60;
+/** ★ 需求6：区②（仍在走近站台）的加严帧数 —— 每帧 3s ⇒ 精确等价 +6.0s（不是 3s） */
+const BOARD_WALK_EXTRA_FRAMES = 2;
 /** 连续丢信号判定（次）——达到即提示（进度保持冻结） */
 const MISS_LIMIT = 3;
 /** GPS 采样窗口保留时长（ms） */
@@ -320,6 +348,71 @@ function setTraveledAttr(
   }
 }
 
+/**
+ * ★ 需求5 L3：超时信号（有则用，无则退化为"没有信号"）。
+ *
+ * 为什么不直接在调用点写 `AbortSignal.timeout(ms)`：Safari 16 以下 / 部分 WebView 没有
+ * 这个静态方法，直接调会抛 `TypeError` 并被外层 `catch` 吞成"请求失败"——
+ * 那样连一次请求都发不出去，比不设超时更糟。这里显式探测后再用。
+ */
+function timeoutSignal(ms: number): AbortSignal | undefined {
+  try {
+    const Sig = typeof AbortSignal !== "undefined" ? AbortSignal : null;
+    if (Sig && typeof Sig.timeout === "function") return Sig.timeout(ms);
+  } catch {
+    /* 老引擎：无超时，靠 inflight 租约 + 哨兵兜底 */
+  }
+  return undefined;
+}
+
+/**
+ * ★ 需求6（2026-11-03）：上车判定**需要多少连续命中帧** —— 三区判别（纯函数，可单测）。
+ *
+ * ── 为什么不再看 `walkActive` 这个**状态** ────────────────────────────
+ *   上一版（`92a8912`）为了防「沿公交线路跑步/骑行被误判成乘车」，写成
+ *   `need + (walkActive ? 2 : 0)`。两个问题：
+ *     ① 实测代价是**精确 +6.0 秒**（不是注释里写的 3s —— 那是把 2 帧当 1 帧算错了）；
+ *     ② 它只在「上车那一刻人还在步行段」才生效。正常走到站台（`arrived` 先触发、
+ *        `walkSeg` 已清空）时 `+2` **根本不生效**，而赶车提前上车 / 定位精度冻结导致
+ *        `arrived` 不来 / 走偏导致 `remainM` 冻结 —— 这三种场景 `walkActive` 都判不准。
+ *   ⇒ 真正的判据不是状态，是**位置**：人到上车站的沿线距离。
+ *
+ * ── 三区（`colored[0]` 恒为上车站，这是既有契约）──────────────────────
+ *   ```
+ *   区① 已到站/刚上车： dToBoard ≤ 40m                        ⇒ need = 基准（不加严）
+ *   区② 仍在走近站台：  dToBoard > 40m 且 alongM < 60m          ⇒ need = 基准 + 2
+ *   区③ 已随车离开：    alongM ≥ 60m                           ⇒ need = 基准（不死锁）
+ *   ```
+ *   人还没到站时**不在** `colored` 上（colored 从上车站开始）⇒ 投影被钳到 `idx=0`、
+ *   `alongM≈0` ⇒ 落区②，正是"跑步赶车"要加严的那一类；一旦沿线里程过了 60m，
+ *   说明人已在线路下游（是在车上，不是走路赶车）⇒ 退回基准，不再额外罚 6 秒。
+ *
+ * ⚠️ 只改「帧数」这一个自由度：速度门 8km/h / 位移门 60m / 45s 窗口、以及
+ *   `res.need`（2 或 3，由车辆佐证决定）**一个都不动** —— 那些常量已被双向实测过。
+ *
+ * @param baseNeed `autoBoardOf` 返回的 `need`（有车辆佐证 2 / 纯定位 3）
+ * @param colored  本段乘车区间折线（`colored[0]` = 上车站）
+ * @param boardPos 上车站坐标（缺省 ⇒ 无法分区 ⇒ 按基准，宁快不慢）
+ * @param fix      最新一帧用户定位（缺省 ⇒ 同上）
+ */
+export function boardNeedOf(o: {
+  baseNeed: number;
+  colored: LL[];
+  boardPos: { lng: number; lat: number } | null;
+  fix: { lng: number; lat: number } | null;
+}): number {
+  const { baseNeed, colored, boardPos, fix } = o;
+  if (!fix || !boardPos || colored.length < 2) return baseNeed;
+  const dToBoard = distM([fix.lng, fix.lat], [boardPos.lng, boardPos.lat]);
+  if (dToBoard <= BOARD_NEAR_M) return baseNeed; // 区①
+  // 只有在"还没到站"时才需要付投影代价（区①占多数帧 ⇒ 常见路径零额外开销）
+  const proj = nearestOnPath(colored, fix);
+  const cum = cumDistM(colored);
+  const alongM = cum[Math.min(proj.idx, cum.length - 1)] ?? 0;
+  if (alongM >= BOARD_ALONG_CLEAR_M) return baseNeed; // 区③
+  return baseNeed + BOARD_WALK_EXTRA_FRAMES; // 区②
+}
+
 export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   const {
     card,
@@ -339,15 +432,6 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
    */
   const matchOnRef = useRef(matchEnabled);
   matchOnRef.current = matchEnabled;
-  /**
-   * ★ 一条导航流（T1）：步行活跃的**最新值镜像**。
-   *   自动上车的两个触发源（12s 轮询 effect / GPS 帧 effect）都是长跑定时器，
-   *   若把 `walkActive` 塞进它们的依赖，会在步行↔乘车切换时把定时器重建一遍；
-   *   ref 镜像既保证「立刻生效」（下一帧读到新值），又不打断轮询。
-   */
-  const walkActiveRef = useRef(walkActive);
-  walkActiveRef.current = walkActive;
-
   const [phase, setPhase] = useState<RidePhase>("off");
   const [legIndex, setLegIndex] = useState(0);
   const [plate, setPlate] = useState<string | null>(null);
@@ -466,6 +550,19 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   } | null>(null);
   /** ★ 本批：车辆帧顶层运营商（供 mapVehicles 涂装色） */
   const lastCompanyRef = useRef<string | null>(null);
+  /**
+   * ★ 需求5 L2：**上一次成功往返**（请求发出 → 拿到可解析的响应体）的时刻。
+   *
+   * ⚠️ 这是哨兵的**唯一锚点**，三条纪律：
+   *   ① 必须**无条件**写（成功即写），与"帧内容有没有变化"无关 —— 若拿
+   *      `observe-hooks` 的 `lastVehTs` 当锚点，车没动时它不前进，会把「数据没变」
+   *      误判成「数据过期」，每 30s 白刷一次；
+   *   ② 初值**必须**是 `Date.now()`（不能 0）—— 否则首个心跳立刻判定"从未成功"并补刷；
+   *   ③ 失败**不写**（失败不是往返），这样哨兵才能在持续失败后继续重试。
+   */
+  const lastRoundTripAtRef = useRef(Date.now());
+  /** ★ 需求5 L2：上次哨兵补刷时刻（0 = 还没补过）—— 抑制"请求持续失败 ⇒ 每秒补刷"风暴 */
+  const lastSentinelKickAtRef = useRef(0);
 
   const stopMains = useMemo(() => {
     const s = strips?.[legIndex];
@@ -713,7 +810,13 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       try {
         const r = await fetch(
           `/api/route-vehicles?code=${encodeURIComponent(leg.route)}&dir=${encodeURIComponent(dir)}&kind=bus&progress=1`,
-          { cache: "no-store" },
+          /**
+           * ★ 需求5 L3：`AbortSignal.timeout(8000)` 把「悬挂的请求」变成「确定失败」。
+           *   没有它，freeze 期间的请求可能永不 settle ⇒ `finally` 不执行 ⇒ 见 `INFLIGHT_LEASE_MS`。
+           * ⚠️ 老 Safari（<16）没有 `AbortSignal.timeout` ⇒ 取不到就不传（行为回退到改前，
+           *   仍有 L2 哨兵与 15s 租约兜底，不会因此永久冻结）。
+           */
+          { cache: "no-store", signal: timeoutSignal(FETCH_TIMEOUT_MS) },
         );
         const j = (await r.json()) as { vehicles?: VehicleLite[]; company?: string | null; fetchedAt?: string };
         const lites = j.vehicles ?? [];
@@ -732,6 +835,12 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         // ★ v3.7.0 S2：车辆帧时间戳（**唯一**写入点）+ 观测钩子 `data-veh` / `data-veh-age`
         //   `fetchedAt` 只作「帧标识」判断数据有没有真的更新（不做跨时钟减法，见 observe-hooks）
         setLastVehicleTs(Date.now());
+        /**
+         * ★ 需求5 L2：**成功往返**锚点（无条件写，与 `fetchedAt` 是否变化无关）。
+         *   紧挨 `setLastVehicleTs` 放，因为两者是同一件事的两个读法：
+         *   前者给 UI 说「车辆数据几秒前更新」，后者给哨兵说「上次拿到响应是几秒前」。
+         */
+        lastRoundTripAtRef.current = Date.now();
         noteVehFrame(j.fetchedAt ?? null);
         setListTick((t) => t + 1); // ★ 本批：触发 mapVehicles 重算（AC-46）
 
@@ -949,8 +1058,9 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
      *      架构已双向实测：5.5 会把快走判成已上车，故取 8）——
      *      正常步行 5~6、快走 6~7 全部 < 8，`r2Of` 直接不命中；
      *   ② **位移门 60m** 使短时跑动无法命中：10 km/h 需连续沿线跑 21.6s、8 km/h 需 27s；
-     *   ③ **步行段再扣 2 帧**（下方 `need + 2`）：把「跑步赶车」这类真实
-     *      边缘场景所需持续时长再拉长约 3s。
+     *   ③ **区②（仍在走近站台）再扣 2 帧**（`boardNeedOf` 三区判别）：
+     *      把「跑步赶车」这类真实边缘场景所需持续时长再拉长 **+6.0s**
+     *      （3s/帧 × 2 帧 —— 旧注释写"约 3s"是算错的）。
      *   ⇒ 仅「持续高速沿线路移动」（= 在车上）能命中。
      *
      * ── 与 v3.8.1「步行段降频轮询」不冲突 ─────────────────────────────────
@@ -991,18 +1101,28 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     boardStreakRef.current = res.streak;
     if (!res.hit) return;
     /**
-     * ★ v3.10.0：**步行段加严 2 帧**（详见函数头 ③）。
+     * ★ 需求6（2026-11-03）：加严判据从「`walkActive` **状态**」换成「人到上车站的**位置**」。
      *
-     * 为什么是 2 而不是 1（实测数据，理想直线 + 完美精度的下界）：
-     *   加严 1 帧只把所有触发统一延后 3s，「跑 10 km/h 跑 24s 后站着等车」仍在 30s 误判；
-     *   加严 2 帧使该场景**不触发**（停下后平均速度跌回 8 以下），
-     *   而真实乘车只慢一档：公交 20 km/h 18s→24s、30 km/h 15s→21s、堵车 12 km/h 24s→30s。
-     *   ⇒ 用"公交切换慢 6s"换掉一档常见误判（10 km/h 跑 24s 正是典型赶车强度），划算。
-     *   剩余唯一误判 = 12 km/h 连续跑 24s（约 80m 冲刺），属极端场景，由「我没上车」兜底。
+     * ── 旧版（`92a8912`）实测代价与失效面 ────────────────────────────────
+     *   `need + (walkActive ? 2 : 0)` 的实际代价是 **+6.0 秒**（3s/帧 × 2 帧；旧注释写"约 3s"
+     *   是把 2 帧当成 1 帧算错了）。更关键的是**它只在"上车那一刻人还在步行段"才生效**：
+     *   正常走到站台（`arrived` 先触发、`walkSeg` 已清空）时 `+2` 根本不生效 ——
+     *   而 `walkActive` 判不准的三种场景（赶车提前上车 / 定位精度冻结导致 `arrived` 不来 /
+     *   走偏导致 `remainM` 冻结）恰恰是最需要正确加严或放松的地方。
      *
-     * ⚠️ 清段后（`walkActive=false`）恢复原门槛，不影响站台候车的既有灵敏度。
+     * ── 新版：三区判别（详见 `boardNeedOf`）─────────────────────────────
+     *   区① `dToBoard ≤ 40m`（已到站/刚上车）⇒ 基准 ⇒ **恢复 v3.8.0 的响应速度**；
+     *   区② `dToBoard > 40m 且 alongM < 60m`（仍在走近站台）⇒ 基准 + 2（防跑步误判）；
+     *   区③ `alongM ≥ 60m`（人已在线路下游）⇒ 基准 ⇒ **不死锁**。
+     *   ⚠️ 速度门 8km/h / 位移门 60m / 45s 窗口**一个都没动**（那些常量已被双向实测过）。
      */
-    const need = res.need + (walkActiveRef.current ? 2 : 0);
+    const fixNow = fixesRef.current[fixesRef.current.length - 1] ?? null;
+    const need = boardNeedOf({
+      baseNeed: res.need,
+      colored: leg.colored,
+      boardPos,
+      fix: fixNow ? { lng: fixNow.lng, lat: fixNow.lat } : null,
+    });
     if (res.streak >= need) {
       switchToRiding(res.plate, res.source);
     }
@@ -1012,8 +1132,10 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
    * ★ v3.7.0 S2（D1）：**恢复补刷**的唯一挂载点。
    *
    * 两个轮询 effect（候车 / 乘车）各自把自己的「立刻打一帧并重置 12s 计时」函数登进
-   * `resumeKickRef`；本 hook 在 `visibilitychange→visible` / `online` / `pageshow(persisted)`
-   * 时调它一次（内部 2s 去抖，防「回前台三事件连发」造成请求风暴，AC2.5）。
+   * `resumeKickRef`；本 hook 在五个恢复入口（`visibilitychange→visible` / **`resume`** /
+   * **`focus`** / `online` / `pageshow`）时调它一次（内部 2s 去抖，防连发造成请求风暴，AC2.5）。
+   * 需求5 起事件矩阵扩到五个，理由见 `useResumeRefresh.ts` 文件头（WebAPK 上 `resume` 是
+   * 唯一确定会到的那一个）。
    *
    * ⚠️ 这里**只增加"何时触发"的入口**，不改 `phase` 状态机与 `tryAuto` 的调用时机语义。
    */
@@ -1025,6 +1147,46 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     active && (phase === "boarding" || phase === "riding"),
   );
 
+  /**
+   * ★ 需求5 L2：**墙钟哨兵**—— 唯一不依赖任何事件的自愈层。
+   *
+   * ── 它补的是哪条缝 ────────────────────────────────────────────────────
+   *   L1（事件矩阵）依赖"事件会到"。trace 已证：某些容器连 `resume` 都可能不发，
+   *   且 `visibilitychange` 迟到 14s。哨兵只看**墙钟**：
+   *   「现在」减「上次成功往返」超 `ROUND_TRIP_STALE_MS`（30s）⇒ 立刻补刷一次。
+   *
+   * ── 三条实现纪律（都踩过坑，别简化）──────────────────────────────────
+   *   ① **不新建定时器**：复用 `observe-hooks` 里那个单例 1s 心跳（`retainVehTicker`，
+   *      导航态已在上方持有）⇒ 零新增 CPU / 功耗，也零新增泄漏面；
+   *   ② **锚点 = `lastRoundTripAtRef`**，不是 `observe-hooks` 的 `lastVehTs` ——
+   *      后者只在帧内容变化时前移，用它会把「车没动」误判成「数据过期」，每 30s 白刷；
+   *   ③ **补刷自身要限频**（`SENTINEL_KICK_MIN_MS`）：请求持续失败时锚点不前进，
+   *      若不限频就会变成"每秒一次"的请求风暴。8s > 单次超时 8s 的量级，
+   *      保证不把第二个请求叠在同一个悬挂请求上。
+   *
+   * ⚠️ 只重置**网络态**（补刷一次 + `inflightSince` 由租约自愈），
+   *   绝不重置 `boardStreakRef` / 判定累积 —— 那会让上车判定重新等 3 帧（+9s），
+   *   等于用需求6 的 P0 换需求5 的 P0。
+   */
+  useEffect(() => {
+    if (!active) return;
+    // 进入导航态即以「现在」为锚点：否则页面开着 20 分钟后再开始导航，首帧就被判过期
+    lastRoundTripAtRef.current = Date.now();
+    lastSentinelKickAtRef.current = 0;
+    return registerVehSentinel(() => {
+      const now = Date.now();
+      const verdict = shouldForceRefresh({
+        lastFrameAt: lastRoundTripAtRef.current,
+        nowMs: now,
+        lastKickAt: lastSentinelKickAtRef.current,
+        debounceMs: SENTINEL_KICK_MIN_MS,
+      });
+      if (verdict !== "stale") return;
+      lastSentinelKickAtRef.current = now;
+      resumeKickRef.current?.();
+    });
+  }, [active]);
+
   /* 候车态：拉候选（★ 本批：**12s 持续轮询**，非只拉一帧 —— 上车灵敏度，AC-56）；
      并在车辆帧到位时尝试自动切换。purpose 复用 `live_pos`（服务端只记账、不参与熔断）。 */
   useEffect(() => {
@@ -1035,7 +1197,8 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
      *   若整段不轮询，`listLiteRef` 恒空 ⇒ 候车态地图全程零车（负责人线上反馈的根因之一）。
      *   降频为 60s 一帧：配额代价 = 10 分钟步行 10 次请求（旧版站台起 5 分钟即 25 次，仍净省）；
      *   且用户在步行段同样关心「要坐的车现在到哪了」——这不是纯等待时段。
-     *   ⚠️ `tryAuto` 的 `walkActiveRef` 早退**保持不变**：人没到站不判上车，逻辑不受影响。
+     *   ⚠️ `tryAuto` 已**不再**因步行段早退（v3.10.0 起放开）；需求6 之后它的加严判据
+     *      是**几何三区**（`boardNeedOf`），与"是否还在步行段"这个状态无关。
      *   走进站台后 `walkActive` 变 false ⇒ 本 effect 重跑 ⇒ 立刻拉一帧 + 恢复 12s 轮询。
      */
     let cancelled = false;
@@ -1044,16 +1207,20 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
      * ★ v3.7.0 S2：**同一时刻只允许一帧在飞**。
      *   否则「定时器刚打出去 + 用户此刻回前台」会在几毫秒内连打两次
      *   （AC2.5 要求同源 2s 窗口内 ≤1 次）。
+     *
+     * ★ 需求5 L3：布尔改为**时间戳租约**（`0` = 空闲）。布尔在 freeze 场景下会永久为真
+     *   （`finally` 因整页冻结没执行）⇒ 解冻后第一个补刷被当场吞掉 ⇒ 永久冻结。
+     *   租约超 `INFLIGHT_LEASE_MS`（15s）即视为泄漏已自愈（`inflightGate` 纯函数判定）。
      */
-    let inFlight = false;
+    let inflightSince = 0;
     /** 一轮 = 拉帧 + 尝试自动上车（保持既有的串行顺序） */
     const round = async () => {
-      if (inFlight) return;
-      inFlight = true;
+      if (inflightGate({ inflightSince, nowMs: Date.now() }).blocked) return;
+      inflightSince = Date.now(); // 首飞 / 租约过期强制重置，都从此刻重新计时
       try {
         await fetchFrame(null);
       } finally {
-        inFlight = false;
+        inflightSince = 0; // ★ 无条件归零：成功 / 超时 / abort / 异常四条路径都走这里
       }
       if (cancelled) return;
       tryAuto();
@@ -1101,14 +1268,15 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     let cancelled = false;
     let timer: number | null = null;
     /** ★ v3.7.0 S2：同一时刻只允许一帧在飞（防「定时器 + 回前台补刷」双打，AC2.5） */
-    let inFlight = false;
+    /** ★ 需求5 L3：同 `round()` —— 时间戳租约，超 15s 视为泄漏并放行 */
+    let inflightSince = 0;
     const pull = async () => {
-      if (inFlight) return;
-      inFlight = true;
+      if (inflightGate({ inflightSince, nowMs: Date.now() }).blocked) return;
+      inflightSince = Date.now();
       try {
         await fetchFrame(plate);
       } finally {
-        inFlight = false;
+        inflightSince = 0;
       }
     };
     const schedule = (ms: number) => {
@@ -1169,14 +1337,15 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     if (phase !== "riding" || plate || !active) return;
     let cancelled = false;
     let timer: number | null = null;
-    let inFlight = false;
+    /** ★ 需求5 L3：时间戳租约（`0` = 空闲；超 15s 视为泄漏并放行） */
+    let inflightSince = 0;
     const pull = async () => {
-      if (inFlight) return;
-      inFlight = true;
+      if (inflightGate({ inflightSince, nowMs: Date.now() }).blocked) return;
+      inflightSince = Date.now();
       try {
         await fetchFrame(null);
       } finally {
-        inFlight = false;
+        inflightSince = 0;
       }
     };
     const schedule = (ms: number) => {
