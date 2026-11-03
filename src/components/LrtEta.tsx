@@ -22,6 +22,8 @@
 import RouteStack from "./RouteStack";
 import Icon from "./ui/Icon";
 import { pickCatchTier } from "@/lib/recommend/catch-up";
+import { TierBadge } from "./RoutePieces";
+import { TIER_TEXT, type CatchTier } from "@/lib/recommend/types";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 /** 秒级读秒线路：石排湾线/横琴线（班次稀疏，倒计时需精确到秒）；
@@ -440,10 +442,10 @@ export function LrtEtaInline({
    */
   mainMs?: number;
   /**
-   * ★ 2026-09-27（用户需求 2）：邻班「能不能赶上」的判据上下文。
-   *   v3.7.0 S4：只用来判「赶不上」（`pickCatchTier` 全档不可及），
-   *   **不再渲染速度档文案/档位色阶**（全站隐藏，见 `RoutePieces.TierBadge`）。
-   *   `walkMin` = 到上车站的步行分钟（卡级 `walkOut.minutes`）。
+   * ★ 2026-09-27（用户需求 2）：邻班「怎样走才能赶上」的档位上下文——
+   *   有值时每班附 `TierBadge`（档位 = `pickCatchTier(walkMin, 该班剩余秒, walkDistM)`；
+   *   全档不可及 → 「赶不上」）。`walkMin` = 到上车站的步行分钟（卡级 `walkOut.minutes`）。
+   *   ★ v3.9.0（需求 3 拍板 C）：恢复 S4 删掉的徽章渲染（本组件消费方全为方案卡场景）。
    */
   tierCtx?: { walkMin: number; walkDistM?: number | null };
 }) {
@@ -526,12 +528,19 @@ export function LrtEtaInline({
           )}
         </span>
         {/*
-          ★ v3.7.0 S4：速度档文案全站隐藏（「全力冲刺/小跑/正常走…能赶上」整块不渲染，
-          `TierBadge` 也不再接受档位 ⇒ 不可能残留档位色阶）。
+          ★ v3.9.0（需求 3 拍板 C）：恢复邻班「怎样走才能赶上」档位徽章（S4 删除）。
+          本组件的 tierCtx 消费方**全部是方案卡场景**（推荐卡/导航详情/计卡详情）；
+          导航站条（NavStrip）不传 tierCtx ⇒ 恢复不影响站条/到站后的隐藏口径。
           ⚠️ 「赶不上」**保留**：它绑的是该班**真实开出时刻** + 步行所需时间，
           属于「时间提示」，不是速度档文案。判据：`tier === null` = 连冲刺都赶不上。
         */}
-        {tierCtx && !gone && !tier && <span className="rc-neighbor__miss">赶不上</span>}
+        {tierCtx &&
+          !gone &&
+          (tier ? (
+            <TierBadge tier={tier} tierText={TIER_TEXT[tier as CatchTier]} />
+          ) : (
+            <span className="rc-neighbor__miss">赶不上</span>
+          ))}
       </span>
     );
   };

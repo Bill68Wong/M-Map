@@ -733,12 +733,15 @@ export default function NavShell({
   /**
    * ★ T1（需求 3）：**地图上始终画着完整分段路线**。
    *   · 正在跟随的那段走 `walk` 三线（done/now/ahead，有进度）；
-   *   · 另一段走 ghost（没走 = 绿细虚线 / 已过 = 灰细虚线）——
+   *   · 另一段走 ghost（没走 = 绿细线 / 已过 = 灰细线；★ v3.8.1 需求 6 实线化）——
    *     旧版末段步行**从未渲染过**（`walkSeg==="in"` 之前没人设，且三线只画当前段）。
-   *   会话结束（`sessionLive=false`）或离开 detail ⇒ 传 `null` ⇒ 0ms 全清。
+   * ★ v3.8.1（需求 6）：**解除 `!sessionLive` 门控** —— 未开始导航（会话未建）时也画
+   *   两段步行走廊，用户在看路线详情时就能看到要走哪两段路，而不是一片空白地图。
+   *   离开 detail ⇒ 传 `null` ⇒ 0ms 全清；ghost tone 未导航时为 `ahead`（绿，`ride.phase==="off"`）。
+   *   ⚠️ AC-08a 预算豁免已批（多画两条静态折线的 JS 开销）。
    */
   const walkGhosts = useMemo(() => {
-    if (!rsOpen || pane !== "detail" || !sessionLive) return null;
+    if (!rsOpen || pane !== "detail") return null;
     const out: { key: string; path: [number, number][]; tone: "ahead" | "done" }[] = [];
     if (walkOutPath.length >= 2 && walkSeg !== "out") {
       out.push({ key: "out", path: walkOutPath, tone: ride.phase !== "off" ? "done" : "ahead" });
@@ -747,7 +750,7 @@ export default function NavShell({
       out.push({ key: "in", path: walkInPath, tone: "ahead" });
     }
     return out.length ? out : null;
-  }, [rsOpen, pane, sessionLive, walkOutPath, walkInPath, walkSeg, ride.phase]);
+  }, [rsOpen, pane, walkOutPath, walkInPath, walkSeg, ride.phase]);
 
   /** ★ 2026-09-25：取景指令化（AC-17） */
   const { view, frame, reframeOnSettle } = useNavFrame();
@@ -1267,14 +1270,12 @@ export default function NavShell({
         immersive={ride.phase === "riding"}
         /**
          * ★ T1：步行入口 + **两段**预览（首段 / 末段）。
-         * · 正常流程里这两个按钮只是「手动补进」的兜底 —— 主流程已自动推进
-         *   （开始导航 ⇒ 直接进步行出发段；下车 ⇒ 自动进步行到达段）；
-         * · `onStart(seg)` 与「开始导航」走**同一条会话入口**（`startSession`）：
-         *   首段会顺带把乘车引擎推进到 boarding（互斥由引擎内部保证），
-         *   ⇒ 不会再出现"只走了步行、上车判定没在跑"的半截状态。
+         * ★ v3.9.0：`onStart` 字段已删——「开始步行」按钮（唯一消费方）已由负责人裁定删除，
+         *   步行进入只走「开始导航」的 `startSession("out")`（同一条会话入口）；
+         *   自动推进 ①~④ 不变（出发⇒步行出发段、到站⇒上车、下车⇒步行到达段）。
+         *   `onExpand` 保留：详情页「步骤」展开键仍按需取数。
          */
         walk={{
-          onStart: (seg) => startSession(seg),
           onExpand: (seg) => walkRoute.ensure(seg),
           /** ★ 正在跟随（walk 态）⇒ RouteSheet 据此禁 peek */
           active: walkActive,

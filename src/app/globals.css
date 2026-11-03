@@ -1710,53 +1710,38 @@ button[aria-disabled="true"] {
   text-decoration: underline;
 }
 
-/* ── 骨架 ── */
-.rc--skeleton {
+/* ── 加载占位（★ v3.9.0 · 05 规格 §12：rc-sk 骨架已全站替换为 BrandRouteLoader）──
+   占位与指示分离（§12.0 总纲一）：指示 = BrandRouteLoader（组件自带）；
+   占位 = 容器轮廓 + min-height（下面三个类），不用骨架线条保住。
+   min-height 取值（§12.2/§12.3）：等待卡 112px / 详情 120px / recommend 240px ——
+   漏掉会导致加载完成时内容区高度突变（页面跳动）。 */
+
+/* ① RouteResultPane 等待卡：保留 .card 轮廓，32px M 居中（§12.2①） */
+.rc--loading {
   cursor: default;
+  min-height: 112px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.rc-sk {
-  display: block;
-  border-radius: 6px;
-  background: linear-gradient(90deg, var(--surface-dim) 25%, var(--surface) 50%, var(--surface-dim) 75%);
-  background-size: 200% 100%;
-  animation: rc-shimmer 1.4s ease-in-out infinite;
+/* ②⑤ 详情类（RouteDetailPane / card CardSkeleton）：48px M 居中（§12.2②⑤） */
+.cd-loading {
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.rc-sk--big {
-  width: 62px;
-  height: 30px;
-}
-
-.rc-sk--chip {
-  width: 84px;
-  height: 18px;
-  border-radius: var(--r-pill);
-}
-
-.rc-sk--line {
-  height: 13px;
-  margin: 5px 0;
-  width: 100%;
-}
-
-.rc-sk--short {
-  width: 55%;
-}
-
-@keyframes rc-shimmer {
-  0% {
-    background-position: 200% 0;
-  }
-  100% {
-    background-position: -200% 0;
-  }
+/* ③④ recommend（Suspense fallback + 路由级 loading，两层同形）：48px M（§12.2③④） */
+.rc-list--loading {
+  min-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .rc-sk {
-    animation: none;
-  }
   .rc:active {
     transform: none;
   }
@@ -2113,13 +2098,7 @@ button[aria-disabled="true"] {
   font-size: var(--fs-mini);
 }
 
-/* ── 详情页骨架 ── */
-.cd-sk {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 4px 0;
-}
+/* 详情页骨架（.cd-sk）已随 v3.9.0 全站加载态替换删除——占位改走上方 .cd-loading（规格 §12.2②⑤）。 */
 
 /* ══════════════════════════════════════════════════════════════════
    全澳导航（v1.3.0 · T04）—— ★ 复用现有令牌，不新造视觉体系（§11.5）
@@ -7748,33 +7727,32 @@ body[data-nav-phase]:not([data-nav-phase="off"]) .nav-brandbar__acts { display: 
    ============================================================================ */
 
 :root {
-  /* ── ① 地图 · 步行圆点虚线 ──────────────────────────────────────────────
+  /* ── ① 地图 · 步行线（★ v3.8.1 需求 6：虚线改实线，绿线与巴士段同宽 6）─────
      注意：刻意**深色模式保持与浅色同值**（AMap 底图恒为浅色瓦片，本项目未接深色地图样式；
            线色若随主题抬亮，在浅瓦片上反而更看不清）。此为与 --map-line-* 不同的**显式例外**，
            删除本注释前请先确认底图已支持深色。 */
   --map-walk-done: #8c93a0; /* 已走 = 与 --map-line-passed 同值（视觉同族） */
   --map-walk-ahead: #0b6e4f; /* 未走 / 当前 = --brand-green 同值（项目绿） */
 
-  /* 圆点节奏（字符串，供 split(" ") 解析成 strokeDasharray）
-     点心距 = 0.5+12 = 12.5px；配 w6 ⇒ 单点实长 6.5、点间缝 6.0 ⇒ 缝 ≈ 1 个点径 */
-  --map-walk-dash: 0.5 12;
-
-  /* 线宽 / 不透明度（三通道区分，不只靠颜色） */
+  /* 线宽 / 不透明度（三通道区分，不只靠颜色）。
+     ★ v3.8.1：`--map-walk-w-ahead` 5→6（与巴士段 strokeWeight:6 一致）；
+       `--map-walk-dash` 变量随虚线一起删除（JS 的 dasharray 本是硬编码，变量从未被引用）。 */
   --map-walk-w-done: 5;
-  --map-walk-w-ahead: 5;
+  --map-walk-w-ahead: 6;
   --map-walk-w-now: 7;
   --map-walk-op-done: 0.85;
   --map-walk-op-ahead: 0.55;
   --map-walk-op-now: 1;
 
-  /* 层级（插进既有 z 表：灰虚 68 < 步行三态 69/70/73 < 灰实 74 < 站点 90） */
+  /* 层级（插进既有 z 表：★ v3.8.1 实线化后 ghost 68 仍最低 < 步行三态 69/70/73 < 灰实 74 < 站点 90） */
   --map-z-walk-done: 69;
   --map-z-walk-ahead: 70;
   --map-z-walk-now: 73;
 
   /* ★ T1：**走廊 ghost**（非当前段的完整步行走廊，全程常驻地图）
      —— 比「正在跟随」那三态更细更淡：它是"预告/已过"，不该抢当前步的注意力。
-     层级 68 = 灰虚之下（不压乘车彩段 72，与乘车段共线时线路色仍在上）。 */
+     层级 68 = 全部步行线之下（不压乘车彩段 72，与乘车段共线时线路色仍在上）。
+     ★ v3.8.1：ghost 也随 `common()` 实线化（细一档淡一档的区分保留）。 */
   --map-walk-w-ghost: 4;
   --map-walk-op-ghost: 0.4;
   --map-walk-op-ghost-done: 0.5;

@@ -6,6 +6,7 @@
  * 两层形状一致 → 骨架不跳动。
  */
 import Icon from "@/components/ui/Icon";
+import BrandRouteLoader from "@/components/brand/BrandRouteLoader";
 
 export default function Loading() {
   return (
@@ -22,20 +23,11 @@ export default function Loading() {
       </div>
       <h1 className="h-headline rc-title">正在計算…</h1>
       <p className="t-label t-muted rc-subtitle">分析实时班次与步行时间</p>
-      <div className="rc-list">
-        {[0, 1, 2, 3, 4].map((i) => (
-          <div key={i} className="card rc rc--skeleton" aria-hidden="true">
-            <div className="rc-head">
-              <span className="rc-sk rc-sk--big" />
-              <span className="rc-sk rc-sk--chip" />
-            </div>
-            <div className="rc-line">
-              <span className="rc-sk rc-sk--line" />
-              <span className="rc-sk rc-sk--line" />
-              <span className="rc-sk rc-sk--line rc-sk--short" />
-            </div>
-          </div>
-        ))}
+      {/* ★ v3.9.0（05 规格 §12.2④）：与 page.tsx 的 Suspense fallback **完全同形**
+          （48px M 容器、min-height 240px、无 label——页面文案即 label）。
+          ⚠️ 红线：③④ 必须同批同形，只换一层 = 路由切换瞬间两套语言先后出现 = 自造跳动。 */}
+      <div className="rc-list rc-list--loading">
+        <BrandRouteLoader active size={48} slot="list" />
       </div>
     </main>
   );

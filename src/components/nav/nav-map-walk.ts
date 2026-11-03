@@ -83,14 +83,21 @@ export function readWalkStyle(root: HTMLElement | null): WalkPolylineStyle {
   };
 }
 
-/** 公共折线参数（`lineCap:"round"` 是"圆点"的唯一来源，缺了会被误读成施工路段） */
+/**
+ * 公共折线参数。
+ *
+ * ★ v3.8.1（需求 6）：**虚线改实线** —— 负责人要求步行路径与巴士段同样用实线绘制
+ *   （"绿实线"）。删除 `strokeStyle:"dashed"` / `strokeDasharray` 后取 AMap 默认实线；
+ *   线宽与巴士段对齐的改动落在 CSS 变量（`--map-walk-w-ahead: 6`，见 globals.css），
+ *   本函数只管线型，不再管宽。
+ *   ⚠️ `lineCap:"round"` 在虚线时代是"圆点"的唯一来源；实线化后它仍保留（端点圆润），
+ *      不再产生圆点节奏 —— 旧注释里"缺了会被误读成施工路段"的语境已随虚线一起删除。
+ */
 function common(color: string, weight: number, opacity: number, z: number, withDir = false) {
   return {
     strokeColor: color,
     strokeWeight: weight,
     strokeOpacity: opacity,
-    strokeStyle: "dashed",
-    strokeDasharray: [0.5, 12],
     lineJoin: "round",
     lineCap: "round",
     zIndex: z,

@@ -118,7 +118,8 @@ export default function RecommendCard({
   const press = usePressGuard();
   const colorOf = (c: string) => colors[c] ?? null;
   const first = card.rides[0];
-  /** ★ v3.7.0 S4：只有真实时刻提示（`catchHint`）；速度档文案全站隐藏 */
+  /** ★ v3.9.0（需求 3 拍板 C）：恢复合并式（catchHint 优先、回落 tierText）——
+      S4 删回落导致巴士段赶车标签蒸发；方案卡场景恢复原样（导航态隐藏保留） */
   const firstHint = first ? catchHintOf(first) : { text: "", isHint: false };
   /** ★ 本批（AC-50）：换乘可行性（观测钩子 H8 取值） */
   const transferFeasible = transferFeasibleOf(card);
@@ -248,9 +249,13 @@ export default function RecommendCard({
                 <EtaText text={first.liveText || `等 ${Math.round(first.waitMin)} 分`} />
               )
             }
-            /* ★ v3.7.0 S4：速度档文案全站隐藏（含其色阶）；只有真实时刻提示才渲染胶囊 */
+            /* ★ v3.3.0（AC-107）：赶车提示 = **合并式** TierBadge（带时刻文案进 `catchHint`，
+               回落到既有 `tierText`）—— 零新增元素/零新增行。
+               ★ v3.9.0（需求 3 拍板 C）：恢复 S4 删掉的 tier={first.tier} 与回落显示。 */
             aside={
-              firstHint.text ? <TierBadge tierText={firstHint.text} catchHint={firstHint.isHint} /> : null
+              firstHint.text ? (
+                <TierBadge tier={first.tier} tierText={firstHint.text} catchHint={firstHint.isHint} />
+              ) : null
             }
           />
         )}
@@ -295,9 +300,12 @@ export default function RecommendCard({
                   后续班车还有 <b>{a.stopsAway}</b> 站
                 </span>
               </span>
-              {/* ★ v3.7.0 S4：速度档文案（`a.tierText`）与其档位色阶一并移除 ——
-                  只删文案而留色阶 = 把信息挪进颜色通道，色觉障碍用户失去兜底。
-                  这一侧原本只放档位徽章，故整个右侧容器一起去掉。 */}
+              {/* ★ v3.9.0（需求 3 拍板 C）：恢复逐班档位徽章（S4 删除）——
+                  后续班次行在方案卡内、用户到站前，属恢复范围；
+                  「到站后隐藏」由导航态口径承担（方案卡无到站态，恒显示）。 */}
+              <span className="rc-altrow__right">
+                <span className={`rc-tier rc-tier--${a.tier}`}>{a.tierText}</span>
+              </span>
             </div>
           ))}
         </div>

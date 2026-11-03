@@ -502,7 +502,17 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       company: lastCompanyRef.current ?? v.company,
     });
     if (phase === "boarding") return lites.map(withCompany);
-    if (!plate) return [];
+    /**
+     * ★ v3.8.1 修复「导航时车辆图标消失」（因素 2）：**GPS 驱动段展示全部在途车**。
+     *   巴士段 R2 自动上车只在 A1（车刚离站且唯一）时锁牌（`boarding-detect.ts` 的
+     *   `lockedPlate = aux.strong ? aux.plate : null`），A2（车停靠/在途，多数实际场景）
+     *   刻意不锁 ⇒ `source="gps"`、`plate=null` 的 riding 会话并不少见。
+     *   旧逻辑此处返回 `[]` ⇒ 地图无车；且 S3 无牌轮询被 `MATCH_VEHICLE_ENABLED=false`
+     *   挡着 ⇒ 帧也不更新，双重消失。系统不知道"哪辆是我的"，用户同样不知道——
+     *   展示本线路全部在途车（与候车态同语义）比空白诚实。
+     *   ⚠️ 必须与"步行段降频轮询"成对：无牌时帧靠它供给，只改这里没有数据可显。
+     */
+    if (!plate) return lites.map(withCompany);
     const v = lites.find((x) => x.plate === plate);
     return v ? [withCompany(v)] : [];
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -975,13 +985,14 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   useEffect(() => {
     if (phase !== "boarding" || !active || !legs[legIndex]) return;
     /**
-     * ★ T1：**步行段不轮询车辆**。
-     *   会话起点从"站在站台上按开始导航"提前到"出门就开始走"⇒ 若照旧 12s 一帧，
-     *   走 5 分钟就是 25 次 `/api/route-vehicles`（配额 + DSAT 风控都吃不消），
-     *   而且此时给"哪辆车更可能是我要坐的"排序毫无意义（人还没到站）。
-     *   走进站台后 `walkActive` 变 false ⇒ 本 effect 重跑 ⇒ 立刻拉一帧 + 恢复轮询。
+     * ★ v3.8.1 修复「导航时车辆图标消失」（因素 1）：**步行段降频不停止**。
+     *   会话起点从"站在站台上按开始导航"提前到"出门就开始走"⇒ 步行段动辄 3–10 分钟；
+     *   若整段不轮询，`listLiteRef` 恒空 ⇒ 候车态地图全程零车（负责人线上反馈的根因之一）。
+     *   降频为 60s 一帧：配额代价 = 10 分钟步行 10 次请求（旧版站台起 5 分钟即 25 次，仍净省）；
+     *   且用户在步行段同样关心「要坐的车现在到哪了」——这不是纯等待时段。
+     *   ⚠️ `tryAuto` 的 `walkActiveRef` 早退**保持不变**：人没到站不判上车，逻辑不受影响。
+     *   走进站台后 `walkActive` 变 false ⇒ 本 effect 重跑 ⇒ 立刻拉一帧 + 恢复 12s 轮询。
      */
-    if (walkActive) return;
     let cancelled = false;
     let timer: number | null = null;
     /**
@@ -1022,7 +1033,8 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         if (!cancelled) schedule(POLL_MS); // 补刷后重置 12s
       });
     };
-    schedule(0);
+    // 步行段首发同样立即（用户点开始导航就该看到车），但后续间隔降到 60s（见上方 T1 修复说明）
+    schedule(walkActive ? POLL_MS * 5 : 0);
     resumeKickRef.current = kick;
     return () => {
       cancelled = true;
