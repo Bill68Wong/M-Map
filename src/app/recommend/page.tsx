@@ -13,6 +13,7 @@
  */
 import { Suspense } from "react";
 import RecommendClient from "@/components/RecommendClient";
+import BrandRouteLoader from "@/components/brand/BrandRouteLoader";
 import Icon from "@/components/ui/Icon";
 import { getPool } from "@/lib/db";
 import { PLACE_SHORT } from "@/lib/home-plans-shared";
@@ -103,20 +104,12 @@ function RecommendSkeleton({ from, to, zone }: { from: string; to: string; zone:
         )}
       </h1>
       <p className="t-label t-muted rc-subtitle">正在計算最快路線…</p>
-      <div className="rc-list">
-        {[0, 1, 2, 3, 4].map((i) => (
-          <div key={i} className="card rc rc--skeleton" aria-hidden="true">
-            <div className="rc-head">
-              <span className="rc-sk rc-sk--big" />
-              <span className="rc-sk rc-sk--chip" />
-            </div>
-            <div className="rc-line">
-              <span className="rc-sk rc-sk--line" />
-              <span className="rc-sk rc-sk--line" />
-              <span className="rc-sk rc-sk--line rc-sk--short" />
-            </div>
-          </div>
-        ))}
+      {/* ★ v3.9.0（05 规格 §12.2③）：rc-list 换为单个 M 容器（48px，min-height 240px）。
+          本页标题/副标题（「正在計算最快路線…」）就是该位置的 label —— **不重复传 label**
+          （§12.4：加了反而重复播报）。slot="list"；300ms 门（§12.0 总纲二）。
+          ⚠️ 与 loading.tsx 同形（§12.2④ 红线：两层必须同批同形，否则自造跳动）。 */}
+      <div className="rc-list rc-list--loading">
+        <BrandRouteLoader active size={48} slot="list" />
       </div>
     </main>
   );

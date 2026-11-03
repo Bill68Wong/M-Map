@@ -8,6 +8,7 @@
  * 数据由宿主 `useRecommend` 下发（同一份数据供宿主渲染 peek 摘要）。
  */
 import Icon from "@/components/ui/Icon";
+import BrandRouteLoader from "@/components/brand/BrandRouteLoader";
 import RecommendCards from "@/components/RecommendCards";
 import { lrtPromotedOf } from "@/components/RoutePieces";
 import type { RecommendCard } from "@/lib/recommend/types";
@@ -51,15 +52,14 @@ export default function RouteResultPane({ phase, data, err, onRetry, onCardOpen 
       )}
 
       {phase === "loading" && !data && (
-        <div className="rc-list" aria-hidden="true">
-          {[0, 1, 2].map((i) => (
-            <div className="card rc rc--skeleton" key={i}>
-              <span className="rc-sk rc-sk--big" />
-              <span className="rc-sk rc-sk--chip" />
-              <span className="rc-sk rc-sk--line" />
-              <span className="rc-sk rc-sk--line rc-sk--short" />
-            </div>
-          ))}
+        /* ★ v3.9.0（05 规格 §12.2①）：等待卡 ×1 —— 保留 .card 轮廓防面板塌缩（min-height 112px），
+            去掉全部 rc-sk；32px M（规格 §12.1 紧凑档：卡内 48px 喧宾夺主）+ label。
+            ⚠️ 不再加 aria-hidden：label 要进 live region（role="status"）让读屏播报。
+            slot="list"：QA 断言用；门控 300ms 与 request 相同（§12.0 总纲二）。 */
+        <div className="rc-list">
+          <div className="card rc rc--loading">
+            <BrandRouteLoader active size={32} slot="list" label="正在搜索路线…" />
+          </div>
         </div>
       )}
 

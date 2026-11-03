@@ -91,14 +91,14 @@ export interface NavDetailBodyProps {
   /** ★ 全屏化（导航中收敛间距） */
   immersive?: boolean;
   /**
-   * ★ v3.6.0 S5：进入步行跟随（用户显式点击「开始步行」）。
-   * ★ T1：**两段都可**（`out` = 走到上车站 / `in` = 下车站走到目的地）——
-   *   旧签名写死 `"out"`，导致末段步行入口是死代码（`NavShell` 的 `walkOds.in` 备好却没人调）。
+   * ★ v3.9.0：~~进入步行跟随（用户显式点击「开始步行」）~~ **「开始步行」按钮已删除**
+   *   （负责人 2026-11-03：主流程全自动推进——开始导航 ⇒ 直接进步行出发段、下车 ⇒ 自动
+   *   进步行到达段——该按钮是冗余入口，且与「开始导航」双入口并存属重复按钮）。
+   *   「步骤」展开键的门控改用 `onWalkExpand`（语义等价：导航详情传、收藏薄壳不传）。
+   * ★ T1：**两段都可**（`out` = 走到上车站 / `in` = 下车站走到目的地）。
    * 传 `undefined` ⇒ 本组件**不渲染**展开键（收藏页 `RouteDetailSheet` 无地图上下文，走这条）。
    */
-  onWalkStart?: ((seg: "out" | "in", steps: WalkStep[]) => void) | null;
-  /** 展开步骤时回调（调用方据此 `ensure()` 取数；命中缓存则零请求） */
-  onWalkExpand?: (seg: "out" | "in") => void;
+  onWalkExpand?: ((seg: "out" | "in") => void) | null;
   /** 首段步行预览数据（由宿主 `useWalkRoute` 提供） */
   walkPreview?: WalkPreview;
   /** ★ T1：末段步行预览数据（下车站 → 目的地；缺省 = 不渲染末段入口） */
@@ -122,7 +122,6 @@ export default function NavDetailBody({
   destCoord = null,
   onSwitchCard,
   immersive = false,
-  onWalkStart,
   onWalkExpand,
   walkPreview = EMPTY_WALK_PREVIEW,
   walkInPreview = EMPTY_WALK_PREVIEW,
@@ -135,7 +134,7 @@ export default function NavDetailBody({
   const [walkOpen, setWalkOpen] = useState<"out" | "in" | null>(null);
   const colorOf = (c: string) => colors[c] ?? null;
   const first = card.rides[0];
-  /** ★ v3.7.0 S4：只有真实时刻提示（`catchHint`）；速度档文案全站隐藏 */
+  /** ★ v3.9.0（需求 3 拍板 C）：恢复合并式（catchHint 优先、回落 tierText） */
   const firstHint = first ? catchHintOf(first) : { text: "", isHint: false };
   /** ★ v3.3.0（AC-102）：总览栏线路标签 = 与推荐卡同构的分段结构（含段内并行线） */
   const routeSegments = card.rides.map((r) => ({ codes: [r.route, ...(r.parallelRoutes ?? [])] }));
@@ -245,13 +244,9 @@ export default function NavDetailBody({
               longWalk={pv.totalDistM > 2500}
             />
             <div className="rc-walkpreview__foot">
-              <button
-                type="button"
-                className="btn btn--outline btn--sm rc-walkpreview__go"
-                onClick={() => onWalkStart?.(seg, pv.serverSteps)}
-              >
-                开始步行
-              </button>
+              {/* ★ v3.9.0：「开始步行」按钮已删（负责人 2026-11-03）——主流程全自动推进
+                  （NavShell `startSession`），此按钮是与「开始导航」重复的第二入口。
+                  步骤列表与「全程 · 时间」摘要保留。 */}
               {pv.totalDistM > 0 && (
                 <span className="rc-walkpreview__go-meta">
                   全程 {distText(pv.totalDistM)} · 约 {Math.max(1, Math.round(pv.totalMin))} 分钟
@@ -318,13 +313,13 @@ export default function NavDetailBody({
            * 布局实测逻辑在 `toggleWalk()`（两段共用）。
            */
           aside={
-            onWalkStart ? (
+            onWalkExpand ? (
               <WalkSegToggle idPrefix="detail-out" open={walkOpen === "out"} onToggle={toggleWalk("out")} />
             ) : null
           }
         />
         {/* ★ v3.6.0 S5：展开的步骤列表（紧随「步行」行；预览态 currentIdx=-1 ⇒ 全部未走） */}
-        {onWalkStart && walkOpen === "out" && walkPreviewBlock("out", walkPreview, "detail-out")}
+        {onWalkExpand && walkOpen === "out" && walkPreviewBlock("out", walkPreview, "detail-out")}
         {first && (
           <Row
             dot="wait"
@@ -348,9 +343,13 @@ export default function NavDetailBody({
                 <EtaText text={first.liveText || `等 ${Math.round(first.waitMin)} 分`} />
               )
             }
-            /* ★ v3.7.0 S4：速度档文案全站隐藏；只在有真实时刻（`catchHint`）时渲染胶囊 */
+            /* ★ v3.3.0（AC-107）：赶车提示（合并式 TierBadge，同推荐卡槽位）。
+               ★ v3.9.0（需求 3 拍板 C）：恢复 S4 删掉的 tier={first.tier} 与回落显示——
+               详情卡属「方案卡场景」（用户到站前），负责人裁定恢复原样。 */
             aside={
-              firstHint.text ? <TierBadge tierText={firstHint.text} catchHint={firstHint.isHint} /> : null
+              firstHint.text ? (
+                <TierBadge tier={first.tier} tierText={firstHint.text} catchHint={firstHint.isHint} />
+              ) : null
             }
           />
         )}
@@ -427,7 +426,7 @@ export default function NavDetailBody({
            * 结构与首段同构：44×44「步骤」展开键 + 紧随其后的预览块。
            */
           aside={
-            onWalkStart ? (
+            onWalkExpand ? (
               <WalkSegToggle
                 idPrefix="detail-in"
                 open={walkOpen === "in"}
@@ -436,7 +435,7 @@ export default function NavDetailBody({
             ) : null
           }
         />
-        {onWalkStart && walkOpen === "in" && walkPreviewBlock("in", walkInPreview, "detail-in")}
+        {onWalkExpand && walkOpen === "in" && walkPreviewBlock("in", walkInPreview, "detail-in")}
       </div>
 
       {/* 上车站其他线路（线路为父、方案为子） */}

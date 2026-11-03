@@ -8,6 +8,7 @@
  *    server component 与 client component 都能直接 import。
  */
 import Icon from "@/components/ui/Icon";
+import type { CatchTier } from "@/lib/recommend/types";
 
 /** 澳门时刻 HH:MM（与服务端 hhmm 同口径：+8h 后取当日余秒） */
 export function macauClock(ms: number): string {
@@ -16,18 +17,19 @@ export function macauClock(ms: number): string {
 }
 
 /**
- * ★ v3.3.0（AC-107）→ ★ v3.7.0 S4 收紧：取本段「赶车提示」文案。
+ * ★ v3.3.0（AC-107）：取本段「赶车提示」文案 —— `RideLegView.catchHint`（带时刻变体）**优先**，
+ * 回落既有 `tierText`。合并式：同一 `TierBadge` 胶囊同时承载档位色与「可赶上 HH:MM」。
  *
- * 旧版是「`catchHint` 优先、回落 `tierText`」的**合并式**；v3.7.0 起速度档文案全站隐藏
- * （见 `TierBadge`），回落分支已无渲染出口 ⇒ 这里**只返回 `catchHint`**：
- *   · `text` 为空 = 本段没有真实到站时刻 ⇒ 调用方不渲染任何胶囊（AC4.2 不臆造时刻）；
- *   · `isHint` 保留（调用方 JSX 与测试钩子仍按它判断）。
+ * ★ v3.9.0（需求 3 · 负责人拍板 C「恢复原样」）：**恢复 S4 删掉的 `tierText` 回落**。
+ *   S4（v3.8.0）把回落删掉后，巴士段（从无 `catchHint`）的赶车标签整体消失——
+ *   负责人裁定恢复方案卡上的显示（知情选择与 S4 原拍板「隐藏档位词」存在张力，已记录在案）。
+ *   范围仅限**方案卡场景**（推荐卡/详情卡，用户到站前）；导航态/站条/到站后的隐藏**保留**。
  */
 export function catchHintOf(leg: { tierText?: string; catchHint?: string }): {
   text: string;
   isHint: boolean;
 } {
-  return { text: leg.catchHint ?? "", isHint: !!leg.catchHint };
+  return { text: leg.catchHint ?? leg.tierText ?? "", isHint: !!leg.catchHint };
 }
 
 /**
@@ -58,26 +60,33 @@ export function dirTextOf(name?: string | null): string | null {
 }
 
 /**
- * 赶车提示胶囊（★ v3.7.0 S4 收敛为**只显示真实时刻**）
+ * 赶车分档徽章（★ v3.9.0 需求 3 · 负责人拍板 C：**恢复 S4 删除前的原样**）
  *
- * ── 为什么删掉 `tier` ──────────────────────────────────────────────────
- *   负责人按**内容**定的口径：「保留一切时间，隐藏的是『全力冲刺有机会赶上 / 小跑能赶上 /
- *   正常走能赶上』这类文案标签」。⇒ 本组件只剩一种可渲染内容：`catchHint`
- *   （带真实时刻的「走快一点可赶上 HH:MM 那班」）。
+ * ── 恢复史（三层口径叠代，读代码前先看这段）──────────────────────────
+ *   · v1.0.6~v3.2.0：5 档配色徽章（`rc-tier--{tier}`），文案 = `TIER_TEXT`（「小跑能赶上」等）。
+ *   · v3.3.0（AC-107）：合并式 —— 轻轨段的「走快一点可赶上 HH:MM 那班」（`catchHint`）优先，
+ *     回落档位文案；同一胶囊承载。
+ *   · v3.7.0 S4（v3.8.0 上线）：按当时拍板删档位词与色阶 —— **执行过头**：回落分支一并删除，
+ *     巴士段（从无 catchHint）的赶车标签整体蒸发。
+ *   · ★ v3.9.0：负责人裁定**恢复原样**（本版）。知情选择与 S4 原拍板存在张力，已记录在案。
+ *     范围仅限**方案卡场景**（推荐卡/详情卡/计卡详情，用户到站前）；
+ *     导航态/站条/到站后的隐藏是负责人原始需求，保留不动。
  *
- *   · 判据必须是 `catchHint`（是否赶车提示），**不是** `tier !== null` ——
- *     否则会把「可赶上 HH:MM」一起隐藏掉（AC4.1 / AC4.2）；
- *   · **档位色阶一并去掉**：`rc-tier--{tier}` 若留着，等于把被删掉的信息挪进颜色通道，
- *     色觉障碍用户反而失去兜底（AC4.4）。故 `tier` 参数**整体移除**，
- *     让任何调用方都无法再传档位、也无法再拿到档位颜色。
- *   · 保留 `.rc-tier` 基础样式（中性底色胶囊）：它是「时刻提示」的容器，不是档位编码。
- *
- * 观测钩子：渲染出来即 `data-catch-hint="on"`（测试用它定位胶囊后断言文案里无速度档词）。
+ * 观测钩子：渲染出来即 `data-catch-hint="on"`（仅当承载的是带时刻的 catchHint 变体；
+ *   档位词回落不算「赶车提示时刻」——与 S4 前语义一致）。
  */
-export function TierBadge({ tierText, catchHint = false }: { tierText: string; catchHint?: boolean }) {
-  if (!catchHint || !tierText) return null;
+export function TierBadge({
+  tier,
+  tierText,
+  catchHint = false,
+}: {
+  tier: CatchTier | null;
+  tierText: string;
+  catchHint?: boolean;
+}) {
+  if (tier === null || !tierText) return null;
   return (
-    <span className="rc-tier" data-catch-hint="on">
+    <span className={`rc-tier rc-tier--${tier}`} data-catch-hint={catchHint ? "on" : undefined}>
       {tierText}
     </span>
   );

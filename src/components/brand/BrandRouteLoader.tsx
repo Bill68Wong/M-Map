@@ -31,13 +31,15 @@ export interface BrandRouteLoaderProps {
   /** 分步文案（主角）；缺省只出图标 */
   label?: string;
   /**
-   * 调用点消歧（观测钩子）。两个调用点可能同时存在，`[data-loader-root]` 会命中多个：
-   *   · `map-cover`  遮「开屏结束 → 地图就绪」的空窗（居中、无 label）
+   * 调用点消歧（观测钩子）。多个调用点可能同时存在，`[data-loader-root]` 会命中多个：
+   *   · `map-cover`  遮「开屏结束 → 地图就绪」的空窗（居中、无 label；门控 0）
    *   · `request`    遮请求等待（内联在文案行左侧、带 label）
+   *   · `list`       结果列表等待卡（05 规格 §12.2①）
+   *   · `detail`     详情/计卡详情加载（§12.2②⑤）
    * ⚠️ 不提供 `data-loader-state`：组件在 `!active || !visible` 时 `return null`，
    *    「未加载」在 DOM 里没有节点 ⇒ 该属性恒为 "loading"，断言它恒真、零信息量。
    */
-  slot?: "map-cover" | "request";
+  slot?: "map-cover" | "request" | "list" | "detail";
 }
 
 /**
@@ -46,11 +48,14 @@ export interface BrandRouteLoaderProps {
  * · `map-cover`（居中位）⇒ **0**：开屏覆盖层（z-200 全屏）已经把这段加载遮了 ~960ms，
  *   用户从未见过「空的加载位」，因此这里再加 300ms 门控只会造成「开屏撤走 → 空 300ms →
  *   小 M 才出现」的空窗。开屏撤走的同一帧就该有小 M 在场（P7c）。
- * · `request`（内联位，带 label）⇒ **300**：快速请求不闪动画（NN/g：<1s 无需反馈）。
+ * · `request` / `list` / `detail`（内联位与新增位置，05 规格 §12.0 总纲二）⇒ **300**：
+ *   快速请求不闪动画（NN/g：<1s 无需反馈）；新 slot 落 300 分支，不为四个 slot 写四种门控。
  */
 const GATE_MS_BY_SLOT: Record<NonNullable<BrandRouteLoaderProps["slot"]>, number> = {
   "map-cover": 0,
   request: 300,
+  list: 300,
+  detail: 300,
 };
 
 export default function BrandRouteLoader({ active, size = 48, label, slot = "map-cover" }: BrandRouteLoaderProps) {

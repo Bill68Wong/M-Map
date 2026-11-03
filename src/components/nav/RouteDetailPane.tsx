@@ -14,6 +14,7 @@
  *   · `onSwitchCard`—— 折叠栏「切过去」→ 打开新方案导航（宿主提供）。
  */
 import { useMemo } from "react";
+import BrandRouteLoader from "@/components/brand/BrandRouteLoader";
 import NavDetailBody from "./NavDetailBody";
 import { snapshotOfCard, routeSegsOfCard } from "@/lib/favorites/snapshot";
 import type { FavoriteEndpoint } from "@/lib/favorites/types";
@@ -48,11 +49,10 @@ export interface RouteDetailPaneProps {
   destCoord?: { lng: number; lat: number } | null;
   /** ★ 2026-09-24：点「切过去」→ 打开新方案导航 */
   onSwitchCard?: (card: RecommendCard, degraded: boolean) => void;
-  /** ★ v3.6.0 S5：步行跟随入口（宿主提供； ⇒ 不渲染展开键） */
-  onWalkStart?:
-    | ((seg: "out" | "in", steps: import("@/lib/walk/walk-shared").WalkStep[]) => void)
-    | null;
-  onWalkExpand?: (seg: "out" | "in") => void;
+  /** ★ v3.6.0 S5：步行步骤展开取数（宿主提供；缺省 ⇒ 不渲染展开键）。
+   *  ★ v3.9.0：原 `onWalkStart`（「开始步行」按钮）已删——按钮是重复入口，
+   *  展开键门控改由本 prop 承担（语义等价：导航详情传、收藏薄壳不传）。 */
+  onWalkExpand?: ((seg: "out" | "in") => void) | null;
   walkPreview?: import("./NavDetailBody").WalkPreview;
   /** ★ T1：末段步行预览（下车站 → 目的地） */
   walkInPreview?: import("./NavDetailBody").WalkPreview;
@@ -75,7 +75,6 @@ export default function RouteDetailPane({
   track = null,
   destCoord = null,
   onSwitchCard,
-  onWalkStart,
   onWalkExpand,
   walkPreview,
   walkInPreview,
@@ -98,11 +97,10 @@ export default function RouteDetailPane({
   return (
     <div className="route-pane route-pane--detail" aria-label={`路线详情 ${odLabel}`}>
       {phase === "loading" && (
-        <div className="cd-sk" aria-hidden="true">
-          <span className="rc-sk rc-sk--big" />
-          <span className="rc-sk rc-sk--line" />
-          <span className="rc-sk rc-sk--line rc-sk--short" />
-          <span className="rc-sk rc-sk--line" />
+        /* ★ v3.9.0（05 规格 §12.2②）：48px M 居中 + label，容器 min-height 120px
+            （≈原骨架高度，防面板塌缩）；去掉全部 rc-sk。slot="detail"（§12.5）。 */
+        <div className="cd-loading">
+          <BrandRouteLoader active size={48} slot="detail" label="正在加载路线详情…" />
         </div>
       )}
       {phase === "failed" && (
@@ -130,7 +128,6 @@ export default function RouteDetailPane({
           track={track}
           destCoord={destCoord}
           onSwitchCard={onSwitchCard}
-          onWalkStart={onWalkStart}
           onWalkExpand={onWalkExpand}
           walkPreview={walkPreview}
           walkInPreview={walkInPreview}

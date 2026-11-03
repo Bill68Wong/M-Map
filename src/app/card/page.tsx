@@ -13,6 +13,7 @@
 import { redirect } from "next/navigation";
 import { Suspense } from "react";
 import CardDetailClient from "@/components/card/CardDetailClient";
+import BrandRouteLoader from "@/components/brand/BrandRouteLoader";
 import Icon from "@/components/ui/Icon";
 import { getPool } from "@/lib/db";
 import { PLACE_SHORT } from "@/lib/home-plans-shared";
@@ -82,7 +83,7 @@ async function DetailSection({
   );
 }
 
-/** 路由级骨架（形状与真内容一致，避免填充时跳动） */
+/** 路由级骨架（★ v3.9.0 · 05 规格 §12.2⑤：M 48px 居中 + label，min-height 120px；slot="detail"） */
 function CardSkeleton() {
   return (
     <main className="page rc-detail">
@@ -92,11 +93,8 @@ function CardSkeleton() {
           返回
         </span>
       </div>
-      <div className="cd-sk">
-        <span className="rc-sk rc-sk--big" />
-        <span className="rc-sk rc-sk--line" />
-        <span className="rc-sk rc-sk--line rc-sk--short" />
-        <span className="rc-sk rc-sk--line" />
+      <div className="cd-loading">
+        <BrandRouteLoader active size={48} slot="detail" label="正在加载路线详情…" />
       </div>
     </main>
   );
