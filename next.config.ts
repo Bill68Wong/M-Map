@@ -18,8 +18,17 @@ const nextConfig: NextConfig = {
    *   ⇒ 本地构建与启动统一改用全新目录绕开。⚠️ Vercel 端未设该变量 ⇒ 行为与既有完全一致。
    */
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  // DSAT 接口仅由服务端调用，无需跨域配置
-  experimental: {},
+  /**
+   * ⚠️ Next 16 起 `next build` 默认使用 **Turbopack**（不再需要 `--turbopack`）。
+   *   本仓**没有**自定义 `webpack` 配置 ⇒ 不会触发「有 webpack 配置时 build 失败」的保护。
+   *   升级实测（2026-11-03）：Turbopack 下 `pg` 外部化行为与 webpack **完全一致**
+   *   （两者产物 `nft.json` 中 `pg` 相关路径均为 828 条）⇒ **无需** `serverExternalPackages`，
+   *   不要为了"保险"添加未经验证的配置。
+   *
+   *   已删除原先的空 `experimental: {}`（Next 16 下无内容，留着只会误导）。
+   *
+   * DSAT 接口仅由服务端调用，无需跨域配置
+   */
   async rewrites() {
     return [
       // ★ v1.3.0 高德 JS API 安全代理（设计 §2.D）
