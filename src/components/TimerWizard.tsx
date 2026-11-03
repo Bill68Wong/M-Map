@@ -134,6 +134,27 @@ const stopFs = (name: string): number | undefined => {
   return 18;
 };
 
+/**
+ * v1.0.0：会话已带座区 → 只回显一行（不再询问，避免与首页已选重复）
+ *
+ * ⚠️ **必须声明在模块级，不能放回 `TimerWizard` 内部**：
+ *   它是以 `<ZoneLocked />`（JSX 挂载）使用的组件，若定义在 render 内，每次渲染都会
+ *   产生一个新的组件类型 ⇒ React 视为不同组件、卸载重建子树，子树内的状态与 DOM 都会被重置。
+ *   React Compiler 的 `react-hooks/static-components` 规则正是针对这一点
+ *   （Next 16 升级时实测在本文件命中 2 处，即它的两处 `<ZoneLocked … />` 用法）。
+ *   本组件是纯展示、只读 `label` 入参，提升到模块级后行为完全一致且不再有该隐患。
+ */
+function ZoneLocked({ label }: { label: string }) {
+  return (
+    <div className="card" style={{ padding: "10px 14px" }}>
+      <p className="t-label">
+        {label}
+        <span className="t-muted"> · 已由自動選線帶入</span>
+      </p>
+    </div>
+  );
+}
+
 export default function TimerWizard({ sessionId }: { sessionId: number }) {
   const router = useRouter();
   const [data, setData] = useState<SessionData | null>(null);
@@ -671,15 +692,7 @@ export default function TimerWizard({ sessionId }: { sessionId: number }) {
         : null;
   const curLine = (curRoute && routeColors[curRoute]) || step?.lineColor || null;
 
-  /** v1.0.0：会话已带座区 → 只回显一行（不再询问，避免与首页已选重复） */
-  const ZoneLocked = ({ label }: { label: string }) => (
-    <div className="card" style={{ padding: "10px 14px" }}>
-      <p className="t-label">
-        {label}
-        <span className="t-muted"> · 已由自動選線帶入</span>
-      </p>
-    </div>
-  );
+  /* ZoneLocked 已提升到模块级（见文件顶部）—— 理由见该处注释 */
 
   /** 分区 chips（单选可取消；不选也不阻塞打点） */
   const renderZones = (question: string, value: string | null, onChange: (v: string | null) => void) => (
