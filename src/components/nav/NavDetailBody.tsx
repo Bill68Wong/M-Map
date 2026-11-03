@@ -27,6 +27,13 @@ import { LrtEtaInline } from "@/components/LrtEta";
 import { catchHintOf, directionNameOf, EtaText, Row, TierBadge, macauClock } from "@/components/RoutePieces";
 import type { FavoriteEndpoint, PlanSnapshot, RouteSeg } from "@/lib/favorites/types";
 import type { RecommendCard, SegmentStrip } from "@/lib/recommend/types";
+import {
+  ARRIVE_OVERDUE_TEXT,
+  REMAIN_ARRIVED_TEXT,
+  remainOf,
+  remainServedOf,
+  remainTotalMinOf,
+} from "@/lib/nav/remaining-view";
 import type { RideTrackView } from "./useRideTracking";
 /* ★ v3.6.0 S5：步行预览（展开键 + 静态步骤列表） */
 import WalkSegToggle from "@/components/walk/WalkSegToggle";
@@ -103,6 +110,55 @@ export interface NavDetailBodyProps {
   walkPreview?: WalkPreview;
   /** ★ T1：末段步行预览数据（下车站 → 目的地；缺省 = 不渲染末段入口） */
   walkInPreview?: WalkPreview;
+  /**
+   * ★ 2026-11-03（需求 1）：**服务端重算的剩余行程**（`POST /api/nav/remaining` 产物）。
+   *   缺省 `null` ⇒ 完全走客户端兜底（由 `card.arriveAt` 与当前时刻派生），首屏即刻可用。
+   *
+   *   为什么通过「绝对到达时刻 + 时钟偏移」传，而不是直接传相对分钟：
+   *   相对值一过网络往返/服务端缓存就偏大（`/api/station/eta` 已踩过，见
+   *   `src/app/api/station/eta/route.ts:120-125` 的 `serverNowMs` 注释）。传 `arriveAt`
+   *   + `clockOffsetMs`，渲染时现算，**不受往返延迟影响**，也不会「每次跳一格」。
+   */
+  liveRemain?: {
+    /** 服务端剩余分钟（相对）—— 总时长显示的唯一来源（**不用 arriveAt 反算**） */
+    remainingMin: number;
+    /** 服务端绝对到达时刻（ms）—— 到达时刻显示的唯一来源 */
+    arriveAt: number;
+    /** 服务端响应生成时刻（ms）—— 时间轴对齐 */
+    serverNowMs: number;
+    /** 缓存陈旧秒（命中微缓存时 `remainingMin` 已过时这么久）—— 必须扣掉，否则偏大 */
+    staleSec: number;
+    /** 客户端相对服务端的时钟偏移（ms）；0 = 无服务端结果 */
+    clockOffsetMs: number;
+    /** ★ 每次**真重算**自增 ⇒ 观测钩子 `data-recompute-seq`（区分「真重算」与「重渲染同一帧」） */
+    seq: number;
+  } | null;
+  /**
+   * ★ 2026-11-03（需求 1）：**服务端重算后的纵条**（整份 `SegmentStrip[]`）。
+   *   有值 ⇒ **整份替换**静态 `strips` 传给 `NavStrip`（不是打补丁），保证
+   *   「顶部总时长」与「纵条各段分钟」来自同一份数据 ⇒ 整屏一致。
+   *
+   *   ⛔ 红线：调用方只允许替换 `body.strips`，**绝不能碰 `body.legs`** ——
+   *   否则 `useRouteOverview` 会走 `setLegs([])` + `setBox(null)`（`useRouteOverview.ts:84-89`），
+   *   地图彩段被清空重画、取景被放弃，导航中视野会跳。
+   */
+  liveStrips?: SegmentStrip[] | null;
+  /**
+   * ★ 2026-11-03（批 1）：**最近一次剩余行程重算的失败形态**（`"403:forbidden"` 等）。
+   *   `null`/缺省 ⇒ 最近一次成功或还没请求过 ⇒ 观测钩子 `data-remain-fail` **不输出**。
+   *
+   * ⚠️⚠️ **本属性缺失 ≠「刷新成功」**（写断言前必读）：
+   *   缺失还可能是**从未发起**重算 —— `boarding` 相位（端点被刻意排除）/ LRT 腿 /
+   *   请求在飞 / 面板刚开 `card` 未就绪。
+   *   ⇒ 断言「刷新成功」**必须同时看 `data-recompute-seq` 递增**（它只在真重算成功时 +1）。
+   *   只判「本属性不存在」= 把「没发起」误判成「成功了」，是典型的假绿。
+   *
+   *   为什么必须暴露到 DOM：负责人主诉是「点了刷新有反应但不知道刷新了什么」，
+   *   而 403/5xx 会被静默吞掉（`fetch` 对 4xx 不抛 ⇒ 连 catch 都不进）⇒
+   *   用户看到「点了完全没反应」= **同款失败模式的更严重版本**。
+   *   有了这个属性，QA 可断言「点刷新后不得出现 `403:*`」，线上也可一眼看出是 403 还是 5xx。
+   */
+  liveRemainFail?: string | null;
 }
 
 export default function NavDetailBody({
@@ -125,6 +181,9 @@ export default function NavDetailBody({
   onWalkExpand,
   walkPreview = EMPTY_WALK_PREVIEW,
   walkInPreview = EMPTY_WALK_PREVIEW,
+  liveRemain = null,
+  liveStrips = null,
+  liveRemainFail = null,
 }: NavDetailBodyProps) {
   /**
    * ★ T1：步行步骤展开态（不记忆，父组件持有亦不落盘）。
@@ -175,6 +234,47 @@ export default function NavDetailBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [etaTick, etaBaseMin, progKey]);
   const stopsAway = track && track.prog ? Math.max(0, trackStops.length - 1 - track.prog.passedIdx) : 0;
+
+  /* ══════════════════════════════════════════════════════════════════════
+     ★ 2026-11-03（需求 1）：全程剩余 / 到达时刻「活」起来
+     ─────────────────────────────────────────────────────────────────────
+     改造前 `card.totalMin` / `card.arriveAt` 是**规划时快照**，永不重算：
+     总时长永远停在规划那一刻，到达时刻是个死时刻（时间在走它不动）。
+     现在改为**现算**，任何一次渲染（含刷新）都自洽。
+
+     ── 两个入口，按有无服务端结果分流（契约见 team-lead 冻结版）──────
+       · 有服务端结果（`liveRemain`）⇒ `remainServedOf`：
+           **总时长 = `remainingMin` 基准**（扣缓存陈旧 + 扣响应后流逝）；
+           **到达时刻 = `arriveAt` 绝对锚**。两条独立，**不用 arriveAt 反算总时长**。
+       · 无服务端结果 ⇒ `remainOf(card.arriveAt, now)` 兜底（首帧 / 请求失败 / 非乘车段）。
+
+     · 当前时刻：`Date.now() + clockOffsetMs`（本地时间映射到服务端时间轴）；
+       ⚠️ **禁止渲染期直接 `Date.now()`**（`useCooldown.ts:15` 项目纪律）⇒ 取在
+       `useMemo` 里，且**只由既有 15s `etaTick` 驱动**（不新增第二个定时器）。
+     · 两条语义红线（刻意不同，勿"统一"）见 `src/lib/nav/remaining-view.ts` 头注。
+     ══════════════════════════════════════════════════════════════════════ */
+  const clockOffsetMs = liveRemain?.clockOffsetMs ?? 0;
+  /** 服务端时间轴上的"现在"（无服务端结果时等于本地时间） */
+  const remainNowMs = useMemo(
+    () => Date.now() + clockOffsetMs,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [etaTick, clockOffsetMs],
+  );
+  const remain = useMemo(
+    () =>
+      liveRemain
+        ? remainServedOf({
+            remainingMin: liveRemain.remainingMin,
+            serverNowMs: liveRemain.serverNowMs,
+            staleSec: liveRemain.staleSec,
+            arriveAtMs: liveRemain.arriveAt,
+            nowMs: remainNowMs,
+          })
+        : remainOf(card.arriveAt, remainNowMs),
+    [liveRemain, remainNowMs, card.arriveAt],
+  );
+  /** 全程剩余（整数分钟，已 clamp ≥0 —— **绝不出现 "-3 分"**） */
+  const remainTotalMin = remainTotalMinOf(remain);
   /** ★ T4：末段步行的「到达站」是否与目的地同名（同名 ⇒ 不重复渲染；口径见行内注释） */
   const walkInTo = (card.walkIn.toLabel ?? "").trim();
   const showWalkInTo = walkInTo.length > 0 && walkInTo !== (destLabel ?? "").trim();
@@ -271,15 +371,54 @@ export default function NavDetailBody({
 
   return (
     <>
-      {/* 头部：总用时 / 到达 + 线路标签**同行**（★ 去灰框、仅下分割线；删「估算」） */}
-      <div className="rc-dhead">
+      {/* 头部：总用时 / 到达 + 线路标签**同行**（★ 去灰框、仅下分割线；删「估算」）
+          ★ 2026-11-03（需求 1）：总用时改**剩余**（clamp ≥0，归零切「即将到达」）；
+            到达时刻用权威值（服务端重算 → 回落规划值），overdue 时标「预计已过」。
+            ⛔ 两处必须与 peek 摘要（`RouteSheet`）同源同次 —— 只改一处会让面板
+               收起到 peek 后数字变回规划值（本项目已踩过的「两个真相」缺陷）。 */}
+      <div
+        className="rc-dhead"
+        data-remain-total={remainTotalMin}
+        /* ★ 2026-11-03：**服务端 `remainingMin` 原值**（未扣 tick 递减的校准锚点；无服务端结果时不输出）。
+           为什么需要它：`data-remain-total` 是每秒随 `nowMs` 递减的**显示值**，
+           QA 拿它做「刷新后变小了多少」的断言会被 15s tick 的噪声干扰；
+           本属性给的是服务端那一帧的原始基准 ⇒ 差值断言干净可复现。
+           ⚠️ 与 `data-eta-base` 是**两个不同指标**（前者=全程①，后者=本段④），勿混。 */
+        data-remain-base={liveRemain ? Math.round(liveRemain.remainingMin * 10) / 10 : undefined}
+        data-arrive-at={Math.round(remain.arriveAtMs)}
+        data-recompute-seq={liveRemain?.seq ?? 0}
+        /* ★ 2026-11-03（批 1）：失败留痕。**成功时不输出该属性**（`undefined` 即不渲染）。
+           QA 断言：点刷新后不得出现以 `403` 开头的值。
+           ⚠️⚠️ **本属性缺失 ≠「刷新成功」**：也可能是**从未发起** ——
+                 · `boarding` 相位（本端点被刻意排除，见 `useNavRemaining` 的 `enabled`）
+                 · LRT 腿（`refreshScope === "lrt"`，车辆帧与剩余重算都不产生新值）
+                 · 请求还在飞（首帧未回）
+                 · 面板刚打开、`card` 尚未就绪
+           ⇒ **断言「刷新成功」必须同时看 `data-recompute-seq` 递增**（它只在真重算成功时 +1）。
+             只判「本属性不存在」会把「没发起」误判成「成功了」—— 典型的假绿。 */
+        data-remain-fail={liveRemainFail ?? undefined}
+      >
         <div className="rc-dhead__l">
           <div className="rc-dhead__total">
-            <span className="rc-total">{Math.round(card.totalMin)}</span>
-            <span className="rc-total__unit">分</span>
+            {remain.arrived ? (
+              <span className="rc-total rc-total--arrived">{REMAIN_ARRIVED_TEXT}</span>
+            ) : (
+              <>
+                <span className="rc-total">{remainTotalMin}</span>
+                <span className="rc-total__unit">分</span>
+              </>
+            )}
           </div>
           <span className="rc-dhead__arrive">
-            预计 <b>{macauClock(card.arriveAt)}</b> 到达
+            {remain.overdue ? (
+              <>
+                {ARRIVE_OVERDUE_TEXT} <b>{macauClock(remain.arriveAtMs)}</b>
+              </>
+            ) : (
+              <>
+                预计 <b>{macauClock(remain.arriveAtMs)}</b> 到达
+              </>
+            )}
             {card.crossBorder && <span className="rc-warn"> · 不含通关</span>}
           </span>
         </div>
@@ -355,9 +494,26 @@ export default function NavDetailBody({
         )}
       </div>
 
-      {/* 距下车站还有 N 站（导航中；AC-02 站数刻度）· ★ v3.4.0：下方小字「约 X 分钟」 */}
+      {/* 距下车站还有 N 站（导航中；AC-02 站数刻度）· ★ v3.4.0：下方小字「约 X 分钟」
+          ★ 2026-11-03（需求 1）：本数字与顶部「全程剩余」**刻意不同源、不同语义**：
+            这里是「到**下车**还有多久」⇒ 保留 `Math.max(1, …)` 地板（写「还有 0 分钟」
+            读起来像已到站，会与到站提醒抢语义）；顶部是「全程还剩多久」⇒ clamp 0 + 切文案。
+
+          ⚠️⚠️ `data-eta-base` 的**准确语义**（team-lead 要求确认，勿再误用）：
+            它是**本块（④ 距下车还有几分钟）的本地校准锚点**，值 = `etaBaseMin`，
+            来源是 `track.segProgress.segRemainSec`（车辆帧的服务端投影 + 客户端时间项融合）
+            或退化为「沿站条从 nextIdx 逐跳求和 `minToNext`」。
+            **它 ≠ `/api/nav/remaining` 的 `remainingMin`（① 全程剩余）**，两者是不同指标：
+              · ④ = 本段到下车；① = 全程到目的地（含下游各段与末段步行）。
+            ⇒ **不要用 `data-eta-base` 断言「服务端重算生效」**。那条断言只能用
+              `data-remain-base`（= 服务端 `remainingMin` 原值，见头部 `.rc-dhead`），
+              或 `data-recompute-seq`（每次真重算 +1）。用错了会假红。 */}
       {track && track.phase === "riding" && track.prog && trackStops.length >= 2 && (
-        <div className="nav-note-neutral nav-note-neutral--eta">
+        <div
+          className="nav-note-neutral nav-note-neutral--eta"
+          data-stops-away={stopsAway}
+          data-eta-base={Math.round(etaBaseMin * 10) / 10}
+        >
           <div className="nav-note__main">
             <span className="navstrip__badge">距离</span>
             距下车站还有 <b>{stopsAway}</b> 站
@@ -369,14 +525,18 @@ export default function NavDetailBody({
         </div>
       )}
 
-      {/* 进度纵条（一趟一条；导航中仅当前乘车段显示实时进度） */}
+      {/* 进度纵条（一趟一条；导航中仅当前乘车段显示实时进度）
+          ★ 2026-11-03（需求 1）：`liveStrips`（服务端重算后的整份纵条）**优先于**静态 `strips`。
+            ⇒ 顶部「全程剩余」与纵条「车上约 N 分 / 等车约 N 分」来自同一份重算数据 ⇒ 整屏一致。
+            ⚠️ 这里是**整份替换**、不改 `NavStrip` 渲染逻辑；`key` 仍按路线+上下车站拼，
+               因此组件的 `open` 展开态不会因替换而丢失。 */}
       <div className={`rc-strips${immersive ? " rc-strips--immersive" : ""}`}>
-        {strips.map((strip, i) => (
+        {(liveStrips ?? strips).map((strip, i, arr) => (
           <NavStrip
             key={`${strip.route}-${strip.board}-${i}`}
             strip={strip}
             color={colorOf(strip.route)}
-            last={i === strips.length - 1}
+            last={i === arr.length - 1}
             nav={
               track && track.phase === "riding" && track.prog && i === track.legIndex
                 ? {
@@ -390,7 +550,7 @@ export default function NavDetailBody({
                   }
                 : null
             }
-            nextKind={strips[i + 1]?.kind ?? null}
+            nextKind={arr[i + 1]?.kind ?? null}
             frozen={!!track && track.phase === "riding" && !!track.note}
           />
         ))}

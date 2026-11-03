@@ -1299,6 +1299,17 @@ button[aria-disabled="true"] {
   font-weight: 500;
 }
 
+/* ★ 2026-11-03（需求 1）：全程剩余归零时的替代文案（「即将到达」）——
+   沿用 `.rc-total` 的槽位与字重，但**降字号**：它是文本不是数字，
+   30px 的大字排版会把「即将到达」撑成视觉主体，反而盖过线路标签。
+   走 Token（`--on-surface-var`）⇒ 语义上也从「数字」降为「辅助说明」。 */
+.rc-total--arrived {
+  font-size: 18px;
+  letter-spacing: 0;
+  color: var(--on-surface-var);
+  font-variant-numeric: normal;
+}
+
 /* ── 时间线 ── */
 .rc-line {
   display: flex;
@@ -6676,34 +6687,9 @@ body[data-sheet="open"] .nav-searchbar {
 .nav-actions__sub { color: var(--muted); font-weight: 400; }
 .nav-actions .btn.is-emph { color: var(--accent); font-weight: var(--fw-announce); }
 .nav-actions__btnrow { display: flex; align-items: center; gap: 10px; }
-.nav-actions__iconbtn {
-  width: 40px;
-  height: 40px;
-  flex: none;
-  position: relative; /* 冷却角标锚点（★ v3.6.0 S4） */
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: var(--frame-w) solid var(--border-2);
-  border-radius: var(--radius-btn);
-  background: var(--surface);
-  color: var(--fg-2);
-  cursor: pointer;
-}
-.nav-actions__iconbtn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
-.nav-actions__iconbtn[disabled] { opacity: 0.5; }
-/* ★ v3.6.0 S4：冷却/忙碌态改用 aria-disabled（原生 disabled 会吞 pointerdown） */
-.nav-actions__iconbtn[aria-disabled="true"] { opacity: 0.5; cursor: default; }
-/* 冷却剩余秒数小角标（tabular-nums 防数字跳动） */
-.nav-actions__cd {
-  position: absolute;
-  right: 2px;
-  bottom: 0;
-  font-size: var(--text-2xs);
-  font-variant-numeric: tabular-nums;
-  color: var(--muted);
-  line-height: 1;
-}
+/* ★ 2026-11-03（负责人拍板）：底栏刷新键已删 ⇒ `.nav-actions__iconbtn` / `.nav-actions__cd` 两条
+   规则随之删除（唯一消费方就是那个按钮；通用的 `button[aria-disabled="true"]`（:525）独立存在，
+   本栏其余按钮全走 `.btn` 系，不受影响）。刷新唯一入口 = 面板右上 `.route-sheet__iconbtn`。 */
 .nav-actions__hint { text-align: center; color: var(--muted); font-size: var(--text-2xs); }
 
 /* ── 下车提醒横幅（AlightBanner：soon=警告色 / now=危险色 + 脉动；绿只标记站名）──

@@ -16,6 +16,11 @@
  *   一条线路可能有 2 个方向（`dsat_dir` = 0/1）⇒ `shapes` 数组返回多条，
  *   前端按产品口径**两个方向都画**（不同质感）或按需选择。
  *
+ * ── ★ 4-B−（2026-11-03 需求 4）：`shapes[].stations` = 本方向站序 ──────
+ *   纯新增字段（主码、按 `seq` 升序、相邻重复折叠），供前端把彩段锚点
+ *   从「几何最近顶点」改为「站序 + 几何联合判定」。**不改任何既有字段语义**，
+ *   老缓存/老客户端缺该字段时一律回落旧逻辑。不做 DB 迁移。
+ *
  * 只读接口。
  */
 import { NextResponse } from "next/server";
@@ -58,6 +63,12 @@ interface Row {
   max_lat: number | null;
 }
 
+/** ★ 4-B−：该方向沿站序的站点清单（主码；`seq` 为 DB 原值，升序） */
+interface StopSeq {
+  code: string;
+  seq: number;
+}
+
 export async function GET(req: Request) {
   try {
     const code = new URL(req.url).searchParams.get("code")?.trim() ?? "";
@@ -67,7 +78,7 @@ export async function GET(req: Request) {
     if (!code) return NextResponse.json({ shapes: [], error: API_ERROR.bad_request }, { status: 400 });
 
     const pool = getPool();
-    const [shapesRes, routeRes, stopsRes] = await Promise.all([
+    const [shapesRes, routeRes, stopsRes, seqRes] = await Promise.all([
       pool.query(
         `SELECT route_code, kind, dsat_dir, polyline, points, start_stop, end_stop,
                 min_lng, min_lat, max_lng, max_lat
@@ -85,6 +96,30 @@ export async function GET(req: Request) {
           WHERE r.code = $1`,
         [code],
       ),
+      /**
+       * ★ 4-B−（需求 4 · 2026-11-03）：本线**逐方向站序**（按 `seq` 升序）。
+       *
+       * ── 为什么这条必须下发 ──────────────────────────────────────────────
+       *   彩段切割原先只靠「站点坐标 → shape 最近顶点」定锚点，**不看站序**。
+       *   当两个站台物理相距 ~20m 而站序相差若干站时（实例：C652 安順大廈 / C653
+       *   金峰南岸，相距约 20m、25 号线站序差 6 站），最近顶点会落到**对侧站台那一趟**
+       *   ⇒ 彩段从对面站台起画、并沿闭合环绕一整圈。
+       *   几何最近点在数学上无法区分这两者（两趟都远在 80m 容差内），
+       *   **唯一可靠的判据是站序**。故在几何旁边把站序一起下发，由前端做方向判定。
+       *
+       * ── 与既有字段的关系 ──────────────────────────────────────────────
+       *   · 纯**新增**字段，不改任何既有字段语义；老客户端忽略它即可。
+       *   · `stops`（上面的 DISTINCT 集合）语义不变，仍只服务「本线站点 vs 其他站点」样式。
+       *   · 不做 DB 迁移（直接读既有 `route_stations`）。
+       */
+      pool.query(
+        `SELECT rs.dsat_dir AS dir, rs.seq, rs.station_code AS code
+           FROM route_stations rs
+           JOIN routes r ON r.id = rs.route_id
+          WHERE r.code = $1
+          ORDER BY rs.dsat_dir, rs.seq`,
+        [code],
+      ),
     ]);
 
     const rows = shapesRes.rows as Row[];
@@ -92,6 +127,25 @@ export async function GET(req: Request) {
     /** 站台码 → 主码（客户端 `mainCodeOf` 同口径的简化版：剥 `/N` 后缀） */
     const stopMain = (raw: string) => raw.replace(/\/\d+$/, "");
     const stops = [...new Set((stopsRes.rows as { code: string }[]).map((r) => stopMain(r.code)))];
+
+    /**
+     * ★ 4-B−：按方向聚合站序。
+     *   · **剥站台后缀** ⇒ 与 `legs[].board.code`（`detail-body` 只下发主码）可直配；
+     *   · **相邻重复折叠** ⇒ 同一停靠的多个站台（`T355/1`、`T355/2`）在站序上是同一个点，
+     *     折叠后 `seq` 才能表示「第几次停靠」；只折**相邻**重复，同站被再次经过（环线往返）
+     *     属两次不同停靠，必须保留两条。
+     *   · `seq` 保留 DB 原值（便于与 `route_stations` 对账），顺序即数组顺序。
+     */
+    const seqByDir = new Map<string, StopSeq[]>();
+    for (const r of seqRes.rows as { dir: string; seq: number; code: string }[]) {
+      const main = stopMain(String(r.code));
+      const arr = seqByDir.get(r.dir) ?? [];
+      const last = arr[arr.length - 1];
+      if (last && last.code === main) continue;
+      arr.push({ code: main, seq: Number(r.seq) });
+      seqByDir.set(r.dir, arr);
+    }
+    const stationsOfDir = (dir: string | null) => (dir != null ? (seqByDir.get(dir) ?? []) : []);
 
     if (!rows.length) {
       return NextResponse.json(
@@ -120,6 +174,8 @@ export async function GET(req: Request) {
           startStop: r.start_stop,
           endStop: r.end_stop,
           bounds: [r.min_lng, r.min_lat, r.max_lng, r.max_lat],
+          /** ★ 4-B−：本方向站序（主码，升序）。空数组 = 无站序数据 ⇒ 客户端回落旧逻辑 */
+          stations: stationsOfDir(r.dsat_dir),
         })),
       },
       { headers: CACHE_HEADER },

@@ -828,6 +828,40 @@ export interface SegmentStrip {
   } | null;
 }
 
+/**
+ * ★ 需求1 / 1-B′：`POST /api/nav/remaining` 的响应（**纯新增类型，不影响任何既有消费方**）。
+ *
+ * 用途：导航中点刷新时，**只在当前这条路线内**重算剩余时间（不重新规划、不切换路线）。
+ * 服务端算法见 `src/lib/nav/remaining.ts`；本端点 0 次 DSAT、0 次高德。
+ *
+ * ⚠️ **为什么同时给三个时间字段**（少一个都会退化成老问题）：
+ *   · `remainingMin` 是**相对快照** —— 命中服务端 2s 微缓存时会偏大，
+ *     只能用于显示，**不得**当作倒计时真相；
+ *   · `arriveAt` 是**绝对锚**（epoch ms）—— 客户端据此本地递减，免疫网络往返与缓存陈旧；
+ *   · `serverNowMs` 是服务端当前时刻 —— 客户端算 `offsetMs = serverNowMs − Date.now()`
+ *     后再用 `arriveAt − (Date.now() + offsetMs)`，即 `/api/station/eta` 的现成范式
+ *     （该处注释记了这个坑：旧口径 `etaSec` 相对快照命中 20s 缓存时整体偏大）。
+ *   · `recomputedAt` = 本次重算的基准时刻；命中微缓存时**早于** `serverNowMs`，
+ *     客户端据此可知 `remainingMin` 的陈旧量（≤ 服务端 TTL）。
+ */
+export interface RemainingResponse {
+  ok: true;
+  /** 剩余门到门分钟（服务端已 clamp 到 ≥0，永不为负） */
+  remainingMin: number;
+  /** 预计到达时刻（epoch ms，绝对锚 —— 倒计时以此为准） */
+  arriveAt: number;
+  /** 本次重算的基准时刻（epoch ms；命中微缓存时 = 原重算时刻） */
+  recomputedAt: number;
+  /** 服务端当前时刻（epoch ms；供客户端算时钟偏移） */
+  serverNowMs: number;
+  /**
+   * **整份**替换用的纵向站条（`buildStrips(patchedCard)` 产物）。
+   * 其中 `rideMin` 已是「剩余」、`transferAfter.waitMin` 已按新到达时刻重估 ⇒
+   * 顶部倒计时与纵条数字**同源同帧**，不会出现「上面在动、下面冻住」。
+   */
+  strips: SegmentStrip[];
+}
+
 /** 折叠栏里一行 = 该站台一条可达线路 */
 export interface ReachReport {
   route: string;
