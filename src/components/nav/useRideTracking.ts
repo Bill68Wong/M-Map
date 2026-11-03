@@ -32,6 +32,7 @@ import {
 import { advanceLrt, buildLrtLadder, type LrtLadder } from "@/lib/nav/lrt-progress";
 import { cumDistM, distM, nearestOnPath } from "@/lib/nav/route-overview";
 import { autoAlightOf } from "@/lib/nav/alight-detect";
+import { ladderStateOf, rideNoteOf, type LadderState } from "@/lib/nav/ride-note";
 import {
   ANOMALY_CONFIRM,
   ANOMALY_MIN_GAP_MS,
@@ -343,6 +344,32 @@ function setTraveledAttr(
     } else {
       document.body.removeAttribute("data-traveled-cut");
     }
+  } catch {
+    /* SSR / 只读 body —— 观测钩子失败不得影响导航 */
+  }
+}
+
+/**
+ * ★ 本批（A-1 / C2 触发率量测）：**阶梯状态**观测钩子。
+ *
+ *   · `body[data-ladder-state]` ∈ `built | no-geometry | no-stops | idle`
+ *     —— **对外承诺的契约**，QA 浏览器断言直接读它，**不得改名 / 不得改取值集**；
+ *   · `body[data-colored-len]` = 当前腿几何点数（整数串）—— 用来回答
+ *     「离能建梯还差几个点」，单看 `no-geometry` 分不出差 0 还是差 1。
+ *
+ * `state === null` ⇒ 两个属性**一起摘除**（组件卸载 / 会话结束），
+ * 避免下一轮会话读到上一轮的陈旧值。
+ */
+function setLadderHook(state: LadderState | null, coloredLen: number) {
+  if (typeof document === "undefined") return;
+  try {
+    if (state == null) {
+      document.body.removeAttribute("data-ladder-state");
+      document.body.removeAttribute("data-colored-len");
+      return;
+    }
+    document.body.setAttribute("data-ladder-state", state);
+    document.body.setAttribute("data-colored-len", String(coloredLen));
   } catch {
     /* SSR / 只读 body —— 观测钩子失败不得影响导航 */
   }
@@ -1930,6 +1957,47 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     if (r.hit) doAlight(true);
   }, [phase, active, prog, userFix, legIndex, progressSource, strips, legs, doAlight]);
 
+  /* ══════════════════════════════════════════════════════════════════════
+     ★ 本批（A-1 / C2）：无进度提示 + 触发率量测（判定逻辑见
+     `src/lib/nav/ride-note.ts` 头注，本文件只做「取输入 → 调它 → 用返回值」）
+     ─────────────────────────────────────────────────────────────────────
+     背景：无牌巴士有两种**结构性**缺失（几何 < 2 点 / 站条 < 2 站）⇒ `prog` 永远为空
+     ⇒ 到站横幅、震动、自动下车**一起静默失效**（`alarm` 门与 `autoAlightOf` 都以
+     `prog` 为输入）。本批只加提示与量测，**不改任何判定逻辑**。
+
+     ── 为什么用「派生」而不是在建梯处 `setNote(...)`（踩过的时序坑）─────────
+       `switchToRiding` 尾部先 `setPlate(nextPlate)` 再 `void ensureLadder()`，
+       在同一个回调里读 `plate` 读到的**还是旧值 null**（state 尚未提交）。
+       若在建梯处直接 `setNote(文案)`，有牌场景会**先闪一下再消失**。
+       派生在本函数返回时求值 ⇒ 必然用本帧已提交的 `plate` ⇒ 结构上不可能误报。
+
+     ── 与既有 note 写入点不打架（本批**不新增任何 `setNote` 调用点**）───────
+       只在返回处做一次优先级合流：
+         paused 定位文案（boarding 专用，更高）> geomNote > 既有瞬时 note
+       ① 为什么 geomNote 排在 `note` 之前：无牌 riding 里 `NOTE_FETCH_FAIL`
+          （车辆数据获取失败）一旦写入，**没有任何代码路径会清空它** —— 清空点
+          `setNote("")` 在锁牌分支里，无牌根本走不到。若让 `note` 优先，
+          一条永不消失的瞬时提示会永久顶掉结构性说明。
+       ② 为什么不会盖掉更具体的因：`NOTE_FROZEN_BUS`（车辆丢失）与
+          `NOTE_NO_VEHICLES` 都只在锁牌/候车分支产生，而锁牌 ⇒ `hasPlate` ⇒
+          `geomNote` 恒 null ⇒ 两者不可能同时出现。
+     ══════════════════════════════════════════════════════════════════════ */
+  const coloredLen = legs[legIndex]?.colored?.length ?? 0;
+  const stopsLenNow = strips?.[legIndex]?.stops?.length ?? 0;
+  const geomNote = rideNoteOf({
+    phase,
+    hasPlate: !!plate,
+    coloredLen,
+    stopsLen: stopsLenNow,
+  });
+  const ladderState = ladderStateOf({ phase, coloredLen, stopsLen: stopsLenNow });
+
+  useEffect(() => {
+    setLadderHook(ladderState, coloredLen);
+  }, [ladderState, coloredLen]);
+  /** 卸载即摘属性 —— 否则下一轮会话会读到上一轮的陈旧值 */
+  useEffect(() => () => setLadderHook(null, 0), []);
+
   return {
     phase,
     legIndex,
@@ -1947,7 +2015,7 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
      * ★ v3.7.0 S2（AC2.3）：再按**定位轴状态**分档 —— 拒权/无信号/超时三种情况用户要做的事
      *   完全不同（去设置 / 走两步 / 再等），一句「定位不可用」说不清。见 `noteOfPausedGeo`。
      */
-    note: phase === "boarding" && boardPaused ? noteOfPausedGeo(geo) : note,
+    note: phase === "boarding" && boardPaused ? noteOfPausedGeo(geo) : (geomNote ?? note),
     candidates,
     autoSwitched,
     autoNote,
