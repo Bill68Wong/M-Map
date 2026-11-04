@@ -18,7 +18,7 @@
  * ── 六条门槛（缺一条就不判，宁可晚判不误判）─────────────────────────────
  *   G-a 同车     样本必须来自同一车牌（末尾同车牌的一段，换参照车即作废）
  *   G-b 精度     `accuracy > FOLLOW_MAX_ACC_M` 的帧**不参与**（精度不足如实拒绝）
- *   G-f 车在动   窗内车速 ≥ `FOLLOW_MIN_VEH_MPS`（车停着时「d 不变」是平凡解）
+ *   G-f 车在动   **近端 12s** 车速 ≥ `FOLLOW_MIN_VEH_MPS`（车停着时「d 不变」是平凡解）
  *   G-c 同处     `d_now ≤ FOLLOW_MAX_D_M` —— 人与车当前必须**贴在同一位置**
  *   G-d 真在动   窗内用户沿线**前移** ≥ `FOLLOW_MIN_ALONG_M`（带符号，反向不算）
  *   G-e 不拉开   `|d 的斜率| ≤ FOLLOW_MAX_SLOPE_MPS`
@@ -43,12 +43,27 @@ export const FOLLOW_WINDOW_MS = 30_000;
 /** 最多参与拟合的帧数（GPS 1s 一帧时防止窗口内样本过多、单帧权重被摊平） */
 export const FOLLOW_MAX_FRAMES = 20;
 /**
- * 最小窗长（ms）= 10s。
- * 依据：σ_d ≈ √2 × 10m ≈ 14m（人 / 车两侧各自定位误差独立）；
+ * 最小窗长（ms）= **6000**（2026-11-04 由 10s 下调）。
+ *
+ * ── 旧值 10s 的原始推导（**保留为历史记录，不要删**）────────────────────
+ *   σ_d ≈ √2 × 10m ≈ 14m（人 / 车两侧各自定位误差独立）；
  *   10s × 3.33 m/s = 33m 的真实位移才足以把 1.2 与 3.3 m/s 分开（SNR ≈ 2.4）。
  *   更短的窗**不是**更灵敏，而是更随机。
+ *
+ * ── 为什么现在可以降到 6s（推翻上式的依据）──────────────────────────────
+ *   上式的前提是「窗内真实位移 ≈ 窗长 × 3.33 m/s」。而 `FOLLOW_MIN_ALONG_M = 35` 是
+ *   **带符号的实测位移门**，它要求的位移比上式更强：若一个 6s 窗也要满足 ≥35m，
+ *   等价于窗内平均车速 ≥ 35/6 ≈ **5.8 m/s（21 km/h）** —— 比旧推导隐含的 3.33 m/s（12 km/h）
+ *   更严。也就是说，能在 6s 窗上成立的样本，位移本身就是它自己的证据，
+ *   不存在「窗太短所以更随机」的问题。⇒ 10s 相对 6s 只是在对**缓冲还不满**的会话
+ *   （会话开头 / GPS 断点恢复后）多压 4s，属冗余卡点。
+ *
+ * ⚠️ 本门只是「时间覆盖够不够」的**入口闸**，不参与拟合质量评估：拟合仍取
+ *   `FOLLOW_WINDOW_MS`(30s) 内最多 `FOLLOW_MAX_FRAMES`(20) 帧 ⇒ 降低本门**不会**
+ *   让斜率估计变差。另：6s 与帧数门 `(FOLLOW_MIN_FRAMES-1) × 1.5s = 6s` 恰好对齐，
+ *   两道门不再一高一低（旧 10s 在 1.5s 采样下会盖住帧数门 4s）。
  */
-export const FOLLOW_MIN_SPAN_MS = 10_000;
+export const FOLLOW_MIN_SPAN_MS = 6_000;
 /** 精度门（米）：超出的帧不参与（高精度档 σ≈10m；50m 已是 5σ） */
 export const FOLLOW_MAX_ACC_M = 50;
 /**
@@ -78,8 +93,34 @@ export const FOLLOW_MIN_ALONG_M = 35;
  * 这一条把「相对距离不变」从**平凡解**里救出来：车若停在原地，`d` 当然不变，
  * 但它与「人已上车」不可分（物理限制，见文件头）。只有车**确实在动**时，
  * 「d 不动」才等价于「人跟着车动」。
+ *
+ * ⚠️ 本值**不动**。但它量的是「**近端窗**车速」，不是「全窗平均车速」——见
+ *    `FOLLOW_VEH_RECENT_MS`（2026-11-04 修的是估计量，不是门槛）。
  */
 export const FOLLOW_MIN_VEH_MPS = 2;
+/**
+ * 「车在动」判定的**近端**观察窗（ms）= 12s ≈ 生产一帧车辆快照的间隔（`POLL_MS`）。
+ *
+ * ── 为什么不能用全窗（2026-11-04 修）────────────────────────────────────
+ *   `vehMps` 原先取「整个拟合窗（最长 30s）的 v(t) OLS 斜率」。而车刚起步时该窗**必然
+ *   含站台停靠期**（`v` 恒定、`u` 恒定）。OLS 对分段线性函数在**拐点**处会系统性低估
+ *   后段斜率 ⇒ 实测：起步后 12s 车已实走 34m，`vehMps` 只算出 **0.98**（真值 3.3）
+ *   ⇒ 假 `veh-still` ⇒ 白等 12s（一个整车辆帧周期）。停靠期在窗内占比越大，低估越重。
+ *   这不是「门槛太严」，是**估计量量错了对象**：门注释说的是「车在动」，全窗均值答的是
+ *   「车在过去 30s 平均在动」，两者在「刚起步」这个唯一要紧的时刻恰好相反。
+ *
+ * ── 代价（必须一起读）───────────────────────────────────────────────────
+ *   窗越短，两个车辆位置噪声折算的斜率标准差越大（σ_slope ≈ √2·σ_pos / T）。
+ *   T=30s / 20 帧时 ≈ 0.4 m/s（5σ）；T=12s 时 ≈ 1.2 m/s（σ_pos 取 10m ⇒ 1.7σ）。
+ *   ⇒ 对「停驶巴士」的防误判余量下降，**前提是 DSAT 位置噪声确实在 10m 量级**。
+ *   实测：`scripts/test-boarding-latency.ts` 的 ㉔③ 把巴士定位抖动 σ 扫 0/3/5/10m、
+ *   每档 16 种子（共 64 次「用户步行 1.4 m/s + 巴士停驶」反例）⇒ 误判 **0/64**。
+ *   ⚠️ 若真机标定 DSAT 位置噪声 >15m，本项需回退（把 `FOLLOW_VEH_RECENT_MS` 调大，
+ *   代价是延迟按同比例回升）。
+ */
+export const FOLLOW_VEH_RECENT_MS = 12_000;
+/** 近端窗至少要有几帧才用它；不足 ⇒ 回退全窗（方向是**更保守**：更难判上） */
+export const FOLLOW_VEH_RECENT_MIN_N = 3;
 /**
  * 多车歧义的里程差下限（米）= 2σ ≈ 20。
  * 两辆候选车的 `|u − v|` 差小于此值时**不锁牌**（分不出是哪辆 ⇒ 不猜），
@@ -109,7 +150,7 @@ export interface FollowSlope {
   dNow: number | null;
   /** 窗内用户的**带符号**沿线位移（米，正 = 沿线路前进方向） */
   alongM: number | null;
-  /** 窗内参照车的沿线速度（m/s，最小二乘；正 = 沿线路前进方向） */
+  /** **近端窗**内参照车的沿线速度（m/s，最小二乘；正 = 沿线路前进方向；全窗均值会失真） */
   vehMps: number | null;
   /** 窗内实际时长（ms） */
   spanMs: number;
@@ -183,11 +224,23 @@ export function followSlopeOf(frames: FollowFrame[]): FollowSlope {
   const t0 = win[0].ts;
   const xs = win.map((f) => (f.ts - t0) / 1000);
   const ds = win.map((f) => Math.abs(f.u - f.v));
+  const vs = win.map((f) => f.v);
   const slope = olsSlope(xs, ds);
-  const vehMps = olsSlope(
-    xs,
-    win.map((f) => f.v),
-  );
+  /**
+   * G-f 的车速估计只取**近端窗**（`FOLLOW_VEH_RECENT_MS`）：全窗 OLS 会被窗内的
+   * 站台停靠期（`v` 恒定）摊平，在「刚起步」这个唯一要紧的时刻系统性低估车速
+   * ⇒ 假 `veh-still` ⇒ 白等一个整车辆帧周期。取样不足时回退全窗（更难判上，不是更易）。
+   */
+  const recentFrom = last.ts - FOLLOW_VEH_RECENT_MS;
+  const rIdx: number[] = [];
+  for (let i = 0; i < win.length; i++) if (win[i].ts >= recentFrom) rIdx.push(i);
+  const vehMps =
+    (rIdx.length >= FOLLOW_VEH_RECENT_MIN_N
+      ? olsSlope(
+          rIdx.map((i) => xs[i]),
+          rIdx.map((i) => vs[i]),
+        )
+      : null) ?? olsSlope(xs, vs);
   const dNow = ds[ds.length - 1];
   const alongM = win[win.length - 1].u - win[0].u;
   const base = { slope, n: win.length, dNow, alongM, vehMps, spanMs, plate: last.plate };
