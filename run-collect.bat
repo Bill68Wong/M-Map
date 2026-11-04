@@ -1,4 +1,19 @@
 @echo off
+rem ============================================================
+rem  M Map - DSAT data collector wrapper (operator file: keep it ASCII + CRLF)
+rem
+rem  MAINTENANCE RULE (learned the hard way): an echo line containing a ')'
+rem  inside an if/for parenthesised block CLOSES that block early, which
+rem  silently turns the rest of the branch into unconditional code. A single
+rem  "echo ... (%NODE_BIN%)" made every Node 22 machine report "version too
+rem  old" and exit 1 - and it was invisible on a code read.
+rem  => Any change here MUST be dry-run over all six branches (normal round /
+rem     aborted round / no new meta / node too old / exit!=0 with output /
+rem     exit!=0 without output), with both node calls stubbed out.
+rem     Never ship a diff that was only read, not run.
+rem  Keep it pure ASCII: the operator console may be GBK, so non-ASCII text
+rem  here would render as mojibake.
+rem ============================================================
 cd /d "%~dp0"
 title M Map - Data Collector
 
@@ -113,11 +128,14 @@ if defined ABORTED (
 rem ---- Sample statistics for THIS round only ----
 rem  track-derive filters by --label=<stamp>, so it reads only this round's parts,
 rem  not the whole data/tracking history.
-rem  Plain node on purpose: with the default --truth=none the deriver never touches
-rem  the database (it returns before loading pg). Going through the npm script would
-rem  route into scripts/db-guard.ts, which demands --allow-prod for any non-local
-rem  DATABASE_URL - a flag that means "I am writing to prod", which is not what this
-rem  step does. For the DB truth comparison run it manually:
+rem  Plain node on purpose - this is NOT a shortcut around db-guard:
+rem    * track-derive returns at its :276 when --truth=none (the default), and only
+rem      after that would :280 run await import("pg") - so on this code path the
+rem      deriver cannot open a database connection at all.
+rem    * npm run track:derive would route into scripts/db-guard.ts, which demands
+rem      --allow-prod for any non-local DATABASE_URL. Adding that flag here would
+rem      mean "I am writing to prod", which is false for this step.
+rem  For the DB truth comparison, run it manually:
 rem      npm run track:derive -- --label=<stamp> --truth=cloud --allow-prod
 echo.
 echo [INFO] Deriving sample statistics - local files only, no network, no database...
