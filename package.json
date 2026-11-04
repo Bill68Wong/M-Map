@@ -108,7 +108,7 @@
     "test:nav-info-consistency": "tsx scripts/test-nav-info-consistency.ts",
     "test:nav-catch-latch": "tsx scripts/test-nav-catch-latch.ts",
     "test:geo-resume": "tsx scripts/test-geo-resume.ts",
-    "test:card-limit-consistency": "tsx scripts/test-card-limit-consistency.ts"
+    "test:card-limit-consistency": "tsx --env-file=.env scripts/test-card-limit-consistency.ts"
   },
   "dependencies": {
     "@tabler/icons-react": "^3.47.0",
