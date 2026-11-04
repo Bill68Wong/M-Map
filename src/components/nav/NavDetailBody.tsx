@@ -407,37 +407,32 @@ function NavInfoRow({
                 {preAside}
               </div>
               {/*
-                ★ 次行「来车 <车牌>」（设计 §2.10 定稿）。
+                ★ 次行「来车 <车牌>」（设计 §2.10 定稿；样式经负责人 2026-11-04 改判）。
                 · 左缘与主行文字对齐：本容器的原点是 `.rc-dot` 之后的 flex 起点（= 29px），
                   所以**不需要再补 padding** —— 补了反而会跑偏到 58px；
-                · ⛔ 不用 `.plate` / `plate--sm`：黑底黄字是「已确认上车」的语言（乘车态底栏在用），
-                  在这里会读成"已经上车了"；
+                · ✅ 车牌**复用 `.plate .plate--sm`**（黑底黄字胶囊，乘车态底栏同一套）。
+                  **负责人已否决**设计原稿的相反顾虑（原稿怕"看起来像已上车"），
+                  他的产品逻辑是「**车停靠上车站 = 用户已上车**」⇒ 候车期用同一套样式是
+                  **语义一致**，不是误导。⇒ 不要改回纯文本，也不要为它新写一套胶囊样式。
+                  `.plate` 是 `globals.css` 的现成全局类（不需要改 CSS）；
+                  `.plate--sm` = 13px / line-height 1.1 / padding-y 2px ⇒ 高约 18.3px，
+                  落在 20px 行高内，不会撑破 52px 定高。
                 · ⛔ 图标保持 `busStop`，**不换 `bus`**（换图标 = 状态跃迁的暗示，此处没有跃迁，
                   `data-nav-info` 仍是 `pre`）；
-                · 车牌数字用 `tabular-nums`：12s 轮询换车时宽度不抖。
+                · 车牌自身已带 `tabular-nums` + `letter-spacing`（`.plate` 内），不必重复。
               */}
               {candPlate && (
                 <div
                   style={{
                     display: "flex",
-                    alignItems: "baseline",
+                    alignItems: "center",
                     gap: 4,
                     height: INFO_LINE_H,
-                    lineHeight: `${INFO_LINE_H}px`,
                     whiteSpace: "nowrap",
                   }}
                 >
                   <span style={{ flex: "none", fontSize: 13, color: "var(--muted)" }}>来车</span>
-                  <span
-                    style={{
-                      flex: "none",
-                      fontSize: 13,
-                      fontWeight: 600,
-                      color: "var(--fg)",
-                      fontVariantNumeric: "tabular-nums",
-                      letterSpacing: "0.02em",
-                    }}
-                  >
+                  <span className="plate plate--sm" style={{ flex: "none" }}>
                     {candPlate}
                   </span>
                 </div>
