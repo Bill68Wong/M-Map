@@ -17,11 +17,20 @@
  * ── 跑法（铁律 17：npx 本机可能静默失效 ⇒ 直喂 tsx CLI 实体）───────────
  *   node node_modules/tsx/dist/cli.mjs scripts/test-geo-resume.ts
  *
- * ⚠️ 覆盖边界（如实登记）：本文件只测**判定表**。`watchPosition` 到底会不会在
- *    某机型后台后"假活"、探针能不能秒回 —— **只能真机验**，见 PR 报告「未解决」段。
+ * ── ⚠️ 覆盖边界（如实登记，别读成"跑绿了就代表回前台不卡了"）─────────────
+ *   1. 本文件只测**判定表**与**钩子格式**，不测真实设备行为：`watchPosition`
+ *      在某机型后台后会不会"假活"、`getCurrentPosition` 探针能不能秒回 —— **只能真机验**。
+ *   2. 本文件的价值是**防回归**（"回前台恢复能力"不被后续改动悄悄弄丢），
+ *      **不是"已修好"的证明**。真机是否恢复，取决于 §5 判据 A 的 3 次真机试验。
+ *   3. 两件**必须分开写**的事（措辞红线）：
+ *      · **后台期间用户位置本来就无法更新** —— 浏览器物理限制（页面被冻结 /
+ *        移动端浏览器禁止后台定位），这不是缺陷、也修不了；
+ *      · **回前台之后位置仍然不更新** —— 这是缺陷（订阅已死却无人重建），
+ *        本次修复针对的**只有**这一件。
+ *      把后一句当成前一句的推论，就会得出"卡住是物理限制，不用修"的错误结论。
  */
 import { geoRecoveryOf, type GeoRecoveryPlan } from "../src/components/nav/useUserFix";
-import { geoStateOf } from "../src/components/nav/observe-hooks";
+import { geoStateOf, setYouDotHook } from "../src/components/nav/observe-hooks";
 
 let failed = 0;
 const ok = (cond: boolean, name: string, detail = ""): void => {
@@ -165,9 +174,45 @@ console.log(
     "     验收判据必须以 body[data-user-fix] 的 ts 是否**严格前进**为准（见 PR 报告 §5）。",
 );
 
+/* ══════════════════════════════════════════════════════════════════════
+   ⑦ `data-you-dot` 钩子格式契约（守护型）
+      —— 为什么必须钉：这个属性是 QA 分辨「定位死了」与「渲染层冻住」的唯一手段。
+        它的取值一旦变成 ageMs（自刷新值）或混进经纬度，判据会静默失去意义/泄露位置。
+   ══════════════════════════════════════════════════════════════════════ */
+console.log("── ⑦ data-you-dot 格式契约（ts,acc 且不含坐标）──");
+{
+  const writes: Array<[string, string | null]> = [];
+  (globalThis as unknown as Record<string, unknown>).document = {
+    body: {
+      setAttribute: (k: string, v: string) => writes.push([k, v]),
+      removeAttribute: (k: string) => writes.push([k, null]),
+    },
+  };
+  const attr = (name: string) => writes.filter(([k]) => k === name).map(([, v]) => v);
+
+  setYouDotHook(1_789_000_000_123, 27.6);
+  const v1 = attr("data-you-dot").at(-1) ?? null;
+  ok(v1 === "1789000000123,28", "格式 = \"<ts>,<acc>\"，精度四舍五入取整", String(v1));
+  ok(/^\d+,\d+$/.test(String(v1)), "取值只含两个整数（无小数/无第三段）", String(v1));
+  ok(
+    !/22\.\d|113\.\d/.test(String(v1)),
+    "不含经纬度量级的小数（安全红线：只写 ts 与 acc）",
+    String(v1),
+  );
+
+  setYouDotHook(null);
+  ok(attr("data-you-dot").at(-1) === null, "传 null ⇒ removeAttribute（离开 riding / reset 必须清场）");
+
+  setYouDotHook(Number.NaN, 10);
+  ok(attr("data-you-dot").at(-1) === null, "非法 ts ⇒ 清场而不是写入 NaN");
+
+  setYouDotHook(1_789_000_009_999, Number.NaN);
+  ok(attr("data-you-dot").at(-1) === "1789000009999,0", "非法精度 ⇒ 记 0（不产生 NaN 文本）");
+}
+
 console.log(
   failed === 0
-    ? "\n✅ 全通过（句柄 null 自愈 / 稳态 12s / 反风暴 / 门禁 / 变异自检 / 钩子能力边界）"
+    ? "\n✅ 全通过（句柄 null 自愈 / 稳态 12s / 反风暴 / 门禁 / 变异自检 / 钩子能力边界 / you-dot 格式）"
     : `\n❌ ${failed} 项失败`,
 );
 process.exit(failed === 0 ? 0 : 1);
