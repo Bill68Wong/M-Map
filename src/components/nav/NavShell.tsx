@@ -76,6 +76,11 @@ import { useRideTracking, type RidePhase, type RideTrackView } from "./useRideTr
  *   （peek → detail 回来标签又出现）。
  */
 import { CatchTagLatchContext } from "./NavDetailBody";
+/**
+ * ★ 2026-11-05：「人确实在车上」判据（`riding` 语义变更后的唯一判据真源）。
+ *   与 `NavDetailBody.infoMode` **必须**共用同一份——两边各写一套必然漂。
+ */
+import { ridingRealOfRide } from "./riding-real";
 import { useNavRemaining } from "./useNavRemaining";
 import { useUserFix } from "./useUserFix";
 import { useNavFrame } from "./useNavFrame";
@@ -480,7 +485,21 @@ export default function NavShell({
   const hasEnteredRiding = useRef(false);
   /** 复位后强制一次重渲染（计数本身无业务含义；只在复位路径自增） */
   const [, bumpCatchLatch] = useState(0);
-  if (ride.phase === "riding") hasEnteredRiding.current = true;
+  /**
+   * ★ 2026-11-05：锁存条件从「进入 riding」收紧为「**人确实在车上**」。
+   *
+   * 为什么必须改：负责人裁决「车停靠上车站即切 riding」（`be-plate` f009c9a 已实现）之后，
+   *   `riding` 的语义变成「**车到了**」，而用户此刻可能还在 50 米外跑。若仍按「进入 riding」
+   *   锁存，「小跑能赶上」会在**最需要它的那一刻**消失 —— 这是当初缺陷 #1 的同类问题
+   *   （把「车到了」当成「人上车了」）。
+   *
+   * 判据收在 `riding-real.ts#ridingRealOfRide`（纯函数 + 单测直测）：
+   *   · `station` 切入 + 位置证据未到 ⇒ **不锁存**（标签保留）；
+   *   · 位置证据到达 / `position` 切入 / 手动「我已上车」⇒ 立即锁存。
+   * ⚠️ **同一个判据必须同时用于 `infoMode`**（`NavDetailBody`）—— 只改这里不够：
+   *   信息行的 `post` 分支会抢在锁存之前顶掉 `pre`，标签住在 `pre` 里 ⇒ 照样消失。
+   */
+  if (ridingRealOfRide(ride)) hasEnteredRiding.current = true;
   /**
    * 锁存复位（唯一入口）。
    * ⚠️ 复位点必须是**显式**的（事件 / 会话边界），不要在渲染期靠 phase 反推复位 ——

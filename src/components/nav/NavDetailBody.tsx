@@ -38,6 +38,8 @@ import {
   remainTotalMinOf,
 } from "@/lib/nav/remaining-view";
 import { remainFromIdxOf, stopsAwayOf } from "@/lib/nav/track";
+/** ★ 2026-11-05：「人确实在车上」判据（与 `NavShell` 的锁存共用同一份，见 `riding-real.ts`） */
+import { ridingRealOfRide } from "./riding-real";
 import type { RideTrackView } from "./useRideTracking";
 /* ★ v3.6.0 S5：步行预览（展开键 + 静态步骤列表） */
 import WalkSegToggle from "@/components/walk/WalkSegToggle";
@@ -598,12 +600,12 @@ export default function NavDetailBody({
   /* ══════════════════════════════════════════════════════════════════════
      ★ U2 / U5（2026-11-04）：信息行形态 + 赶车标签可见性
      ─────────────────────────────────────────────────────────────────────
-       · `riding` ⇒ `post`（两行：下一站 + 到下车时长）；
+       · **`riding` 且「人确实在车上」** ⇒ `post`（两行：下一站 + 到下车时长）；
        · 已上过车但已不在车上（`done` / 末段步行 `walk`）⇒ **整行不渲染**：
          此时既不该说「等车还有几分钟」，也没有可说的「下一站」—— 留着就是过期结论；
-       · 其余（未开始 / 步行去站 / 候车）⇒ `pre`（单行）。
-     ⚠️ `riding` 放在锁存**前面**只是兜底：两者由 `NavShell` 在同一次 commit 里写入，
-        正常不会打架；万一将来 Context 的下发时序变了，也不会把乘车态渲染成候车态。
+       · 其余（未开始 / 步行去站 / 候车 / **车到站但人还在跑**）⇒ `pre`（单行）。
+     ⚠️ 「人确实在车上」的条件见下方 `ridingReal` 的注释 —— 2026-11-05 起 `riding` 已
+        不等于「人上车了」（车停靠上车站即切 riding），故**不能**再用 `riding` 单判。
      ⚠️ 不要在这里用 `ride.phase === "boarding"` 判「已到站」，那正是历史缺陷 #1 的成因
         （「步行去车站」一路上 `ride.phase` 已经是 `boarding`）。
 
@@ -619,8 +621,24 @@ export default function NavDetailBody({
           所以换乘期的 `pre` 行**必须**继续受 `showTag` 约束（只补数据，别顺手把标签放回来）。
      ══════════════════════════════════════════════════════════════════════ */
   const hasEnteredRiding = useContext(CatchTagLatchContext);
-  const riding = track?.phase === "riding";
-  const infoMode: "pre" | "post" | "none" = riding ? "post" : hasEnteredRiding ? "none" : "pre";
+  /**
+   * ★ 2026-11-05：`riding` 语义变更（车停靠上车站即切 riding）后的**第二处必改点**。
+   *
+   * ⛔ 旧写法 `track?.phase === "riding" ? "post" : …` 是**无条件优先**的 ——
+   *   而赶车标签住在 `pre` 分支里。车到站那一帧即使锁存没置位，`infoMode` 也已变 `post`
+   *   ⇒ **标签照样消失**，整行还会换成「下一站 X / 还有 n 站下车 · 约 x 分」。
+   *   对一个还在 50 米外跑的人是**双重错误**：既拿走了「来不来得及」，又提前宣告「你在车上」。
+   * ⇒ 必须与 `NavShell` 的锁存**共用同一个判据**（`ridingRealOfRide`，纯函数 + 单测直测），
+   *   不能在这里另写一套（两套证据必漂）。
+   *
+   * ⚠️ 已知缺口（team-lead 裁决：**记录、本批不修**）：
+   *   `station` 切入且位置证据**永不成立**时（用户没上这班车、车开走了），
+   *   `ridingReal` 恒假 ⇒ 标签会一直显示「小跑能赶上」。这是一条**滞留缺陷**。
+   *   不用时间阈值兜（会误伤"慢慢上车"的真实用户）；正确方向是拿「车已远离上车站」
+   *   或安全网「疑似还没上车」这类既有物理信号，**下一批**做。详见 `riding-real.ts` 头注。
+   */
+  const ridingReal = ridingRealOfRide(track);
+  const infoMode: "pre" | "post" | "none" = ridingReal ? "post" : hasEnteredRiding ? "none" : "pre";
   /**
    * 赶车标签是否允许渲染（**唯一判据 = 锁存**，与布局形态解耦）。
    * 隐藏方式是**不渲染**（DOM 移除）：`opacity: 0` 对屏幕阅读器仍然可读，
