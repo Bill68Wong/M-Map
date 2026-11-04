@@ -562,7 +562,13 @@ console.log("\n⑭ 基准站规则 remainFromIdxOf / segRemainSecOf（纯函数�
   );
   ok(
     remainFromIdxOf({ kind: "between", passedIdx: 1, atIdx: null, nextIdx: null }) === 2,
-    "行驶态 nextIdx 缺失 ⇒ 基准站退化为 passedIdx + 1",
+    "行驶态 nextIdx 缺失 ⇒ 基准站退化为 passedIdx + 1（该兜底**可达**：区间起点已是末站）",
+  );
+  /* 对象不自洽：`kind==="at"` 但 `atIdx` 为 null（`progressOf` 造不出来）⇒ **如实 null**，
+   * 不拿 `passedIdx + 1` 去猜 —— 猜了会把"数据不自洽"伪装成"正常"，下游就看不到出问题。 */
+  ok(
+    remainFromIdxOf({ kind: "at", passedIdx: 1, atIdx: null, nextIdx: 2 }) === null,
+    "停靠态但 atIdx 缺失（不自洽）⇒ 基准站 null（不猜）",
   );
   // ③ 数据对不上 ⇒ 如实 null，不猜
   ok(remainFromIdxOf({ kind: "lost", passedIdx: -1, atIdx: null, nextIdx: null }) === null, "lost ⇒ null（不猜）");
@@ -584,6 +590,15 @@ console.log("\n⑭ 基准站规则 remainFromIdxOf / segRemainSecOf（纯函数�
    *   —— 比真实剩余跳数多 1 站；而行驶态 `nextIdx = k+1` 恰好算对
    *   ⇒ 这个错**只在停靠时出现**，还会与「即将到达」的到站提醒同屏打架。
    *   全部用**真实 `progressOf` 产物**喂，不手搓 TrackProgress 字面量（避免"测的是我抄的期望"）。
+   *
+   * ── ★ 本组变异自检曾在**实现阶段**拦下一次错误口径（保留它的原因）──────────
+   *   当时的裁决是「站数复用 `remainFromIdxOf`（分钟用的基准站），同源就不会漂」。
+   *   照此实现后，下面那条 `[变异] 行驶态两者同值` 立刻变红（旧=1 新=0）：
+   *   车在 2→3 区间、下车站是 3 时，复用会算出 0（写「还有 0 站下车」），
+   *   而正确值是 1 —— 只是把「多 1」翻成了「少 1」，矛盾没消掉。
+   *   这条错误**只有这组断言看得见**（真机上表现为「到站前一站数字突然变 0」，
+   *   人眼很难判定是错）：所以**不要**删掉 `[变异] 行驶态两者同值` 这条，
+   *   也不要把它改成"只测停靠态"——它是"两锚站不同"的唯一守卫。
    */
   {
     const lastIdx = stopMains.length - 1; // [A1,A2,A3] ⇒ 2 = 下车站
@@ -635,6 +650,10 @@ console.log("\n⑭ 基准站规则 remainFromIdxOf / segRemainSecOf（纯函数�
       "丢信号 ⇒ null（不猜站数）",
     );
     ok(stopsAwayOf(pAt1, 0) === null, "站序不足两站（lastIdx=0）⇒ null");
+    ok(
+      stopsAwayOf({ kind: "at", passedIdx: 1, atIdx: null, nextIdx: 2 }, lastIdx) === null,
+      "停靠态但 atIdx 缺失（不自洽）⇒ null（不拿 passedIdx+1 猜）",
+    );
 
     /* 变异自检：旧公式（按已过站数算）在**停靠态**必多 1 站 —— 这条是 off-by-one 的可检出证据 */
     const oldFormula = (p: typeof pAt1): number => Math.max(0, lastIdx - p.passedIdx);

@@ -130,8 +130,19 @@ export function progressOf(stopMains: string[], v: TrackVehicle | null): TrackPr
  */
 export function remainFromIdxOf(prog: TrackProgress | null | undefined): number | null {
   if (!prog || prog.kind === "lost" || prog.kind === "unknown") return null;
-  // 兜底 `passedIdx + 1`：停靠态等于 `atIdx`、行驶态等于区间起点 + 1（都与上面两条同义）
-  const raw = prog.kind === "at" ? (prog.atIdx ?? prog.passedIdx + 1) : (prog.nextIdx ?? prog.passedIdx + 1);
+  /**
+   * ⚠️ `atIdx` 的类型是 `atIdx: number | null`（**必填可空**，不是 `atIdx?:`）：
+   *   可空是为了让 `between` / `lost` / `unknown` 三种 `kind` 能表达「无此值」，
+   *   而 `progressOf` 的 `at` 分支**恒给 `idx`**（见 `progressOf` ①）。
+   *   ⇒ `kind === "at"` 而 `atIdx === null` 是**对象不自洽**（只可能由 `progressOf`
+   *     之外的第三个生产者造出来；当前编辑器/测试里都没有这种构造）。
+   *   这里**如实返回 null**、不拿 `passedIdx + 1` 去猜（那是同一个数的另一种写法，
+   *   但会把"不自洽"掩盖成"正常"，下游就看不到数据出问题了）。
+   *   `between` 的 `nextIdx ?? passedIdx + 1` 不一样：`progressOf` 在「区间起点已是末站」
+   *   时**真的**会给 `nextIdx: null`，那里的兜底是可达路径，保留。
+   */
+  if (prog.kind === "at" && prog.atIdx === null) return null;
+  const raw = prog.kind === "at" ? prog.atIdx! : (prog.nextIdx ?? prog.passedIdx + 1);
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
 }
@@ -157,11 +168,15 @@ export function remainFromIdxOf(prog: TrackProgress | null | undefined): number 
  *     （实测：车在 A2→A3 区间、下车站是 A3 时，会写「还有 0 站下车」而不是「还有 1 站」）。
  *
  * @param lastIdx 本段**下车站**的下标（= `stops.length − 1`；< 1 表示站序不足两站）
- * @returns `null` = 站序不足两站 / 进度不可用（`lost`/`unknown`）⇒ 调用方**不显示站数**
+ * @returns `null` = 站序不足两站 / 进度不可用（`lost`/`unknown`）/ **对象不自洽**
+ *          （`kind==="at"` 但 `atIdx` 为 null，见 `remainFromIdxOf` 的同款说明）⇒ 调用方**不显示站数**
  */
 export function stopsAwayOf(prog: TrackProgress | null | undefined, lastIdx: number): number | null {
   if (!prog || prog.kind === "lost" || prog.kind === "unknown") return null;
-  const rawAnchor = prog.kind === "at" ? (prog.atIdx ?? prog.passedIdx + 1) : prog.passedIdx;
+  // `kind === "at"` 时 `atIdx` 必存在（可空只是为了让 other kind 能表达"无此值"）；
+  // 真为 null ⇒ 对象不自洽 ⇒ 如实返回 null，**不**拿 `passedIdx + 1` 去猜。
+  if (prog.kind === "at" && prog.atIdx === null) return null;
+  const rawAnchor = prog.kind === "at" ? prog.atIdx! : prog.passedIdx;
   const anchor = Number(rawAnchor);
   if (!Number.isFinite(anchor) || anchor < 0) return null;
   if (!Number.isFinite(lastIdx) || lastIdx < 1) return null;
