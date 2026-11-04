@@ -15,7 +15,7 @@
  *   npx tsx scripts/test-nav-catch-latch.ts
  */
 import { readFileSync } from "node:fs";
-import { ridingRealOf } from "../src/components/nav/riding-real";
+import { GAVE_UP_BUS_DIST_M, gaveUpBusOf, ridingRealOf } from "../src/components/nav/riding-real";
 
 let failed = 0;
 const ok = (cond: boolean, name: string, detail = ""): void => {
@@ -118,9 +118,59 @@ console.log("── ③ 接线锁（两处必须共用同一判据）──");
   );
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   ④ 「这班没赶上」兜底（治滞留缺口）
+   ══════════════════════════════════════════════════════════════════════ */
+console.log("── ④ gaveUpBusOf（滞留缺口的物理信号兜底）──");
+{
+  const B = { entry: "station" as const, posEvidence: false };
+  ok(GAVE_UP_BUS_DIST_M === 120, "阈值 = 120m（推导见 riding-real.ts，非经验值）", String(GAVE_UP_BUS_DIST_M));
+
+  ok(
+    gaveUpBusOf({ ...B, refVehDistM: 121 }) === true,
+    "station + 无证据 + 车已驶离 121m ⇒ **true**（认定没赶上 ⇒ 调用方解除锁存）",
+  );
+  ok(
+    gaveUpBusOf({ ...B, refVehDistM: 120 }) === false,
+    "边界：恰好 120m ⇒ **false**（用 `>` 不是 `>=`，阈值上不判「没赶上」）",
+  );
+  ok(
+    gaveUpBusOf({ ...B, refVehDistM: 50 }) === false,
+    "车才走 50m ⇒ false（35m 采样滞后区附近，不能误判正在上车的人）",
+  );
+  ok(
+    gaveUpBusOf({ entry: "station", posEvidence: true, refVehDistM: 500 }) === false,
+    "证据已到 ⇒ false（已上车，车走多远都无关）",
+  );
+  ok(
+    gaveUpBusOf({ entry: "position", posEvidence: false, refVehDistM: 500 }) === false &&
+      gaveUpBusOf({ entry: "manual", posEvidence: false, refVehDistM: 500 }) === false,
+    "非 station 进入 ⇒ false（只有「车到站切入」才可能「没赶上」）",
+  );
+  /**
+   * `refVehDistM === null`（无牌 riding 的参照车未知 / 还没算过）⇒ **判据不可用**。
+   * ⚠️ 绝不能当 0（缺口不兜）或 Infinity（一帧就误判"没赶上"，把正常上车的人踢出乘车态）。
+   */
+  ok(
+    gaveUpBusOf({ ...B, refVehDistM: null }) === false && gaveUpBusOf({ ...B, refVehDistM: undefined }) === false,
+    "距离未知（null/undefined）⇒ false（判据不可用，**不当 0 也不当 Infinity**）",
+  );
+  ok(
+    gaveUpBusOf({ ...B, refVehDistM: Number.POSITIVE_INFINITY }) === false &&
+      gaveUpBusOf({ ...B, refVehDistM: Number.NaN }) === false,
+    "非有限值（Infinity / NaN）⇒ false（脏数据不得触发「没赶上」）",
+  );
+
+  /* 互斥性：两个判据不可能同时成立 —— 否则调用方两行赋值的顺序就变得有意义了 */
+  const mutuallyExclusive = [0, 50, 120, 121, 500].every(
+    (d) => !(ridingRealOf({ phase: "riding", entry: "station", posEvidence: false }) && gaveUpBusOf({ ...B, refVehDistM: d })),
+  );
+  ok(mutuallyExclusive, "`ridingReal` 与 `gaveUp` 天然互斥（station+无证据时 ridingReal 恒假）");
+}
+
 console.log(
   failed === 0
-    ? "\n✅ 全通过（ridingReal 判据表 / 变异自检 / 两处接线锁）"
+    ? "\n✅ 全通过（ridingReal 判据表 / 变异自检 / 两处接线锁 / 没赶上兜底）"
     : `\n❌ ${failed} 项失败`,
 );
 process.exit(failed === 0 ? 0 : 1);

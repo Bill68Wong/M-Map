@@ -26,22 +26,13 @@
  *   | `null`     | —     | true        | **防御**：`riding` 却没有进入方式属不一致态，退回旧行为（隐藏） |
  *   | 非 riding  | —     | false       | — |
  *
- * ── ⚠️ 已知缺口（team-lead 2026-11-05 裁决：**接受并记录，不实现阈值**）────
+ * ── ⚠️ 已知缺口（team-lead 2026-11-05 裁决）─────────────────────────────
  *   `station` 进入且 `hasPosEvidence` **永远不翻真**时（用户没上这班车、车开走了）：
  *     · `riding` 会一直为真、`ridingReal` 一直为假 ⇒ **赶车标签一直显示「小跑能赶上」**；
- *     · 这是一条**滞留缺陷**，本批**不修**。
- *   为什么不用时间阈值兜：任何"N 秒后强制认定"在用户真的慢慢上车时会误判
- *     （明明上了车，N 秒后标签突然说没上），代价大于收益。
- *   正确方向 = 用**已有物理信号**：车已驶离上车站超过一定距离（复用现有常量，不新造）
- *     或安全网判定「疑似还没上车」⇒ 才认定为"人不在车上"。
- *   ⇒ 需要「车离上车站多远」这个量，等实现方提供后再做（下一批）。
- *   **不要**在此处擅自加 `setTimeout` / 秒数常量。
- *
- *   ✅ **该信号已就绪**（2026-11-05 实现方落地）：`RideTrackView.refVehDistToBoardM`
- *   = 参照车距上车站的直线距离（米）。落地时只需在本文件加一条：
- *   `entry === "station" && !posEvidence && 距离 > 阈值 ⇒ false 且允许安全网接管`
- *   —— **阈值必须先由负责人/实现方定**（它同时决定"用户刚上车还在站台附近"的容忍度），
- *     本文件不预设任何数值。
+ *     · 这是一条**滞留缺陷**。
+ *   ✅ **本批已用物理信号兜底**：见下方 `gaveUpBusOf`（车已驶离上车站 > 120m ⇒ 认定没赶上
+ *     ⇒ 调用方解除锁存）。**仍未做**：任何"没赶上"的提示文案/UI（新概念，属设计侧判断）。
+ *   ⛔ **不要**改用时间阈值兜（会误伤"慢慢走上车"的真实用户）。
  */
 import type { BoardEntry, RidePhase } from "./useRideTracking";
 
@@ -95,5 +86,72 @@ export function ridingRealOfRide(t: RideLatchSource | null | undefined): boolean
     phase: t.phase,
     entry: t.enteredVia,
     posEvidence: t.boardedByPosition,
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   ★ 2026-11-05：「这班没赶上」兜底（治上面那个滞留缺口）
+   ─────────────────────────────────────────────────────────────────────
+   缺口回顾：`enteredVia === "station"` 切进 riding 后，若用户**其实没上车**
+   （车来了没挤上），`boardedByPosition` 永不翻真 ⇒ `ridingReal` 恒假
+   ⇒ 赶车标签会一直显示「小跑能赶上」（滞留）。
+   ⇒ 用**物理信号**判定：位置证据一直不来 **且车已明显驶离上车站** = 用户没上这班车。
+   **不用时间阈值**（会误伤"慢慢走上车"的真实用户）。
+   ══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 「参照车已驶离上车站」的距离阈值（米）。
+ *
+ * ── 为什么是 120（推导，不是经验值）────────────────────────────────────
+ *   · `boardedByPosition` 成立需要「沿线位移 `alongM ≥ 35m` + 5 帧窗口」
+ *     ⇒ **「车已走 35m 但证据还没到」是正常采样滞后**，阈值必须**显著大于 35m**，
+ *       否则会把"正在上车的人"误判成"没赶上"；
+ *   · `FOLLOW_MAX_D_M = 120`（`plate-lock.ts`：「人车贴同一位置」的位置确认门）
+ *     是同量级参考点 —— 超过它，车与站台已不在"同一位置"的语义范围内。
+ *   ⇒ 取 120m：既远离 35m 的采样滞后区，又与既有门限同量级，不新增孤立数字。
+ *
+ * ⚠️ 若将来有人要给「没赶上」加提示文案/更精细判据，**先重新推导本值**，
+ *    不要因为它"看起来够用"直接沿用。
+ */
+export const GAVE_UP_BUS_DIST_M = 120;
+
+export interface GaveUpInput {
+  /** 本次 riding 的进入方式（`null` = 不在 riding） */
+  entry: BoardEntry | null | undefined;
+  /** 「人在车上」的位置证据是否已成立 */
+  posEvidence: boolean;
+  /** 参照车距上车站的直线距离（米）；`null` = 无牌 riding（多车歧义）或还没算过 */
+  refVehDistM: number | null | undefined;
+}
+
+/**
+ * 「这班车没赶上」—— 只有在**车到站切入**且**证据始终未到**且**车已驶离**时才成立。
+ *
+ * ⚠️ `refVehDistM === null` 有两种成因（无牌 riding 的参照车未知 / 还没算过），
+ *   **两种都当"兜底判据不可用"**（返回 false），**不要当 0 或 Infinity**：
+ *   · 当 0 ⇒ 永远"没走远" ⇒ 缺口不兜（但至少不误判）；
+ *   · 当 Infinity ⇒ 一帧就判"没赶上" ⇒ 把正常上车的人踢出乘车态（严重得多）。
+ */
+export function gaveUpBusOf(input: GaveUpInput): boolean {
+  if (input.entry !== "station") return false;
+  if (input.posEvidence) return false;
+  const d = input.refVehDistM;
+  if (d === null || d === undefined) return false;
+  if (!Number.isFinite(d)) return false;
+  return d > GAVE_UP_BUS_DIST_M;
+}
+
+/** 从追踪视图读兜底判据（**唯一**读字段的地方，与 `ridingRealOfRide` 并列） */
+export interface GaveUpSource {
+  enteredVia: BoardEntry | null;
+  boardedByPosition: boolean;
+  refVehDistToBoardM: number | null;
+}
+export function gaveUpBusOfRide(t: GaveUpSource | null | undefined): boolean {
+  if (!t) return false;
+  return gaveUpBusOf({
+    entry: t.enteredVia,
+    posEvidence: t.boardedByPosition,
+    refVehDistM: t.refVehDistToBoardM,
   });
 }

@@ -80,7 +80,7 @@ import { CatchTagLatchContext } from "./NavDetailBody";
  * ★ 2026-11-05：「人确实在车上」判据（`riding` 语义变更后的唯一判据真源）。
  *   与 `NavDetailBody.infoMode` **必须**共用同一份——两边各写一套必然漂。
  */
-import { ridingRealOfRide } from "./riding-real";
+import { gaveUpBusOfRide, ridingRealOfRide } from "./riding-real";
 import { useNavRemaining } from "./useNavRemaining";
 import { useUserFix } from "./useUserFix";
 import { useNavFrame } from "./useNavFrame";
@@ -498,8 +498,24 @@ export default function NavShell({
    *   · 位置证据到达 / `position` 切入 / 手动「我已上车」⇒ 立即锁存。
    * ⚠️ **同一个判据必须同时用于 `infoMode`**（`NavDetailBody`）—— 只改这里不够：
    *   信息行的 `post` 分支会抢在锁存之前顶掉 `pre`，标签住在 `pre` 里 ⇒ 照样消失。
+   *
+   * ── 「这班没赶上」兜底（2026-11-05 · 治上面那个滞留缺口）──────────────────
+   *   `station` 切入后若位置证据**始终不到**（车来了没挤上），`ridingReal` 恒假 ⇒
+   *   标签会一直显示「小跑能赶上」。用物理信号兜：**车已明显驶离上车站** ⇒ 认定没赶上
+   *   ⇒ **解除锁存**（标签恢复可用），并**不加任何提示文案**（「没赶上」是新概念，
+   *   要不要说属设计侧判断，本批不引入新 UI）。
+   *
+   *   ⚠️ 两个判据**天然互斥**，不要"优化"成一个：
+   *     `ridingReal` = `enteredVia !== "station" || boardedByPosition`
+   *     `gaveUp`     = `enteredVia === "station" && !boardedByPosition && 车已走远`
+   *     ⇒ `ridingReal && gaveUp` 永远为假，故下面两行的先后顺序不影响结果。
+   *   ⚠️ 解除是**安全的**：`station + 无证据` 期间 `ridingReal` 恒假 ⇒ 不会被立刻重新置位，
+   *     不存在"解除→立刻锁存→界面闪烁"的循环。车若倒回站附近 ⇒ `gaveUp` 转假 ⇒
+   *     锁存保持解除、标签继续显示（正是期望：还有机会）。
    */
-  if (ridingRealOfRide(ride)) hasEnteredRiding.current = true;
+  const ridingRealNow = ridingRealOfRide(ride);
+  if (ridingRealNow) hasEnteredRiding.current = true;
+  if (gaveUpBusOfRide(ride)) hasEnteredRiding.current = false;
   /**
    * 锁存复位（唯一入口）。
    * ⚠️ 复位点必须是**显式**的（事件 / 会话边界），不要在渲染期靠 phase 反推复位 ——
