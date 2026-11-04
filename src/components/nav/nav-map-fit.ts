@@ -5,7 +5,7 @@
  *
  * 只放**无副作用**的取景计算与运行时读值：
  *   · `readToken`   —— 运行时读 CSS Token 的 resolved 具体值（AMap 画布拿不到 `var()`）；
- *   · `maskFill`    —— 域外遮罩填充色（读 `--fg`）；
+ *   · `maskFill`    —— 域外遮罩填充色（恒深色）；
  *   · `zoomForAcross` —— 「一屏宽的横向米数」→ zoom（标准 Web Mercator）；
  *   · `fitGapPx` / `panelTopPx` —— 取景呼吸边距 / 面板顶边像素探针。
  *
@@ -16,7 +16,11 @@
 export const TARGET_METERS_ACROSS = 2500;
 /** ★ S1：缩放收敛区间（minZoom=11：一屏≈27.6km，远小于遮罩外圈±1.6°≈178km ⇒ 永不露边） */
 export const MIN_ZOOM = 11;
-export const MAX_ZOOM = 18;
+/**
+ * ★ 2026-11-04：18 → 19。手机屏窄，18 档在路环/关闸等角落只能到街区级；
+ *   19 档（≈0.27m/px）才够看清具体站台/店门口。
+ */
+export const MAX_ZOOM = 19;
 /**
  * 域外遮罩不透明度
  * ★ 2026-10-31：0.42 → 0.25。本应用只服务澳门，域外只需**压暗**区分主次，
@@ -38,14 +42,15 @@ export function readToken(name: string): string | null {
   }
 }
 
-/** 遮罩填充色（读 `--fg`）；读不到 ⇒ null（调用方跳过遮罩） */
-export function maskFill(): string | null {
-  try {
-    const v = getComputedStyle(document.documentElement).getPropertyValue("--fg").trim();
-    return v || null;
-  } catch {
-    return null;
-  }
+/**
+ * 遮罩填充色：**恒为深色**，不随主题变化。
+ *
+ * ★ 2026-11-04：原来读 `--fg` —— 手机深色模式下 `--fg` 是近白（`#e2e2e9`），
+ *   0.25 不透明度反而把域外**提亮**成灰白（实测手机上「域外没有变暗」）；桌面浅色模式才显深。
+ *   遮罩语义是「压暗域外」，与文字色无关 ⇒ 固定取浅色主题的 `--fg` 值。
+ */
+export function maskFill(): string {
+  return "#0f1720";
 }
 
 /** 让「一屏宽」横向放下 `TARGET_METERS_ACROSS` 米的 zoom（按纬度与容器像素宽实时算） */

@@ -5,7 +5,7 @@
  *   用高德官方 `AMap.DistrictSearch`（extensions:'all'，adcode `820000`）取澳门
  *   行政区边界环（GCJ-02），并算出：
  *     ① `rings`        —— 澳门官方环（供域外遮罩「镂空」用）
- *     ② `exclaveRings` —— 横琴口岸澳方管辖区官方环（adcode `440499`，可选）
+ *     ② `exclaveRings` —— 横琴口岸澳方管辖区官方环（adcode `440499`，可选；仅定位判定 / bbox）
  *     ③ `bounds`       —— **外扩后**的 bbox（供 `setLimitBounds` / `setBounds`）
  *   取不到时**必须降级**为兜底矩形，**绝不抛错、绝不阻塞**底图/搜索/定位（§1.4 降级原则）。
  *
@@ -40,8 +40,9 @@ export interface MacauDistrict {
   /** 澳门行政区边界环（GCJ-02，官方数据）—— 遮罩的「洞」 */
   rings: Ring[];
 /**
- * 横琴口岸澳方管辖区官方环（GCJ-02）—— 一并镂空用。
- * 取不到时为空数组（此时该区域会被压暗，按 §1.4 ② 的口径）。
+ * 横琴口岸澳方管辖区官方环（GCJ-02）—— 供「定位是否在澳门范围内」判定与 bbox 合并。
+ * ★ 2026-11-04：**不再参与域外遮罩镂空**（`NavMap` 遮罩只挖澳门主环）—— 飞地环与主环之间的
+ *   窄缝会露出小块暗斑，用户拍板去掉，视觉更干净。取不到时为空数组（定位判定退回仅主环）。
  * ★ v3.6.1：此处并入 `HENGQIN_PORT_RING`（手工环，高德无此 adcode）——
  *   所以 district 成功分支下**永不为空**；「SDK 440499 拿不到」另有 console.warn。
  */
@@ -67,10 +68,10 @@ export const HENGQIN_EXCLAVE_ADCODE = "440499";
  * 来源与精度：
  *   · 锚点 = 库内 DSAT 实测站坐标（`stations` 表自带 lat/lng）：
  *     LRT-HQ `113.54486,22.140725` 与 T560/1~7，站 bbox `lng 113.5449~113.5463 · lat 22.1407~22.1413`；
- *   · 顶点 = 公开地图目测级（**±100m**，只用于遮罩镂空，不用于任何计算/判定）；
+ *   · 顶点 = 公开地图目测级（**±100m**，只用于可拖范围 bbox 与定位判定，不参与遮罩镂空）；
  *   · 标定日期 **2026-10-30**。若口岸围网范围变化需人工更新。
  *
- * ⚠️ 环**不要画大**：北/东边一旦盖到横琴内地一侧，遮罩会反过来把内地区域镂空（漏出非澳门区）。
+ * ★ 2026-11-04：不再作为遮罩的「洞」——只并入 bbox / 定位判定（见 `exclaveRings` 注释）。
  */
 export const HENGQIN_PORT_RING: Ring = [
   [113.54, 22.135],
@@ -300,29 +301,35 @@ export async function loadMacauDistrict(AMap: any, timeoutMs = DISTRICT_TIMEOUT_
   try {
     if (!AMap) throw new Error("AMap 未就绪");
     // 澳门主环 + 澳方管辖区环**并行**取（澳方管辖区失败不影响主流程）
-    const [macauRings, exclaveRings] = await Promise.all([
+    const [macauRingsFirst, exclaveRings] = await Promise.all([
       searchBoundaries(AMap, MACAU_ADCODE, timeoutMs),
       withTimeout(searchBoundaries(AMap, HENGQIN_EXCLAVE_ADCODE, timeoutMs), timeoutMs),
     ]);
 
+    // ★ 2026-11-04：移动端弱网实测，插件加载 + 首次查询偶发超过 6s ⇒ 一次失败即**永久无遮罩**
+    //   （桌面端网络快，不复现）。失败后隔 1s 重试一次；仍失败才走 fallback。
+    let macauRings = macauRingsFirst;
+    if (!macauRings || !macauRings.length) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      macauRings = await searchBoundaries(AMap, MACAU_ADCODE, timeoutMs);
+    }
+
     if (!macauRings || !macauRings.length) {
       // ⚠️ fallback 分支**故意不带** HENGQIN_PORT_RING：
-      //    遮罩绘制条件是 `dist.rings.length && fill`（NavMap）——rings 为空时整个遮罩不画
-      //    （data-map-mask=off，全亮），此时 exclaveRings 根本不会被消费；
-      //    若带了，将来谁把绘制条件改成「rings 空也画局部遮罩」，path=[outer,手工环]
-      //    会变成「全世界除横琴口岸外全暗」的灾难遮罩。
+      //    遮罩绘制条件是 `dist.rings.length`（NavMap）——rings 为空时整个遮罩不画
+      //    （data-map-mask=off，全亮）；`exclaveRings` 只用于定位判定，兜底时返回空即可。
       return { rings: [], exclaveRings: [], bounds: { ...MACAU_FALLBACK_BOUNDS }, source: "fallback" };
     }
 
     const exclave = exclaveRings ?? [];
     // ★ 静默失效观测：440499 的环**只存在于 JS SDK**（REST 版 poly 为空，2026-10-30 实测）。
-    //   SDK 通道一旦拿不到（插件失败/超时/数据变更），澳大校区会重新被遮罩压暗且**不报错**
-    //   ——手工环只能救横琴口岸，救不了澳大。这里必须喊出来。
+    //   SDK 通道一旦拿不到（插件失败/超时/数据变更），澳大校区不在「定位判定 / bbox」内且**不报错**
+    //   ——手工环只能补横琴口岸，补不了澳大。这里必须喊出来。
     if (!exclave.length)
       console.warn(
-        "[district] exclaveRings(SDK 440499) 为空——澳大横琴校区将无法镂空（横琴口岸由手工环兜底不受影响）",
+        "[district] exclaveRings(SDK 440499) 为空——澳大横琴校区不参与定位判定/bbox（横琴口岸由手工环兜底不受影响）",
       );
-    // 手工环并入：镂空面 = 澳大校区（官方环）+ 横琴口岸（手工环）
+    // 手工环并入：定位判定 / bbox 的覆盖面 = 澳大校区（官方环）+ 横琴口岸（手工环）；**不用于遮罩**
     const exclaveAll = [...exclave, HENGQIN_PORT_RING];
     const merged = unionBounds(bboxOf(macauRings), bboxOf(exclaveAll)) ?? MACAU_FALLBACK_BOUNDS;
     return {
