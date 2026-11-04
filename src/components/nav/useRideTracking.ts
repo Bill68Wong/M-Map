@@ -2051,7 +2051,16 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
      * ★ 2026-11-05：「不是这辆」换车 —— **不动** `enteredVia` / `boardedByPosition`：
      *   换的是"哪辆车"，不是"怎么进入 riding"。位置证据（r2 / 跟车斜率）证明的是
      *   「用户随线路在移动」，与锁到哪辆车无关，故无需重判、也不应回退。
+     *
+     * ⚠️ **但 `refVehDistToBoardM` 必须清空**（2026-11-05 修，team-lead 指出的窗口）：
+     *   该值跟着 `vehicleRef.current` 走，而换车后 `vehicleRef` 要等**下一帧车辆帧**
+     *   （`POLL_MS` = 12s）才更新 ⇒ 这 12 秒内它仍是**旧车**的距站距离。
+     *   危害方向是**误判**：旧车已开远（如 5km）、新车刚进站 ⇒ 陈旧值 >120 ⇒
+     *   消费方的 `gaveUpThisBus` 会立刻误报"没赶上这班车"，而新车其实就在眼前。
+     *   ⇒ 清成 `null`（语义 = "还不知道"，消费方按既有约定**不会**当 0/Infinity 用）
+     *     ⇒ 这段窗口内兜底判据不生效，等新车第一帧到达再给真值。**宁可暂不判，不可误判。**
      */
+    setRefVehDistToBoardM(null);
     setPlate(p);
     setProgressSource("vehicle");
     /* ★ v3.7.0 S3：纠错后重锁 ⇒ `corrected`（测试据此断言「不是这辆」真的生效） */
