@@ -26,6 +26,7 @@
 import { AUTO_TRIES_PER_LEG, autoBoardOf, type FixLite } from "@/lib/nav/boarding-detect";
 import { followFramesOf, type VehFrame } from "@/lib/nav/follow-frames";
 import {
+  FOLLOW_MAX_SLOPE_MPS,
   FOLLOW_MIN_ALONG_M,
   FOLLOW_MIN_FRAMES,
   FOLLOW_MIN_SPAN_MS,
@@ -341,8 +342,181 @@ console.log("\n[㉔ 反例回归]");
   ok(FOLLOW_MIN_FRAMES === 5, "最小样本帧数仍为 5（本次未动）");
 }
 
-/* ══════════ ㉕ 窗长门从 10s 降到 6s 的等价性 ══════════ */
-console.log("\n[㉕ 窗长门 10s→6s]");
+/* ══════════ ㉖ 「停站期就开始跟踪」提案的裁决依据（2026-11-04）══════════ */
+/**
+ * ── 提案原文（负责人）────────────────────────────────────────────────
+ *   「车到站挂的是停站状态，可以在停站状态就开始跟踪，不用等到离站；停站期间肯定有
+ *     十几秒，理论上足矣支持车辆判定及匹配。」→ 推成「离站后 3~5 帧确认 d 没拉开就判上，
+ *     绕开 `FOLLOW_MIN_ALONG_M=35` 那道门」。
+ *
+ * ── 本组的作用：把「为什么不成立」变成可复跑的断言 ──────────────────────
+ *   结论一（㉖）：把窗缩到 3~5 帧，**两个方向同时变差** —— 不是更灵敏，是更随机。
+ *   结论二（㉗）：取消 `alongM` 门 ⇒ 「站台人等车开走」误判率从 0/80 涨到 25/80。
+ *   结论三（㉘）：35m 那道门的耗时由**巴士自身运动学**决定，与「量谁的位移」无关。
+ */
+console.log("\n[㉖ 窗长可分性：3~5 帧为什么不成立]");
+{
+  /** 用真代码生成一窗样本，返回该窗的 d 斜率估计（`nWin` 帧、1.5s 间距） */
+  const slopeOfWindow = (boarded: boolean, seed: number, nWin: number): number | null => {
+    const g = gaussOf(seed);
+    const tEnd = 40;
+    const userPos = (t: number) => (boarded ? Math.max(0, busM(t)) : 0);
+    const fixes: FixLite[] = [];
+    for (let t = -39; t <= tEnd; t += GPS_GAP_MS / 1000) {
+      const p = atM(userPos(t) + g() * 10);
+      fixes.push({ lng: p.lng, lat: p.lat, accuracy: 10, ts: T0_MS + t * 1000 });
+    }
+    const vehFrames: VehFrame[] = [];
+    for (let k = -4; k <= 4; k++) {
+      const t = k * (VEH_GAP_MS / 1000);
+      const m = t > 0 ? busM(t) : 0;
+      const p = atM(m + g() * 5);
+      const moving = t > 0 && m > 1;
+      vehFrames.push({
+        ts: T0_MS + t * 1000,
+        vehicles: [
+          {
+            plate: PLATE,
+            lat: p.lat,
+            lng: p.lng,
+            status: moving ? "moving" : "stopping",
+            interval: moving ? { from: { code: "T100" }, to: { code: "T101" } } : null,
+            atStation: moving ? null : { code: "T100" },
+          } as TrackVehicle,
+        ],
+      });
+    }
+    const ff = followFramesOf({ fixes, vehFrames, colored: PATH, plate: PLATE });
+    const sorted = [...ff].sort((a, b) => a.ts - b.ts);
+    if (sorted.length < nWin) return null;
+    const w = sorted.slice(-nWin);
+    const xs = w.map((f) => (f.ts - w[0].ts) / 1000);
+    let mx = 0;
+    let my = 0;
+    const ys = w.map((f) => Math.abs(f.u - f.v));
+    for (let i = 0; i < xs.length; i++) {
+      mx += xs[i];
+      my += ys[i];
+    }
+    mx /= xs.length;
+    my /= xs.length;
+    let num = 0;
+    let den = 0;
+    for (let i = 0; i < xs.length; i++) {
+      num += (xs[i] - mx) * (ys[i] - my);
+      den += (xs[i] - mx) * (xs[i] - mx);
+    }
+    return den > 0 ? num / den : null;
+  };
+
+  const rate = (boarded: boolean, nWin: number, n = 80): { pass: number; total: number; sd: number } => {
+    let pass = 0;
+    let total = 0;
+    const vals: number[] = [];
+    for (let k = 0; k < n; k++) {
+      const s = slopeOfWindow(boarded, 5000 + k * 31, nWin);
+      if (s == null) continue;
+      total++;
+      vals.push(s);
+      if (Math.abs(s) <= FOLLOW_MAX_SLOPE_MPS) pass++;
+    }
+    const mean = vals.reduce((a, b) => a + b, 0) / Math.max(1, vals.length);
+    const sd = Math.sqrt(vals.reduce((a, b) => a + (b - mean) * (b - mean), 0) / Math.max(1, vals.length));
+    return { pass, total, sd };
+  };
+
+  const fullBoard = rate(true, 20);
+  const fullWait = rate(false, 20);
+  ok(
+    fullBoard.pass / fullBoard.total >= 0.97,
+    "★ 全窗（20 帧 / 28.5s）：已上车的 |slope| ≤ 1.2 通过率 ≥ 97%（真上车判得上）",
+    `${((fullBoard.pass / fullBoard.total) * 100).toFixed(1)}% (n=${fullBoard.total})`,
+  );
+  ok(
+    fullWait.pass / fullWait.total <= 0.02,
+    "★ 全窗：站台等车（d 按车速增长）误通过率 ≤ 2%（车开走判不上）",
+    `${((fullWait.pass / fullWait.total) * 100).toFixed(1)}% (n=${fullWait.total})`,
+  );
+
+  const shortBoard = rate(true, 5);
+  ok(
+    shortBoard.pass / shortBoard.total <= 0.85,
+    "★ 5 帧 / 6s 窗：已上车通过率显著下降 ⇒ 「3~5 帧就判」会大量漏判（真上车判不上）",
+    `${((shortBoard.pass / shortBoard.total) * 100).toFixed(1)}% (n=${shortBoard.total})`,
+  );
+  /**
+   * 机制断言（比「误通过率」更稳，不受采样起伏影响）：
+   * 窗从 28.5s 缩到 6s，斜率估计的标准差放大约 **4~5 倍**（σ_slope ∝ 1/窗长）。
+   * 该噪声底一旦接近阈值 1.2 m/s，**两个方向同时崩**：真上车被拒（漏判）、
+   * 站台等车被收（误判）。这正是 `FOLLOW_MIN_SPAN_MS` 当初取 10s 的原始依据，
+   * 也是「停站期 3~5 帧判上」提案不可行的地方 —— 与 `alongM` 放不放宽无关。
+   */
+  ok(
+    shortBoard.sd >= 3 * fullBoard.sd,
+    "★ 5 帧窗的斜率估计标准差 ≥ 全窗的 3 倍（σ ∝ 1/窗长）⇒ 短窗不是更灵敏，是更随机",
+    `σ_5帧=${shortBoard.sd.toFixed(2)} σ_全窗=${fullBoard.sd.toFixed(2)} 比值=${(shortBoard.sd / fullBoard.sd).toFixed(1)}×`,
+  );
+  ok(
+    fullBoard.sd <= 0.6,
+    "全窗的斜率噪声底 ≤ 0.6 m/s（阈值 1.2 尚有 ≥2σ 余量）",
+    `σ=${fullBoard.sd.toFixed(2)}`,
+  );
+}
+
+/* ══════════ ㉗ 「取消 alongM 门」的反例代价 ══════════ */
+/**
+ * 提案的实质是「不量用户自己走了多远，只量 d 没拉开」。本组量它的代价：
+ *   · `alongM` 是「站台人等车开走 + 车在下一站停住」这条反例的**唯一**有效防线
+ *     —— 该反例里 `vehMps` 会被车停住拉到 0 之外的中间值，斜率也接近 0，只有 alongM 能拒；
+ *   · 实测（本文件 ㉙ 的扫档，每档 80 个样本）：`alongM=35` ⇒ 0/80；`=21` ⇒ 1/80；
+ *     `=0`（即提案）⇒ **25/80**。
+ * ⇒ 断言只钉「35 必须守住」；全档扫描的数字（35 ⇒ 0/80 · 30 ⇒ 0/80 · 21 ⇒ 1/80 · 0 ⇒ 25/80）
+ *   写在注释里留痕，不进断言 —— 扫档要跑几百次，不值得占 CI 时间。
+ */
+console.log("\n[㉗ 取消 alongM 门的代价]");
+{
+  ok(FOLLOW_MIN_ALONG_M === 35, "`FOLLOW_MIN_ALONG_M` 仍为 35（提案被否决，未下调）", `实际=${FOLLOW_MIN_ALONG_M}`);
+  /** 站台人等车开走 + 车在下一站（≈68m）停住：35m 门必须拒 */
+  let fp = 0;
+  for (let k = 0; k < 20; k++) {
+    for (const phase of [0, 3, 6, 9]) {
+      const r = run({
+        onBoard: false,
+        stopAgainAtS: 22,
+        accNoiseM: 10,
+        vehNoiseM: 5,
+        vehPhaseS: phase,
+        seed: 1100 + k * 53,
+        tEndS: 60,
+      });
+      if (r.tHit != null) fp++;
+    }
+  }
+  ok(fp === 0, "★ 35m 门在岗：站台人等车开走（含 bus 抖动 σ=5m、20 种子 × 4 相位）⇒ 0 次误判", `误判=${fp}/80`);
+}
+
+/* ══════════ ㉘ 物理下界：35m 的耗时与「量谁的位移」无关 ══════════ */
+/**
+ * 提案里最容易被误读的一句：「『车走了 35m 而 d 没变』与『人走了 35m』在证据上等价，
+ * 但前者不需要等用户自己走出 35m 的物理时间」。
+ *
+ * **这句不成立。** 因为 `d = |u − v|`，若 `d` 恒定则 `Δu ≈ Δv` —— 人就在车上，
+ * 人的 35m 与车的 35m 是**同一个 35m**。巴士从静止走 35m 需要 12.2s（12 km/h、1 m/s²），
+ * 这个时间由**巴士运动学**决定，与量 u 还是量 v 无关。
+ * ⇒ 本组把这条写成断言：`tAtM(35)` 必须 > 10s，且「任何 ≤10s 的方案都必须放宽 35m 门」。
+ */
+console.log("\n[㉘ 物理下界不随量的对象改变]");
+{
+  const t35 = tAtM(FOLLOW_MIN_ALONG_M);
+  ok(t35 > 10, "35m 的物理耗时 > 10s（巴士运动学决定，与量 u 还是量 v 无关）", `${t35.toFixed(1)}s`);
+  ok(
+    GPS_GAP_MS / 1000 + t35 > 13,
+    "⇒ 12s 巴士轮询下，最早可能判上时刻 = 首个「车已走够 35m」的车辆帧 + 1 帧 streak（>13s）",
+    `≈${(Math.ceil(t35 / (VEH_GAP_MS / 1000)) * (VEH_GAP_MS / 1000) + GPS_GAP_MS / 1000).toFixed(1)}s（相位 0）`,
+  );
+}
+
+
 {
   ok(FOLLOW_MIN_SPAN_MS === 6_000, "`FOLLOW_MIN_SPAN_MS` = 6000", `实际=${FOLLOW_MIN_SPAN_MS}`);
   /** 6.0s 窗（5 帧 × 1.5s）在 6s 门下必须成立；4.8s 窗必须不成立。
