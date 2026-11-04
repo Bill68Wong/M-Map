@@ -622,6 +622,47 @@ console.log("── ⑥ 接线与复刻锁定（源码字符串）──");
     /legIdx < card\.rides\.length - 1 \? MISSED_STOP_SUB_TRANSFER : MISSED_STOP_SUB_ARRIVE/.test(navDetail),
     "接线：次行两档 = 还有后续程 ⇒ 请在下一站下车 / 最后一程 ⇒ 请下车",
   );
+
+  /**
+   * ★ 事故防线（2026-11-04 实际发生过一次，必须机械拦截）：
+   *   `df1409d` 把另一路正在做的**变异版**判据一起提交进了仓库 ——
+   *   `const missedStop = infoMode === "post" && stopsAway === 0; // MUTATION: 漏掉 alarm 条件`
+   *   ⇒ 正常到站（`alarm="now"`）会被说成「已过站」。
+   *   成因：两方同时改同一文件 + 一方在文件上做"改坏→跑→改回"的变异实测 + 整文件 `git add`。
+   *
+   *   下面两条是**零成本的机械防线**：
+   *   ① 源码里**不得出现 `MUTATION` 字样** —— 变异代码的标记必须被看见（它在 diff 里是明文）；
+   *   ② 判据行必须**同时**含两个条件 —— 单独一条正则锁不住"少了一个 &&"，因为
+   *      `&& stopsAway === 0;` 也能被宽正则放过，故拆成「含 stopsAway 条件」+「含 alarm 条件」两条分别断言。
+   *
+   *   ⚠️ 为什么不靠行为断言兜住：`deriveRow()` 是**本文件的复刻**，它自己写着正确的判据
+   *   ⇒ 组件里判据被改坏时，行为断言**仍然全绿**（测的是复刻，不是组件）。这也是本事故能溜过
+   *   81 条断言的原因。行为断言与源码形状锁**必须成对**存在。
+   */
+  ok(
+    !navDetail.includes("MUTATION") && !rideEngine.includes("MUTATION"),
+    "防线①：源码不得留 `MUTATION` 字样（变异实测的「改坏」必须改回再提交）",
+    navDetail.includes("MUTATION") ? "NavDetailBody 命中" : rideEngine.includes("MUTATION") ? "useRideTracking 命中" : "",
+  );
+  {
+    /** 取出判据那一行（只取首个 `const missedStop =` 那句，避免误命中注释里引用的同名字符串） */
+    const judgeLine = /const missedStop = [^;\n]+;/.exec(navDetail)?.[0] ?? "";
+    ok(
+      judgeLine.includes("stopsAway === 0"),
+      "防线②a：missedStop 判据含「站数 0」条件",
+      judgeLine || "未找到判据行",
+    );
+    ok(
+      judgeLine.includes('alarm === "none"'),
+      "防线②b：missedStop 判据含「alarm === \"none\"」条件（漏它 ⇒ 正常到站会被说成已过站）",
+      judgeLine || "未找到判据行",
+    );
+    ok(
+      judgeLine.includes('alarm === "none"') && judgeLine.includes("stopsAway === 0"),
+      "防线②c：两个条件**同时**在（`df1409d` 就是少了这一个 &&）",
+      judgeLine,
+    );
+  }
 }
 
 console.log(
