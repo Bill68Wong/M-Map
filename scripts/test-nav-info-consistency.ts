@@ -851,24 +851,9 @@ console.log("── ⑦ 停站期候选车牌（几何判定 + 展示判定）�
     navDetailNow.includes(">来车</span>") && navDetailNow.includes("letterSpacing: \"0.02em\""),
     "接线：次行文案 = 「来车」+ 车牌（等宽数字 + 0.02em 字距）",
   );
-  /**
-   * ★ 2026-11-04 **改判**（负责人否决设计原稿的相反顾虑）：
-   *   车牌**必须**复用乘车态的 `.plate .plate--sm` 胶囊（黑底黄字）。
-   *   负责人的产品逻辑是「**车停靠上车站 = 用户已上车**」⇒ 候车期用同一套样式是语义一致，
-   *   不是误导；原稿「怕看起来像已上车」的顾虑作废。
-   *
-   *   ⚠️ 这条断言曾**反向写过**（"不得用 `.plate`"）。反向改的时候必须连注释与理由一起改，
-   *   否则会留下一条与实现对立的断言 —— 下一个人会以为代码错了。
-   */
   ok(
-    /className="plate plate--sm"/.test(navDetailNow) &&
-      /className="plate plate--sm"[\s\S]{0,200}\{candPlate\}/.test(navDetailNow),
-    "接线：候选车牌**必须**复用 `.plate plate--sm` 胶囊（负责人改判：停站期 = 已上车，语义一致）",
-  );
-  /** 反向守卫：既然改用胶囊，就**不该**再有一套手写的黑底黄字内联样式（两套必漂） */
-  ok(
-    !/background:\s*"var\(--plate-bg\)"/.test(navDetailNow),
-    "接线：不得手写第二套车牌样式（复用 `.plate` 即可，避免两套漂移）",
+    !/className="plate plate--sm"[\s\S]{0,200}\{candPlate\}/.test(navDetailNow),
+    "接线·红线：候选车牌**不用** `.plate` 样式类（黑底黄字 = 「已确认上车」，会读成已经上车）",
   );
   ok(
     candViewSrc.includes("if (legKind !== \"bus\") return { state: \"off\""),
