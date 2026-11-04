@@ -375,6 +375,133 @@ export function auxOf(
   return { strong: r.kind === "strong", weak: r.kind === "weak", plate: r.plate };
 }
 
+/* ══════════════════════════ 停站即上车（★ 2026-11-05 · 负责人裁决） ══════════════════════════ */
+
+/**
+ * 停站判据的最小停站时长（秒）—— 仅用于注释说明，**不参与判定**。
+ * 数值依据见 `atBoardStopOf` 上方那张 dwell 分布表。
+ */
+export const STATION_HIT_MIN_DWELL_SEC = 12;
+
+/** 「车停靠用户上车站」的判定结果 */
+export interface StationHit {
+  /** 是否存在**本线**车辆停在用户上车站 */
+  hit: boolean;
+  /** 命中的车牌；多辆无法分辨 ⇒ `null`（**仍算 hit**，见 `atBoardStopOf`） */
+  plate: string | null;
+  /** 命中的车辆数 */
+  n: number;
+}
+
+/**
+ * ★ 2026-11-05（负责人裁决）：「车停放在用户上车站的停站期 = 用户已上车」⇒ **立即切 riding**。
+ *
+ * 负责人原话：「车到上车站了，立刻进入乘车导航阶段。注意，是检测到车到达上车站之时，
+ * 状态要找准，**不要提前至等车时，也不要推后至离站时**。」
+ * 这推翻了此前「停站期只显示候选车牌、不判定」的结论 —— 接受「车到了用户就会上车」的产品假设。
+ *
+ * ── 判据（只看 `atStation`，**不看 `status`**）────────────────────────────
+ *   `hit ⟺ ∃ v: v.atStation?.code 非空 &&
+ *                    mainOf(v.atStation.code) === mainOf(boardMain)`
+ *
+ * ⚠️ **为什么不叠 `status === "stopping"` / `status !== "terminal"`**（这是本判据最易写错处）
+ *   `route-vehicles.ts:208-214` 的实现是：
+ *   ```
+ *   if (m.status === "1") { atStation = stopRef(m.code);
+ *                           status = m.idx === 0 || m.idx === lastIdx ? "terminal" : "stopping"; }
+ *   ```
+ *   即 `terminal` 的判据是「该车在**本线路本方向站序**的首位或末位」——
+ *   与「是不是用户的上车站」**完全无关**。
+ *   实测 `data/tracking/poll-plan.json`（97 线 / **118 个方向**）：**不同首站 80 个**，
+ *   出现最多的是 `M268`(7 条方向·关闸) `M95/3`(5·妈阁) `M214`(4) `M252`(3) `M3/4`(3)
+ *   `C690/2`(3·路环) —— 全是枢纽总站。
+ *   ⇒ 若叠 `!== "terminal"`，**用户从总站上车（澳门最典型场景）永远切不了**。
+ *   而 `atStation` 非空 **本身** 就等价于「DSAT 报 `status="1"`（车停靠在某站）」，
+ *   不需要再叠一层 status。三条边界的表达力也都在 `atStation` 上：
+ *     · 车在路上            ⇒ `atStation === null` ⇒ 不命中（**不提前**）
+ *     · 车在**别的**总站待发 ⇒ `atStation.code ≠ boardMain` ⇒ 不命中（原意如此）
+ *     · 车已离站            ⇒ `atStation === null` ⇒ 本条**不触发**（**不推后**，归旧的 L-a 路径）
+ *
+ * ── 「不推后至离站时」能真做到多少（**物理下界，别承诺 100%**）───────────
+ *   数据源：`data/tracking/*-derived.json` 的 `rawDepartSamples[].dwellMin`
+ *   （最近 8 轮真实采集，**31,414 个 dwell 样本**，由 `track-derive.mjs` 状态机量出
+ *   「到达首帧 → 离开首帧」）：
+ *     · 均值 **49.3s** · **中位 40s** · p10 **15s** · p25 30s · p75 60s · p95 115s
+ *     · `dwell < 12s`（短于一个轮询周期）占 **9.6%**；`dwell < 24s` 占 17.8%
+ *   ⇒ 漏掉停站帧的期望比例：**2.8%**（乐观）～ **约 4.8%**（扣掉 DSAT 服务端 ~2.5s 更新滞后，
+ *     见 `data/tracking/README.md`：`status` 翻 `'0'` 滞后 ≈ 服务端 5s + 采样 5s）
+ *   ⇒ **约 95% 能在停站帧抓住；约 5% 必然退回旧的 L-a（离站）路径。**
+ *     这是 `POLL_MS = 12s` 的**物理下限，不是缺陷**（把轮询调快会动到 DSAT 风控红线）。
+ *   ℹ️ 反直觉的一点：dwell 中位 40s ÷ 轮询 12s ⇒ **平均能采到 3~4 帧停站帧**，
+ *     所以「抓住」不是靠运气、是有余量的；漏的只是那 9.6% 的极短停站。
+ *
+ * @param vehicles  本帧车辆（**已按线路+方向过滤**，见 `/api/route-vehicles?code=&dir=`）
+ * @param boardMain 本段上车站主码
+ */
+export function atBoardStopOf(vehicles: TrackVehicle[], boardMain: string): StationHit {
+  const board = mainOf(boardMain);
+  if (!board) return { hit: false, plate: null, n: 0 };
+  const hits = vehicles.filter((v) => v.atStation?.code && mainOf(v.atStation.code) === board);
+  if (!hits.length) return { hit: false, plate: null, n: 0 };
+  /**
+   * 多辆本线车同时停靠本站 ⇒ **仍然 hit**（用户确实上了其中一辆），但**不锁牌**。
+   * ⚠️ 这是**正常状态、不是缺陷**：「切 riding」与「锁哪辆车」是两件事（见模块头注释）。
+   *    锁牌仍走 `plate-lock.ts` 的三条件 + `alignedDOf` + `FOLLOW_AMBIG_M`，本函数不参与。
+   */
+  if (hits.length > 1) return { hit: true, plate: null, n: hits.length };
+  return { hit: true, plate: hits[0].plate, n: 1 };
+}
+
+/**
+ * ★ 2026-11-05：**位置证据是否已到达**（供 `RideTrackView.hasPosEvidence`）。
+ *
+ * ── 为什么需要它 ────────────────────────────────────────────────────────
+ *   停站判据让 riding 的语义从「人已在车上」变成「车到了，人可能还在跑」。
+ *   消费方（赶车标签的锁存）必须能区分这两者：车到站切进 riding 时**还不该**隐藏标签，
+ *   要等用户随车移动、位置判据也成立之后才隐藏。⇒ 需要一个**进入 riding 之后仍会翻转**的量。
+ *
+ * ── 判据（与 `autoBoardOf` 同源同阈值，不引入第二套标准）─────────────────
+ *   · 轻轨：`r2Of` 收紧档（tol 60m / 速度 ≥12 / ≥3 帧）
+ *   · 巴士：`r2Of` 常规档 **或** 跟车斜率判据 `followSlopeOf`（需 `plate` 才能算斜率）
+ *
+ * ⚠️ 只用**位置移动**判据 —— 停站判据本身不算「位置证据」（它正是"没有位置证据"的那一类）。
+ */
+export function positionEvidenceOf(o: {
+  legKind: "bus" | "lrt";
+  colored: LL[];
+  fixes: FixLite[];
+  /** 车辆帧历史（斜率判据用）；缺省 ⇒ 只判 r2 */
+  vehFrames?: VehFrame[] | null;
+  /** 已锁车牌；`null` ⇒ 斜率判据不可用（`followFramesOf` 需要参照车） */
+  plate?: string | null;
+}): boolean {
+  if (o.colored.length < 2) return false;
+  const fixes = trustedFixes(o.fixes);
+  if (fixes.length < R2_STREAK_ALONE) return false;
+
+  if (o.legKind === "lrt") {
+    const opts = adaptiveOpts(fixes, R2_LRT_TOL_M);
+    return r2Of(fixes, o.colored, {
+      tolM: opts.tolM,
+      displaceM: opts.displaceM,
+      speedMinKmh: R2_LRT_SPEED_MIN_KMH,
+      minSamples: R2_STREAK_ALONE,
+    });
+  }
+  const opts = adaptiveOpts(fixes, R2_TOL_M);
+  const hitR2 = r2Of(fixes, o.colored, {
+    tolM: opts.tolM,
+    displaceM: opts.displaceM,
+    speedMinKmh: R2_SPEED_MIN_KMH_FLEX,
+    minSamples: R2_STREAK_ALONE,
+  });
+  if (hitR2) return true;
+  if (!o.plate || !(o.vehFrames?.length)) return false;
+  return followSlopeOf(
+    followFramesOf({ fixes, vehFrames: o.vehFrames, colored: o.colored, plate: o.plate }),
+  ).ok;
+}
+
 /* ══════════════════════════ 组合判定 ══════════════════════════ */
 
 export interface AutoBoardInput {
@@ -406,12 +533,34 @@ export interface AutoBoardInput {
    * 缺省 = 未消耗过。
    */
   autoLeft?: number;
+  /**
+   * ★ 2026-11-05：**是否仍在步行段**（`NavShell` 的 `walkActive`）。
+   *
+   * ⚠️ 这道门**必需**，不是冗余。事实依据（别删）：
+   *   `NavShell.tsx:449-451` 自己写明 `startSession("out")` 在用户按下「开始导航」时
+   *   **同时**做两件事 —— `rideStart()` 进 `boarding` **且** `setWalkSeg("out")`
+   *   ⇒「步行去车站」这一路上 `phase` **已经是 `boarding`**。
+   *   而 `NavShell.tsx:407-412/:429` 声称的「引擎内 `tryAuto` 因 `walkActive` 早退、
+   *   真互斥」**从未实现**：`useRideTracking` 的 `tryAuto` 只有 `phase`/`leg`/`hit`
+   *   三个早退（`:1222` 的注释自己也写「v3.10.0 起已不再因步行段早退」）。
+   *   ⇒ 旧的 r2/slope 判据靠「用户自己在动」间接兜住了这个缺口；
+   *     但**停站判据刻意不看用户位移**（负责人要求「车到站就切」）⇒ 必须自己带门，
+   *     否则「车已停在站台、用户还在 300m 外」会被判成已上车。
+   * 缺省 `false`（= 不在步行段）—— 保持既有调用点行为不变。
+   */
+  walkActive?: boolean;
   /** 调用方维护的连续命中帧数 */
   streak?: number;
 }
 
-/** 本帧**最强可用证据**（`station` = 只有车辆侧「已离站」证据，未构成命中） */
-export type BoardEvidence = "slope" | "r2" | "station" | "none";
+/**
+ * 本帧**最强可用证据**（观测钩子 `data-board-evidence` 的值源）。
+ *   `atstop` = ★ 2026-11-05 新增：命中「车**停靠**在用户上车站」这条判据；
+ *   `slope` / `r2` = 位置移动判据命中；
+ *   `station` = 只有车辆侧证据（车已离站 / 有候选）但**未**构成命中 —— 与 `atstop`
+ *               必须分开：前者是"没判上"，后者是"判上了"，混用会让 QA 分不清。
+ */
+export type BoardEvidence = "atstop" | "slope" | "r2" | "station" | "none";
 
 export interface AutoBoardResult {
   hit: boolean;
@@ -556,6 +705,46 @@ export function autoBoardOf(input: AutoBoardInput): AutoBoardResult {
   const autoLeft = input.autoLeft ?? AUTO_TRIES_PER_LEG;
   if (!(autoLeft > 0)) return noHit();
   if (input.nowMs - input.lastSwitchTs < SWITCH_COOLDOWN_MS) return noHit();
+
+  /**
+   * ★ 2026-11-05（负责人裁决）：**车停靠用户上车站 ⇒ 立即判上**（短路，先于所有位置判据）。
+   *
+   * 三条边界都已在 `atBoardStopOf` 里表达（车在路上 / 停别的站 / 已离站），这里只补两道门：
+   *   ① `!input.walkActive` —— **必需**（不是冗余）：`phase === "boarding"` 在**步行段期间
+   *      就已成立**（`NavShell.tsx:449-451`：`startSession("out")` 同时 `rideStart()` +
+   *      `setWalkSeg("out")`），而 `tryAuto` 里**没有** walkActive 早退
+   *      （`NavShell.tsx:407-412/:429` 声称的「真互斥」从未实现，见 `AutoBoardInput.walkActive` 注释）。
+   *      本判据刻意不看用户位移 ⇒ 不带门就会出现「车停在站台、人还在 300m 外」被判已上车。
+   *      ⚠️ 只在**本判据**上加门，**不动** r2/slope 的既有行为（v3.10.0 那个死锁是
+   *      「全局面包 walkActive ⇒ 在车上点开始导航时永久卡步行段」，不能复发）。
+   *   ② 只对巴士生效（轻轨无 `atStation` 逐车数据）。
+   *
+   * `need = 1`：这是**事件式**判据（那一帧车确实停着），不是需要多帧累积的统计判据，
+   *   所以第一帧就切，不再等 streak（负责人要求「立刻进入」）。
+   */
+  if (input.legKind === "bus" && !input.walkActive) {
+    const st = atBoardStopOf(input.vehicles, input.boardMain);
+    if (st.hit) {
+      /**
+       * 车牌：仍走 `pickLockPlateOf` 的歧义门（**不放宽**）。
+       * `plate === null`（多车歧义）**照切** —— 「切 riding」与「锁哪辆车」是两件事，
+       * 无牌 riding 是既有降级形态（`mapVehicles` 的 `if (!plate)` 分支显示全线在途车、
+       * 进度走 GPS 推算）。⚠️ **这是正常状态，不是缺陷**，别当 bug 修。
+       */
+      const plate = st.plate ?? lock.plate;
+      return {
+        hit: true,
+        plate,
+        source: plate ? "vehicle" : "gps",
+        reason: plate ? "gps+vehicle" : "gps",
+        streak: prevStreak + 1,
+        need: 1,
+        evidence: "atstop",
+        followSlope: follow.slope,
+        followWhy: follow.why,
+      };
+    }
+  }
 
   /* ③ 硬门 G2：定位主导 ⇒ 没有足够可信帧就不判 */
   if (fixes.length < R2_STREAK_ALONE) return noHit();

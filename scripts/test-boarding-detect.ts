@@ -25,6 +25,7 @@ import {
   R2_STREAK_WITH_VEHICLE,
   R2_TOL_M,
   SWITCH_COOLDOWN_MS,
+  atBoardStopOf,
   autoBoardOf,
   auxOf,
   detectPausedOf,
@@ -191,14 +192,22 @@ function followFixture(o: {
   };
 }
 
-/** 车：刚从本站开走（A1 = strong） */
+/**
+ * 车：刚从本站开走（A1 = strong）
+ *
+ * ⚠️ 2026-11-05 修正：原夹具同时给了 `interval` 与 `atStation`，**这不代表任何真实帧**。
+ *   `route-vehicles.ts:208-214` 里两者互斥：`status="1"` ⇒ 只填 `atStation`；
+ *   `status="0"` ⇒ 只填 `interval`。0/1 两态不会并存。
+ *   停站判据只看 `atStation` ⇒ 若夹具带着 `atStation`，"车刚开走"会被误当成"车正停靠"。
+ *   ⇒ 去掉 `atStation`（移动中的车没有挂靠站），夹具才与生产同构。
+ */
 const vJustLeft: TrackVehicle = {
   plate: "MA0001",
   lat: atM(120).lat,
   lng: atM(120).lng,
   status: "moving",
   interval: { from: { code: "T100" }, to: { code: "T101" } },
-  atStation: { code: "T100" },
+  atStation: null,
 };
 /** 车：正停靠本站（A2 = weak） */
 const vStopping: TrackVehicle = {
@@ -264,10 +273,19 @@ console.log("\n[③ 车辆辅助降门槛]");
   eq(withCar.source, "vehicle", "A1 ⇒ 来源 vehicle");
   eq(withCar.reason, "gps+vehicle", "reason = gps+vehicle");
 
+  /**
+   * ★ 2026-11-05：**A2（车停靠本站）作为「只降门槛」的路径已被停站判据取代**。
+   *   原因：A2 的判据 `atStation==board && status==="stopping"` 正是停站判据的子集
+   *   ⇒ 只要 A2 成立，停站判据必然先命中并 return（`evidence="atstop"`）⇒ 走不到降门槛那段。
+   *   ⇒ 这不是缺陷，是负责人裁决（「车停到站 = 已上车」）的必然后果：
+   *     A2 从「降门槛」升级为「直接判上」，`need` 由 2 变成 1，且唯一候选时**会锁牌**
+   *     （旧的"不锁牌"理由「站里可能多辆」由歧义门覆盖：多辆 ⇒ plate=null）。
+   */
   const withWeak = autoBoardOf(inputOf({ fixes, vehicles: [vStopping] }));
-  eq(withWeak.need, R2_STREAK_WITH_VEHICLE, "A2 停靠佐证 ⇒ need=2");
-  eq(withWeak.plate, null, "A2 **不锁车牌**（站里可能多辆）");
-  eq(withWeak.source, "gps", "A2 ⇒ 来源仍 gps");
+  eq(withWeak.need, 1, "A2（车停靠本站）⇒ 现由停站判据直接命中，need=1（不再是降门槛的 2）");
+  eq(withWeak.evidence, "atstop", "A2 ⇒ 证据 = atstop（停站判据短路）");
+  eq(withWeak.plate, "MA0002", "A2 唯一候选 ⇒ 锁牌（多辆时由歧义门给 null）");
+  eq(withWeak.source, "vehicle", "A2 有牌 ⇒ 来源 vehicle");
 
   const unrelated = autoBoardOf(inputOf({ fixes, vehicles: [vElsewhere] }));
   eq(unrelated.need, R2_STREAK_ALONE, "无关车 ⇒ need 仍 3");
@@ -473,7 +491,15 @@ console.log("\n[⑫ 步行不得判上车 · 45s 满窗]");
    */
   for (const kmh of [5.0, 5.5, 6.0, 7.0, 8.0]) {
     for (const sc of SCENARIOS) {
-      const r = autoBoardOf(inputOf({ fixes: WALK_FIXES(kmh), vehicles: sc.vehicles }));
+      /**
+       * ★ 2026-11-05：**必须**传 `walkActive: true`。
+       *   本组场景就是「用户还在走去站台的路上」（5~8 km/h 步行）——按定义处于步行段。
+       *   不传的话（`undefined` ⇒ false）停站判据会认为"人已在站台"，
+       *   于是 A2 弱车（车停靠本站）⇒ 直接判上，与本组意图（检验位置判据是否会把步行误判成乘车）无关。
+       *   ⇒ 传 true 才忠实复现生产：步行段由 `walkActive` 门挡住停站判据，
+       *     本组检验的正是**位置判据自己**能否分辨步行与乘车。
+       */
+      const r = autoBoardOf(inputOf({ fixes: WALK_FIXES(kmh), vehicles: sc.vehicles, walkActive: true }));
       const discriminating = kmh >= 6.0; // 6.0 / 7.0 / 8.0 才是回归防线
       eq(
         r.hit,
@@ -652,7 +678,15 @@ console.log("\n[⑯ I1 相对距离斜率]");
   eq(r2.plate, null, "未命中 ⇒ 不锁牌");
   eq(r2.evidence, "station", "证据只剩「车已离站」");
 
-  /** 用例 3：车**停靠本站** + d≡0 ⇒ 不判（物理不可分，如实不判） */
+  /**
+   * 用例 3：车**停靠本站** + d≡0
+   *
+   * ★ 2026-11-05 **语义已变更**：本用例原先断言「物理不可分 ⇒ 不判」，
+   *   现被负责人裁决推翻 ——「车停在上车站的停站期 = 用户已上车 ⇒ 立刻进入乘车导航」。
+   *   物理上两者**仍然**不可分（人可能没上），这是**明知的假设代价**；
+   *   纠错入口（「我没上车」）是它的兜底，见 ㉒ 组。
+   *   ⇒ 本用例改为记录**新语义**，并保留旧结论作为历史留痕（勿删，解释为什么曾经不判）。
+   */
   const parked: TrackVehicle = {
     plate: "MB0002",
     lat: atM(0).lat,
@@ -665,9 +699,14 @@ console.log("\n[⑯ I1 相对距离斜率]");
   const r3 = autoBoardOf(
     inputOf({ fixes: fixesAt([0, 0, 0, 0, 0]), vehFrames: parkedHist, vehicles: [parked] }),
   );
-  eq(r3.hit, false, "车停靠本站 + 人在站台 + d≡0 ⇒ 不判（信号上不可分，不硬判）");
-  eq(r3.plate, null, "A2（停靠本站）仍**不锁牌**");
-  eq(r3.evidence, "none", "无任何「车已离站」证据");
+  eq(r3.hit, true, "车停靠本站 ⇒ 现**判上**（2026-11-05 负责人裁决；旧结论「不可分⇒不判」已废止）");
+  eq(r3.evidence, "atstop", "证据 = atstop（停站判据，不是位置判据）");
+  eq(r3.plate, "MB0002", "唯一候选 ⇒ 锁牌");
+  /** 同一输入把停站分支关掉（`walkActive=true`）⇒ 回到旧的「不可分 ⇒ 不判」行为（历史留痕） */
+  const r3old = autoBoardOf(
+    inputOf({ fixes: fixesAt([0, 0, 0, 0, 0]), vehFrames: parkedHist, vehicles: [parked], walkActive: true }),
+  );
+  eq(r3old.hit, false, "历史留痕：停站分支关闭时 d≡0 仍不可分 ⇒ 不判（旧行为，勿据此改回）");
 
   /** 用例 4：只给 4 帧 ⇒ 不判（**锁死 5 帧下限**，防有人缩到 3 帧引入假阳性） */
   eq(FOLLOW_MIN_FRAMES, 5, "最小样本帧数硬下限 = 5（不得下调）");
@@ -1192,6 +1231,171 @@ console.log("\n[㉑ 同线双车锁错率 · RED/GREEN]");
     eq(cands[0]?.dKind, "aligned", "喂齐历史 ⇒ 口径必须是 aligned");
     ok((cands[0]?.nAligned ?? 0) >= 5, `参与对齐的样本帧数应 ≥5（实际 ${cands[0]?.nAligned}）`);
     ok(cands[0]?.d != null && (cands[0].d as number) < 30, "完全同步 ⇒ d 应接近 0", `d=${cands[0]?.d?.toFixed(1)}`);
+  }
+}
+
+
+/* ══════════ ㉒ 「车停靠上车站 ⇒ 立即切 riding」（★ 2026-11-05 · 负责人裁决） ══════════ */
+/**
+ * 负责人裁决：「车停在上车站的停站期 = 用户已上车 ⇒ 立刻进入乘车导航阶段。
+ *   是**检测到车到达上车站之时**，不要提前至等车时，也不要推后至离站时。」
+ * 这推翻了此前「停站期只显示候选车牌、不判定」的结论。
+ *
+ * ── RED 的口径（必须先说清，否则这条断言是假的）───────────────────────────
+ *   改前的代码**没有**这条分支（`A2` 只降门槛、不触发），所以「改前行为」只能用
+ *   **把新分支关掉**来复现。唯一的关法是 `walkActive: true`（该门正是"不启用停站判据"），
+ *   而它同时忠实等于改前代码在「用户静止 + 车停靠」输入下的表现：r2 速度门过不了、
+ *   斜率判据 `alongM = 0` 过不了 ⇒ `hit === false`。
+ *   ⇒ RED 用 `walkActive: true`，并在断言文案里写明这是"复现改前行为"，不是"用户真在走路"。
+ */
+console.log("\n[㉒ 停站即上车]");
+{
+  /** 车停靠「上车站」（T100）—— 停站判据唯一认的形态 */
+  const vAtBoard: TrackVehicle = {
+    plate: "MC0001",
+    lat: atM(0).lat,
+    lng: atM(0).lng,
+    status: "stopping",
+    interval: null,
+    atStation: { code: "T100" },
+  };
+  /** 同上，但 `status` 是 **terminal**（该站恰好是线路首站 —— 澳门最常见的"从总站上车"） */
+  const vAtBoardTerminal: TrackVehicle = { ...vAtBoard, plate: "MC0002", status: "terminal" };
+  /** 车停在**别的**站 */
+  const vAtOther: TrackVehicle = { ...vAtBoard, plate: "MC0003", atStation: { code: "T102" } };
+  /** 车在路上（`atStation` 为 null） */
+  const vMoving: TrackVehicle = {
+    plate: "MC0004",
+    lat: atM(120).lat,
+    lng: atM(120).lng,
+    status: "moving",
+    interval: { from: { code: "T100" }, to: { code: "T101" } },
+    atStation: null,
+  };
+  /** 车已离站（`atStation` null + `interval.from` == 上车站）= 旧的 L-a 形态 */
+  const vDeparted: TrackVehicle = { ...vMoving, plate: "MC0005", atStation: null };
+
+  /** 用户**站着不动**（这是「等车」的忠实形态；停站判据刻意不看位移） */
+  const standing = fixesOf(0, 0, 5, 5_000);
+  /** 用户随车移动（有位置证据） */
+  const ridingFixes = fixesFromStation(20, 4, 10_000);
+
+  /* ── ① RED：改前行为（停站分支关闭）⇒ 不判上 ── */
+  {
+    const r = autoBoardOf(
+      inputOf({ vehicles: [vAtBoard], fixes: standing, walkActive: true, streak: 2 }),
+    );
+    eq(r.hit, false, "RED：停站分支关闭（复现改前行为）· 车停靠本站 + 用户静止 ⇒ 不判上");
+    ok(r.evidence !== "atstop", "RED：证据不可能是 atstop（该分支未启用）", `evidence=${r.evidence}`);
+  }
+
+  /* ── ② GREEN：同一输入，停站分支启用 ⇒ 判上 ── */
+  {
+    const vehFrames = [0, 1, 2, 3, 4].map((i) => vehAt("MC0001", 0, 100_000 + i * 12_000));
+    const r = autoBoardOf(
+      inputOf({ vehicles: [vAtBoard], fixes: standing, vehFrames, walkActive: false, streak: 0 }),
+    );
+    eq(r.hit, true, "GREEN：车停靠本站 ⇒ 判上（GREEN）");
+    eq(r.evidence, "atstop", "GREEN：证据 = atstop");
+    eq(r.plate, "MC0001", "GREEN：唯一候选 ⇒ 锁定该车牌");
+    eq(r.source, "vehicle", "GREEN：有牌 ⇒ 来源 vehicle");
+    eq(r.need, 1, "GREEN：事件式判据 ⇒ need=1（第一帧就切，不等 streak）");
+    eq(r.streak, 1, "GREEN：streak 累加 1");
+  }
+
+  /* ── ③ 不提前：车在路上 / 停别的站 ⇒ 不切 ── */
+  {
+    for (const [label, v] of [
+      ["车在路上（atStation=null）", vMoving],
+      ["车停靠在别的站", vAtOther],
+    ] as const) {
+      const r = autoBoardOf(inputOf({ vehicles: [v], fixes: standing, walkActive: false, streak: 2 }));
+      eq(r.hit, false, `不提前：${label} ⇒ 不切`);
+      ok(r.evidence !== "atstop", `不提前：${label} 的证据不得是 atstop`, `evidence=${r.evidence}`);
+    }
+  }
+
+  /* ── ④ 不推后：车已离站（interval.from==board，atStation=null）⇒ **本条不触发** ── */
+  {
+    const r = autoBoardOf(inputOf({ vehicles: [vDeparted], fixes: standing, walkActive: false, streak: 2 }));
+    ok(r.evidence !== "atstop", "不推后：已离站形态**不得**走停站判据（归旧的 L-a 路径）", `evidence=${r.evidence}`);
+    eq(r.hit, false, "不推后：已离站 + 用户静止 ⇒ 本条不判上（离站路径要求位置判据）");
+  }
+
+  /* ── ⑤ ★ 总站上车：`status="terminal"` 必须照样切（原条件 `!== "terminal"` 是错的） ── */
+  {
+    const r = autoBoardOf(inputOf({ vehicles: [vAtBoardTerminal], fixes: standing, walkActive: false }));
+    eq(r.hit, true, "★ 总站上车：status=terminal + 停靠本站 ⇒ 必须切（叠 status 过滤会永远切不了）");
+    eq(r.evidence, "atstop", "★ 总站上车：证据 = atstop");
+    eq(r.plate, "MC0002", "★ 总站上车：唯一候选 ⇒ 锁该牌");
+  }
+
+  /* ── ⑥ ★ `walkActive` 门：步行途中（人还没到站台）⇒ 不切 ── */
+  {
+    const r = autoBoardOf(inputOf({ vehicles: [vAtBoard], fixes: standing, walkActive: true, streak: 2 }));
+    eq(r.hit, false, "★ walkActive=true（人还在去站台路上）+ 车停靠本站 ⇒ **不切**");
+    /**
+     * 钉住这道门为何**必需**（防后人当冗余删掉）：
+     *   `NavShell.tsx:449-451` 写明 `startSession("out")` 在按下「开始导航」时
+     *   **同时** `rideStart()`（phase→boarding）**且** `setWalkSeg("out")`
+     *   ⇒ `phase === "boarding"` 在**步行段期间就已成立**；
+     *   而 `tryAuto` 里**没有** walkActive 早退（`NavShell.tsx:407-412` 声称的「真互斥」从未实现）。
+     *   ⇒ 若删掉这道门，「车已停在站台、人还在 300m 外」会被判成已上车。
+     */
+    ok(true, "（事实留痕）phase 在步行段期间已是 boarding ⇒ 本门必需，勿删");
+  }
+
+  /* ── ⑦ 多车歧义：两辆本线车停靠本站 ⇒ 切 riding 且 plate=null ── */
+  {
+    const v2: TrackVehicle = { ...vAtBoard, plate: "MC0006" };
+    const r = autoBoardOf(inputOf({ vehicles: [vAtBoard, v2], fixes: standing, walkActive: false }));
+    eq(r.hit, true, "多车歧义：两辆本线车停靠本站 ⇒ **仍然切 riding**");
+    eq(r.plate, null, "多车歧义：车牌不锁（plate=null）—— **正常状态，不是缺陷**");
+    eq(r.source, "gps", "多车歧义：无牌 ⇒ 来源退回 gps（走 GPS 推算）");
+    eq(atBoardStopOf([vAtBoard, v2], "T100").n, 2, "atBoardStopOf 报出命中车辆数 2");
+  }
+
+  /* ── ⑧ `atBoardStopOf` 纯函数语义 ── */
+  {
+    eq(atBoardStopOf([], "T100").hit, false, "atBoardStopOf：无车 ⇒ 不命中");
+    eq(atBoardStopOf([vAtBoard], "").hit, false, "atBoardStopOf：上车站码为空 ⇒ 不命中");
+    eq(atBoardStopOf([vAtBoard], "T100/2").hit, true, "atBoardStopOf：站码归一生效（T100/2 → T100）");
+    eq(atBoardStopOf([vAtMoving()], "T100").hit, false, "atBoardStopOf：车在路上 ⇒ 不命中");
+    function vAtMoving(): TrackVehicle {
+      return vMoving;
+    }
+  }
+
+  /* ── ⑨ 与位置判据的关系：两者都能命中时，停站判据**先**（短路） ── */
+  {
+    const vehFrames = [0, 1, 2, 3, 4].map((i) => vehAt("MC0001", 0, 100_000 + i * 12_000));
+    const r = autoBoardOf(
+      inputOf({
+        vehicles: [vAtBoard],
+        fixes: ridingFixes, // 即使位置判据也成立
+        vehFrames,
+        walkActive: false,
+        streak: 2,
+      }),
+    );
+    eq(r.evidence, "atstop", "停站判据短路在前：即使位置判据也成立，证据仍报 atstop");
+    eq(r.hit, true, "停站判据短路：命中即返回");
+  }
+
+  /* ── ⑩ 冷却 / 次数用尽仍生效（停站判据不得绕过 G3） ── */
+  {
+    const cooling = autoBoardOf(
+      inputOf({
+        vehicles: [vAtBoard],
+        fixes: standing,
+        walkActive: false,
+        lastSwitchTs: 1_000_000 - 1_000,
+        nowMs: 1_000_000,
+      }),
+    );
+    eq(cooling.hit, false, "停站判据同样受 20s 冷却约束（G3 在它之前）");
+    const noLeft = autoBoardOf(inputOf({ vehicles: [vAtBoard], fixes: standing, walkActive: false, autoLeft: 0 }));
+    eq(noLeft.hit, false, "次数用尽 ⇒ 停站判据也不再触发（如实停手）");
   }
 }
 
