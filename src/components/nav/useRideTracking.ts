@@ -158,7 +158,15 @@ export type MatchSource = "gps" | "gps+vehicle" | "vehicle" | "manual";
  *   「进入 riding **且** 有位置证据（或用户手动确认）」，而不是「进入 riding」。
  *   · `station`  = 车停靠用户上车站（**无**位置证据）
  *   · `position` = r2 / 跟车斜率判据（**有**位置证据）
- *   · `manual`   = 用户点「我已上车」（用户本人断言，视同证据充分）
+ *   · `manual`   = 用户点「我已上车」（**人工声明**，不是位置证据）
+ *
+ * ⚠️⚠️ **`boardedByPosition` 只表示「位置证据」**（2026-11-05 team-lead 裁决，选 B）：
+ *   字段名就该只表示位置证据。`manual` 是**人工声明**、不是位置证据 ⇒ 它进门时
+ *   `boardedByPosition` 恒为 **`false`**。
+ *   ⇒ 判「人确实在车上」**必须同时看两个量**：
+ *   `enteredVia === "manual" || boardedByPosition`（**不能**只读后者）。
+ *   曾有一版注释把 `manual` 说成「证据已成立」，与代码（给 `false`）自相矛盾 —— 已删：
+ *   留着会让下一个人把 `boardedByPosition` 当成「position 或 manual」的等价物而误用。
  */
 export type BoardEntry = "station" | "position" | "manual";
 
@@ -1221,8 +1229,12 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       setPhase("riding");
       setEnteredVia(entry);
       /**
-       * ★ 位置证据：`position` 进入的当场就为真；`station` 进入的从 false 起，
-       *   之后由「riding 期间位置判据」effect 在证据到达时翻真（**进入 riding 之后才翻转**）。
+       * ★ 位置证据（**B 语义**：本字段只表示位置证据，不含人工声明）：
+       *   · `position` ⇒ 当场为 `true`（判据已经成立才可能走这条）
+       *   · `station`  ⇒ `false`，之后由「riding 期间位置判据」effect 在证据到达时翻真
+       *   · `manual`   ⇒ **`false`** —— 人工声明不是位置证据。
+       *     ⚠️ 消费方判「人确实在车上」须写 `enteredVia === "manual" || boardedByPosition`，
+       *        只读后者会把手动上车的用户判成"还没上车"。
        */
       setBoardedByPosition(entry === "position");
       setPlate(nextPlate);
@@ -1947,7 +1959,13 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       const leg = legs[legIndex];
       if (!leg) return;
       if (leg.kind !== "bus" || !leg.dir) {
-        switchToRiding(null, "gps");
+        /**
+         * ★ 2026-11-05：**必须显式传 `"manual"`**。
+         *   本分支是「用户点『我已上车』但该段没有逐车数据（轻轨 / 无方向）」——
+         *   进入原因是**人工声明**。原先走 `switchToRiding` 的默认值 `"position"`，
+         *   等于谎称"有位置证据"⇒ 消费方会据此隐藏赶车标签（而人可能还在跑）。
+         */
+        switchToRiding(null, "gps", "manual");
         return;
       }
       setTraveling(true);
@@ -1987,11 +2005,14 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         setAutoNote("");
         setPhase("riding");
         /**
-         * ★ 2026-11-05：手动上车 ⇒ `manual`（用户本人断言已在车上）。
-         *   `boardedByPosition` 置真：手动是**用户明确确认**，消费方无需等位置证据。
+         * ★ 2026-11-05：手动上车 ⇒ `manual`。
+         *   ⚠️ `boardedByPosition` 必须置 **`false`**（**B 语义**：该字段只表示位置证据，
+         *   人工声明不是位置证据）。消费方判「人确实在车上」写
+         *   `enteredVia === "manual" || boardedByPosition` 即可，不依赖这里为真。
+         *   （原实现置 true，与 `switchToRiding` 的 `entry === "position"` 自相矛盾 —— 统一到 B。）
          */
         setEnteredVia("manual");
-        setBoardedByPosition(true);
+        setBoardedByPosition(false);
         setPlate(ranked[0].plate);
         setProgressSource("vehicle");
         /* ★ v3.7.0 S3：用户显式标记上车 ⇒ `manual`（与自动判定的 `auto` 可区分） */
@@ -2024,6 +2045,12 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
      *   消费方的 `gaveUpThisBus` 会立刻误报"没赶上这班车"，而新车其实就在眼前。
      *   ⇒ 清成 `null`（语义 = "还不知道"，消费方按既有约定**不会**当 0/Infinity 用）
      *     ⇒ 这段窗口内兜底判据不生效，等新车第一帧到达再给真值。**宁可暂不判，不可误判。**
+     *
+     * ⚠️ **副作用（有意保留，勿"优化"掉）**：换车后 `enteredVia` / `boardedByPosition` 保持原值
+     *   ⇒「`station` 且无位置证据」这个状态的**持续时间可能翻倍**（新车又要等一轮证据）。
+     *   这是有意的：**换车 ≠ 重新等车**（重置会让 `enteredVia` 退回 `null` 而 phase 仍是
+     *   riding，产生"riding 但没有进入方式"的语义空洞）。
+     *   ⇒ 代价是更依赖 `refVehDistToBoardM > 120` 这个兜底（`gaveUpThisBus`），**不可删**。
      */
     setRefVehDistToBoardM(null);
     setPlate(p);
@@ -2220,6 +2247,14 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     anomalyStreakRef.current = 0;
     ladderRef.current = null;
     plateLockedTsRef.current = 0;
+    /**
+     * ★ 2026-11-05：**必须清**（与 `repick` 同一类陈旧值洞）。
+     *   回到等车态后若不清：用户随后又靠停站判据上车（`enteredVia` 重新变 `"station"`），
+     *   而 `refVehDistToBoardM` 还是**上一辆车**的距站距离 ⇒ 直到下一帧车辆帧（12s）
+     *   才更新 ⇒ 消费方的 `gaveUpThisBus` 可能拿旧车的大距离误报「没赶上这班车」。
+     *   ⇒ 清 `null`（"还不知道"），判据在该窗口内不生效 —— 宁可暂不判，不可误判。
+     */
+    setRefVehDistToBoardM(null);
     boardStreakRef.current = 0;
     lastSwitchTsRef.current = Date.now();
     boardingStartedAtRef.current = Date.now(); // ★ 回到等车态同样有启动宽限
