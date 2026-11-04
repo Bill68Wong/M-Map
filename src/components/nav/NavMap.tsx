@@ -255,7 +255,7 @@ export interface NavMapProps {
   lineStops?: ReadonlySet<string> | null;
   /**
    * ★ v3.2.0（需求 7 / AC-80）：蓝点移动插值时长（ms，= 采样间隔）。
-   *   `0`（缺省）= 瞬移；riding 1500 / 候车 3000（>5s 采样必为 0）。透传给 `UserDotLayer`。
+   *   `0`（缺省）= 瞬移；riding 1500 / 候车 1500（>5s 采样必为 0）。透传给 `UserDotLayer`。
    *   ⚠️ 语义变更（需求 9）：左下「回到我的位置」按钮已**彻底移除** ——
    *     让位锁（`followState`/`free`）、双击恢复 `restore()`、定位键重跑**全部保留**。
    */
@@ -1507,7 +1507,9 @@ export default function NavMap({
      *   回答"步行线到底是**没画**还是**画了看不见**"—— 这两者修法完全不同，必须先分清。
      *
      * 取值格式（每层 `层名:点数@色/w宽/z层级`，缺失层进 `missed:`，建层异常进 `err:`）：
-     *   `done:2@#8c93a0/w5/z69 | now:6@#0b6e4f/w7/z73 | ahead:9@#0b6e4f/w5/z70`
+     *   `done:2@#8c93a0/w5/z69 | now:6@#0b6e4f/w6/z73 | ahead:9@#0b6e4f/w6/z70`
+     *   ⚠️ U1（2026-11-04）起 now/ahead 共用未走段语义组：w 均为 6（原 now 7 / ahead 5），
+     *      两者只剩 z（73/70）与 showDir 不同；op 不进本字符串。
      *   `… | missed:done,ahead`            ← 该画（≥2 点）但没建/被移除
      *   `… | err:Get property 'add' …`     ← ensureWalkLayers 抛错（AMap 层面失败）
      *
