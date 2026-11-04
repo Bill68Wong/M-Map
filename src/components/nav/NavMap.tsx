@@ -544,7 +544,12 @@ export default function NavMap({
           const fill = maskFill();
           if (dist.rings.length) {
             try {
-              const path = [maskOuterRing(b), ...dist.rings, ...dist.exclaveRings];
+              // ★ 2026-11-04：遮罩**只挖澳门主环**，不再挖横琴口岸 / 澳大横琴校区两块飞地。
+              //   用户反馈「横琴口岸和澳门大学右侧那一点点黑的」不美观 —— 飞地环与主环之间的
+              //   窄缝会露出小块暗斑；去掉飞地镂空后，整个域外压暗连成一片，视觉更干净。
+              //   飞地不受影响：站点 marker 在遮罩之上（zIndex 90+），定位判定仍用
+              //   `dist.exclaveRings`（见 `applyLocateView`）。
+              const path = [maskOuterRing(b), ...dist.rings];
               maskRef.current = new AMap.Polygon({
                 path,
                 fillColor: fill,
