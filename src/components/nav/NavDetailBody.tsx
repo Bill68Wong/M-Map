@@ -18,7 +18,7 @@
  * 结构（自上而下）：头部 → 步行/等车行 → 进度纵条（NavStrip）→ 下车步行行
  *   → 折叠区（StationReachFold）→ 来源脚注。
  */
-import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import NavStrip from "./NavStrip";
 import StationReachFold from "./StationReachFold";
@@ -171,8 +171,10 @@ function NavInfoRow({
    * 观测钩子 `data-nav-info-h`：**实测**高度（QA 断言「两态恒为 52」的物理依据）。
    * 用 `setAttribute` + 卸载清理（与本项目 `data-walk-*` 同一写法）。
    * ⚠️ 只测不写：高度由样式常量决定，本属性不得反过来驱动布局。
+   * 用 `useEffect`（而不是 `useLayoutEffect`）：它只服务于自动断言，不参与绘制，
+   *   没必要在 paint 前同步；`useLayoutEffect` 在 SSR 渲染时会打 "does nothing on the server" 警告。
    */
-  useLayoutEffect(() => {
+  useEffect(() => {
     const el = rowRef.current;
     if (!el) return;
     /* 用 `offsetHeight`（布局像素）而**不是** `getBoundingClientRect().height`：
