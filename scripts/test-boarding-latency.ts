@@ -49,7 +49,8 @@
  *
  * 跑法：node node_modules/tsx/dist/cli.mjs scripts/test-boarding-latency.ts
  */
-import { AUTO_TRIES_PER_LEG, autoBoardOf, type FixLite } from "@/lib/nav/boarding-detect";
+import { readFileSync } from "node:fs";
+import { AUTO_TRIES_PER_LEG, autoBoardOf, R2_SPEED_MIN_KMH_FLEX, type FixLite } from "@/lib/nav/boarding-detect";
 import { followFramesOf, type VehFrame } from "@/lib/nav/follow-frames";
 import {
   FOLLOW_MAX_SLOPE_MPS,
@@ -828,6 +829,162 @@ console.log("\n[㉚ 停站判据延迟（新主路径）]");
     walking.evidence !== "atstop",
     "★ walkActive=true 时停站判据不触发（该门是必需的：`phase` 在步行段期间已是 boarding）",
     `evidence=${walking.evidence ?? "none"}`,
+  );
+}
+
+/* ══════════ 【源码守卫】每个 autoBoardOf 调用都必须显式指定 walkActive ══════════ */
+/**
+ * ── 为什么需要这条（注释守不住，断言才守得住）────────────────────────────
+ *   2026-11-05 新增停站判据（`atBoardStopOf`）后，`autoBoardOf` 的行为**取决于 `walkActive`**：
+ *   · `walkActive: true`  ⇒ 停站判据关闭，只走位置判据（r2 / 跟车斜率）→ 本文件 ㉑~㉘
+ *   · `walkActive: false` ⇒ 停站判据开启，车停靠上车站即命中（`need: 1`）→ 本文件 ㉚
+ *   ⇒ 若将来有人新增调用时**漏传** `walkActive`（缺省 = `false` = 停站判据开启），
+ *     那个用例会被停站判据抢先命中 ⇒ **红得莫名其妙**，或者更糟：**测试测错了对象但仍为绿**。
+ *   本守卫把「每个调用都显式写了 `walkActive:`」变成可失败的断言。
+ *
+ * ── 与 be-plate 给的原始片段不同之处（**必须改，否则假红**）─────────────────
+ *   原始片段要求「每个调用都传字面量 `walkActive: true`」，但在本文件**不成立**且**不应成立**：
+ *   本文件有 **2 处**调用，它们需要**相反**的取值：
+ *     · `run()`（第 217 行附近）      ⇒ `walkActive: true`  （隔离停站判据，测位置判据）
+ *     · `runStation()`（第 732 行附近）⇒ `walkActive: o.walkActive`（变量，㉚ 用它**同时**测门开与门关）
+ *   ⇒ 强制字面量 `true` 会让 `runStation` 变红，而它是**故意**参数化的（㉚ 的"walkActive 门"断言靠它）。
+ *   所以本守卫拆成两条，守的是**意图**而不是**字面量**（2026-11-05 team-lead 裁决定稿）：
+ *     ① 每处调用都写了 `walkActive:`（防漏传 —— 这是原始片段真正想守的）
+ *     ② 恰好有 1 处参数化 `walkActive: o.walkActive`（㉚ 的「门开/门关」对照不能被写成硬编码）
+ *   注：原第三条「恰好 1 处硬编码 `walkActive: true`」已删 —— 它把隔离手段当成了不变量，
+ *   `run()` 用字面量 `true` 只是本文件的写法，不是契约；守 ① + ② 已足够。
+ *
+ * ⚠️ 计数口径：只按**调用形态**切块（`run()` / `runStation()` 各一处）。注释里提到该函数名时
+ *   不带调用括号，所以不计入。⚠️ **本守卫读的是它自己的源码**，因此搜索针必须用**字符串拼接**
+ *   构造 —— 若直接把完整的调用字面量写进这里，守卫会把自己那一行数成第 3 块，永远假红
+ *   （这是本守卫第一版踩过的坑，记在此处防复发）。
+ */
+console.log("\n[【源码守卫】autoBoardOf 的 walkActive 参数]");
+{
+  const self = readFileSync(new URL(import.meta.url), "utf8");
+  /** 拼接构造，避免守卫自身的源码被 split 计入（见上方注释） */
+  const NEEDLE = "autoBoardOf" + "({";
+  const blocks = self.split(NEEDLE).slice(1);
+  const bodies = blocks.map((b) => {
+    const end = b.indexOf("});");
+    return end >= 0 ? b.slice(0, end) : b;
+  });
+  const hasKey = bodies.filter((b) => b.includes("walkActive:")).length;
+  const paramed = bodies.filter((b) => b.includes("walkActive: o.walkActive")).length;
+
+  ok(blocks.length === 2, "本文件应有 2 处调用（run / runStation）", `实际=${blocks.length}`);
+  ok(
+    blocks.length >= 2 && hasKey === blocks.length,
+    "★ 每处调用都**显式**指定了 walkActive（漏传默认 false ⇒ 停站判据会抢先命中，测错对象）",
+    `${hasKey}/${blocks.length}`,
+  );
+  ok(
+    paramed === 1,
+    "★ 恰好 1 处参数化 walkActive: o.walkActive（㉚ 的「门开/门关」对照靠它）",
+    `${paramed} 处`,
+  );
+}
+
+/* ══════════ ㉛ 斜率门的隐含前提：快跑 ≥2.13 m/s 会通过 G-e（安全边界留痕）══════════ */
+/**
+ * ── 这组在守什么（2026-11-05 team-lead 要求补）─────────────────────────
+ *   G-e（不拉开）判的是 `|d 的斜率| ≤ FOLLOW_MAX_SLOPE_MPS(1.2)`。巡航车速 12 km/h
+ *   （`V_CRUISE_MPS = 3.33` m/s）下，沿线路**同向匀速奔跑**的用户产生的 d 斜率
+ *   = 3.33 − v_user，于是：
+ *     · v_user ≥ 2.13 m/s（7.68 km/h） ⇒ 斜率 ≤ 1.2 ⇒ **通过 G-e**
+ *   即斜率门放行的**隐含前提**是「用户速度 < 2.13 m/s」。它与 r2 的步行/车速契约分界
+ *   `R2_SPEED_MIN_KMH_FLEX = 8 km/h`（2.22 m/s）只差 **0.09 m/s（0.32 km/h）**——
+ *   两套判据对「人/车」的分界几乎重合但**并不一致**。
+ *
+ *   ⚠️ 这是**已知且接受的误判面**，不是 bug：以 ≥7.7 km/h 沿线路持续移动 30s+ 的人，
+ *   在纯位置信号下与乘车不可分。全链路 `hit = r2 ∨ slope`（`boarding-detect.ts` ⑤），
+ *   斜率路径放行即判上 —— r2 的 8 km/h 契约**不兜底**，它自己同样把 ≥8 km/h 当车。
+ *   真要区分需惯性传感器 / NFC，本项目都没有。
+ *
+ *   本组把这个边界**钉成断言**，防的是一种静默失败：有人把 `FOLLOW_MAX_SLOPE_MPS`
+ *   上调（比如为了「判得更快」）⇒ 放行边界 = 3.33 − 门值 随之下移 ⇒ 「人」的分界被
+ *   **无声地**挪低，误判面扩大且没有任何测试变红 —— 直到本组出现。
+ */
+{
+  console.log("\n[㉛ 斜率门隐含前提：快跑 ≥2.13 m/s 会通过（安全边界留痕）]");
+
+  /**
+   * 纯斜率门夹具：用户以 `uMps` 沿线路同向匀速移动（**不上车**），车以巡航速度
+   * 从用户前方 `d0` 处同向行驶 ⇒ `d(t) = d0 + (3.33 − uMps)·t`，d 的 OLS 斜率
+   * = 3.33 − uMps（干净线性，无噪声）。其余五门（帧数/窗长/同处/前移/车在动）
+   * 都造到通过，保证结局由 **G-e 单独**决定 —— ① 若 `why` 不是 `growing`/`ok`，
+   * 说明夹具被前面某道门提前拦下，须修夹具而不是改断言。
+   */
+  const runSlopeGate = (uMps: number): FollowSlope => {
+    const d0 = 10;
+    const fixes: FixLite[] = [];
+    const vehFrames: VehFrame[] = [];
+    for (let t = 0; t <= 45; t += GPS_GAP_MS / 1000) {
+      const p = atM(t * uMps);
+      fixes.push({ lng: p.lng, lat: p.lat, accuracy: 10, ts: T0_MS + t * 1000 });
+    }
+    for (let k = 0; k <= 4; k++) {
+      const t = k * (VEH_GAP_MS / 1000);
+      const p = atM(d0 + t * V_CRUISE_MPS);
+      vehFrames.push({
+        ts: T0_MS + t * 1000,
+        vehicles: [
+          {
+            plate: PLATE,
+            lat: p.lat,
+            lng: p.lng,
+            status: "moving",
+            interval: { from: { code: "T100" }, to: { code: "T101" } },
+            atStation: null,
+          },
+        ],
+      });
+    }
+    return followSlopeOf(followFramesOf({ fixes, vehFrames, colored: PATH, plate: PLATE }));
+  };
+
+  /** 放行边界（m/s）= 巡航车速 − 斜率门 = 3.33 − 1.2 = 2.13 m/s = 7.68 km/h */
+  const boundaryMps = V_CRUISE_MPS - FOLLOW_MAX_SLOPE_MPS;
+
+  // ① 边界以下真拦截（1.4 m/s ⇒ 斜率 1.93 > 1.2）—— 同时证明夹具确实在测 G-e
+  const slow = runSlopeGate(1.4);
+  ok(
+    slow.why === "growing",
+    "㉛① 快走 1.4 m/s（< 2.13 边界）被 G-e 拦下（why=growing，非其他门）",
+    `why=${slow.why} slope=${slow.slope?.toFixed(2)}`,
+  );
+
+  // ② 「快跑 ≥2.13 m/s 会通过斜率门」的实证：2.5 m/s ⇒ 斜率 0.83 ⇒ 六门全过 ⇒ ok=true
+  const fast = runSlopeGate(2.5);
+  ok(
+    fast.why === "ok",
+    "㉛② 快跑 2.5 m/s（> 2.13 边界）六门全过 ⇒ ok=true（已知误判面，见组注释，勿当 bug 修）",
+    `why=${fast.why} slope=${fast.slope?.toFixed(2)}`,
+  );
+
+  // ③ 分歧带实证：2.2 m/s 落在 [2.13, 2.22) —— 斜率门放行，但低于 r2 契约分界 8 km/h。
+  //    两套判据边界不一致：slope 的「人/车」分界比 r2 低 0.09 m/s。
+  const band = runSlopeGate(2.2);
+  ok(
+    band.why === "ok",
+    "㉛③ 2.2 m/s（分歧带 [2.13, 2.22) 内）斜率门放行 —— slope 分界比 r2 的 8 km/h 低 0.09 m/s",
+    `why=${band.why} slope=${band.slope?.toFixed(2)}`,
+  );
+
+  // ④ 边界数值锚定：放行边界 = 巡航车速 − FOLLOW_MAX_SLOPE_MPS ≈ 2.133 m/s（7.68 km/h）。
+  //    本文件所有「边界」叙述都由这两个常量推出，任何一个被挪，这里先红。
+  ok(
+    Math.abs(boundaryMps - 2.1333) < 0.01,
+    "㉛④ 放行边界 = V_CRUISE_MPS − FOLLOW_MAX_SLOPE_MPS = 2.13 m/s（7.68 km/h）",
+    `${boundaryMps.toFixed(3)} m/s`,
+  );
+
+  // ⑤ 方向性守卫：斜率门**上调** ⇒ 放行边界下移 ⇒ 误判面无声扩大。钉住「边界不得超过
+  //    r2 契约分界 + 0.5 km/h 余量」，给真机标定留余量的同时堵死大幅上调。
+  ok(
+    boundaryMps * 3.6 <= R2_SPEED_MIN_KMH_FLEX + 0.5,
+    "㉛⑤ 放行边界（7.68 km/h）不得显著越过 r2 契约分界（8 km/h）—— 上调 FOLLOW_MAX_SLOPE_MPS 会无声扩大误判面",
+    `${(boundaryMps * 3.6).toFixed(2)} vs ${R2_SPEED_MIN_KMH_FLEX} km/h`,
   );
 }
 
