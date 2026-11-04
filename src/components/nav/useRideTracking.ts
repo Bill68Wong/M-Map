@@ -40,13 +40,11 @@ import {
   AUTO_TRIES_PER_LEG,
   autoBoardOf,
   anomalyOf,
-  candAtStopOf,
   detectPausedOf,
   nextLegCooldownOf,
   positionEvidenceOf,
   type Anomaly,
   type BoardEvidence,
-  type CandAtStop,
   type FixLite,
 } from "@/lib/nav/boarding-detect";
 import type { VehFrame } from "@/lib/nav/follow-frames";
@@ -219,20 +217,6 @@ export interface RideTrackView {
   refreshCoolingSec: number;
   note: string;
   candidates: { plate: string; hint: string }[];
-  /**
-   * ★ 2026-11-04（设计 §2.10）：**停站期候选车牌** —— 「来的是哪辆车」。
-   *
-   * 与 `candidates` 的区别（**不要互相替代**）：
-   *   · `candidates` = 候车候选**列表**（最多 6 条，含 `hint` 文案），供"手动标记上车"选车；
-   *   · `candAtStop` = 仅回答「**现在能不能确定地指出一辆**」：
-   *       `unique`（正停本站且只有 1 辆）/ `strong`（刚离站且 ≤60m）才给车牌；
-   *       `ambiguous`（停 2 辆以上 / 证据矛盾）/ `none` ⇒ 车牌为 `null` ⇒ 界面不显示。
-   *
-   * ⚠️ 它**不含**相位与新鲜度语义：`null` = 本帧没算（未到候车期 / 非巴士段），
-   *    「帧已过期 ⇒ 不显示」由消费方按 `lastVehicleTs` 判（见 `NavDetailBody.candViewOf`）。
-   *    这样纯函数层只管几何、展示层只管时间，两边不互相污染。
-   */
-  candAtStop: CandAtStop | null;
   /** 本次 riding 是否由自动判定进入 */
   autoSwitched: boolean;
   /**
@@ -605,11 +589,6 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   const [traveling, setTraveling] = useState(false);
   const [note, setNote] = useState("");
   const [candidates, setCandidates] = useState<{ plate: string; hint: string }[]>([]);
-  /**
-   * ★ 2026-11-04（设计 §2.10）：停站期候选车牌（只回答"能不能确定地指出一辆"）。
-   *   `null` = 本帧没算（未到候车期 / 非巴士段 / 已清场）；「帧过期 ⇒ 不显示」由消费方判。
-   */
-  const [candAtStop, setCandAtStop] = useState<CandAtStop | null>(null);
   const [autoSwitched, setAutoSwitched] = useState(false);
   const [autoNote, setAutoNote] = useState("");
   const [progressSource, setProgressSource] = useState<"vehicle" | "gps">("vehicle");
@@ -935,8 +914,6 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     setYouDotHook(null);
     setListTick(0);
     setLadderTick(0);
-    /** ★ 2026-11-04：停站期候选车牌也要清 —— 否则换卡/回等车后会带着上一段的「来车」 */
-    setCandAtStop(null);
   }, [clearTraveled]);
 
   useEffect(() => {
@@ -1162,18 +1139,6 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
             anchor: anchorRef.current,
           });
           setCandidates(ranked.slice(0, 6).map((v) => ({ plate: v.plate, hint: hintOf(v) })));
-          /**
-           * ★ 2026-11-04（设计 §2.10）：「来的是哪辆车」。
-           *
-           * ⚠️ **必须传未过滤的 `list`**，不能传上面的 `ranked`：
-           *   `ranked` 带了 `filterPassed: true`（已驶过上车站的车**被剔除**）——
-           *   而 `strong`（刚从上车站开走）恰恰就是"已驶过"的那一类，过滤后它必不存在
-           *   ⇒ `strong` 这一档会永久失效（只剩 `unique`）。
-           *   这里要的是「此刻能不能确定地指出一辆来车」，与"候选池要不要剔除过站车"是两件事。
-           *
-           * 只在候车期算：其它相位本行不渲染，算了也是白算，且会留下过期值。
-           */
-          setCandAtStop(phase === "boarding" ? candAtStopOf(list, boardMain, boardPos) : null);
           if (phase === "boarding") setNote(ranked.length ? "" : NOTE_NO_VEHICLES);
           return;
         }
@@ -2416,7 +2381,6 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
      */
     note: phase === "boarding" && boardPaused ? noteOfPausedGeo(geo) : (geomNote ?? note),
     candidates,
-    candAtStop,
     autoSwitched,
     enteredVia,
     boardedByPosition,
