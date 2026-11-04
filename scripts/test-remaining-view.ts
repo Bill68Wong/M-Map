@@ -221,10 +221,16 @@ const body = readFileSync("src/components/nav/NavDetailBody.tsx", "utf8");
  * 与顶部总时长的 clamp 0 **刻意不同**：写「还有 0 分钟」读起来像已到站，
  * 会与到站提醒（`alarm === "now"` 的「已到站」）抢语义。
  * 若有人"统一"成 clamp 0，这条立刻红。
+ *
+ * ⚠️ 地板表达式的变量在 U4 收口时改过名（`remainMin` → `alightMin`，取自 `legRemainMinOf`），
+ *   **地板本身没变**。抽成常量 `ALIGHT_FLOOR` 同时供 ④ 与 ⑤ 变异自检，避免两处各写一遍
+ *   ⇒ 一处改名就只剩一处能跟上（上一轮就是这么退化成假绿的）。
  */
+const ALIGHT_FLOOR = "Math.max(1, Math.round(alightMin))";
 ok(
-  body.includes("Math.max(1, Math.round(remainMin))"),
+  body.includes(ALIGHT_FLOOR),
   "距下车站保留 Math.max(1,…) 地板（与总时长 clamp 0 刻意不同）",
+  body.includes(ALIGHT_FLOOR) ? ALIGHT_FLOOR : "✗ 未找到该表达式（地板被改 / 变量又改名了？）",
 );
 
 for (const hook of [
@@ -233,7 +239,13 @@ for (const hook of [
   "data-arrive-at",
   "data-recompute-seq",
   "data-eta-base",
+  "data-eta-remain",
+  "data-eta-scope",
   "data-stops-away",
+  "data-nav-info",
+  "data-nav-info-h",
+  "data-nav-next-station",
+  "data-nav-remain-min",
   "data-remain-fail",
 ]) {
   ok(body.includes(hook), `钩子 ${hook} 已挂 NavDetailBody`);
@@ -242,25 +254,113 @@ const sheet = readFileSync("src/components/nav/RouteSheet.tsx", "utf8");
 ok(sheet.includes("data-peek-remain"), "钩子 data-peek-remain 已挂 peek 摘要");
 
 /* ══════════════════════════════════════════════════════════════════════
+   ④b 信息行钩子的**语义**（不是"名字存在"）
+   ──────────────────────────────────────────────────────────────────────
+   为什么必须单独一段：上面那个 `for` 循环只证「名字出现过」，
+   而本轮就出过「名字在、语义变」（`data-eta-base` 从"本地校准锚点"变成"显示值"）。
+   源码级能锁的是**写法**（属性怎么输出、谁喂它）；DOM 级的读法纪律见 ⑤ 末尾 ⚠️ 条。
+   ══════════════════════════════════════════════════════════════════════ */
+console.log("── ④b 信息行钩子语义（同源一处 + 「不显示」用不输出表达）──");
+{
+  /** ① 三个分钟钩子必须由**同一个** `remainMin` 参数喂（口径分裂才是历史缺陷的成因） */
+  const sameSource = [
+    /data-eta-remain=\{remainMin == null \? undefined : remainMin\}/,
+    /data-eta-base=\{remainMin == null \? undefined : remainMin\}/,
+    /data-nav-remain-min=\{remainMin == null \? undefined : String\(remainMin\)\}/,
+  ];
+  for (const re of sameSource) {
+    ok(re.test(body), `分钟钩子由同一参数喂：${re.source.slice(0, 28)}…`);
+  }
+  /** ② `data-nav-remain-min` 在「不显示」时**整个属性不输出**（不是 `""`、不是 `0`）*/
+  ok(
+    /data-nav-remain-min=\{remainMin == null \? undefined :/.test(body),
+    "data-nav-remain-min 不显示 ⇒ 属性不输出（DOM 侧须用 hasAttribute 判，不能比 \"\" 或 0）",
+  );
+  /** ③ 口径声明：`alight`（上车后，到下车）/ `board`（上车前，车辆到本站）—— 两者刻意不同 */
+  ok(
+    /data-eta-scope=\{mode === "post" \? "alight" : "board"\}/.test(body),
+    "data-eta-scope 随形态切换 alight / board（上车前不是「到下车」）",
+  );
+  ok(
+    /data-nav-next-station=\{nextStationOn \? "1" : "0"\}/.test(body),
+    "data-nav-next-station 取 \"1\"/\"0\"（主行是否存在）",
+  );
+  /** ④ 调用侧只传**一个**表达式：post 传 `shownAlightMin`、pre 传 `null`（pre 的分钟是「车辆到本站」）*/
+  ok(/remainMin=\{shownAlightMin\}/.test(body), "post 态三个钩子共用 `shownAlightMin`（勿拆回多份）");
+  ok(/remainMin=\{null\}/.test(body), "pre 态不输出分钟（避免与「车辆到本站」混成假口径）");
+  /** ⑤ 高度钩子必须 `setAttribute` + 卸载 `removeAttribute`（否则陈旧值会永久挂 DOM）*/
+  ok(
+    /el\.setAttribute\("data-nav-info-h"/.test(body) && /removeAttribute\("data-nav-info-h"\)/.test(body),
+    "data-nav-info-h 写入 + 卸载清理成对",
+  );
+  /**
+   * ⑥ **口径来源**锁：到下车分钟必须来自 `legRemainMinOf`（与服务端同式），
+   *   而不是重新退回「`segRemainSec/60` 当整段」或「读 `liveStrips.rideMin`」。
+   */
+  ok(/legRemainMinOf\(\{/.test(body), "到下车分钟来自 legRemainMinOf（与服务端同式）");
+  ok(!/liveStrips\?\.\[legIdx\]\?\.rideMin/.test(body), "不再把 liveStrips.rideMin 当到下车分钟（请求失败会卡住）");
+}
+
+/* ══════════════════════════════════════════════════════════════════════
    ⑤ 变异自检 —— 证明上面的守护型断言**真的有效**（不是恒绿）
    ──────────────────────────────────────────────────────────────────────
    为什么必须有：本项目出过 `X || !!hit` 这种恒真断言（永远 PASS），
    也出过「判据过宽、代码改坏了仍绿」的形态。
    `绿的数量 ≠ 守护的强度` ⇒ 守护型断言必须能证明自己会红。
+
+   ⚠️⚠️ **变异自检本身也会退化成假绿**（本轮实况）：上一版变异 a 写的是
+   `ok(!mutated.includes("<旧表达式>"))` —— 源码一改名，`replaceAll` 就什么都不做
+   ⇒ `mutated === body` ⇒ `!includes(...)` **恒真** ⇒ 永远 PASS 且证明不了任何事。
+   ⇒ 纪律：**每条变异断言必须带「变异真的发生了」的前置条件**（`body.includes(原文)`），
+     否则整条判失败。下面每条都按这个写。
    ══════════════════════════════════════════════════════════════════════ */
-console.log("── ⑤ 变异自检（守护型断言必须能检出造错）──");
+console.log("── ⑤ 变异自检（守护型断言必须能检出造错，且变异必须真的发生）──");
 {
   /**
-   * 变异 a：若「距下车」的地板被改成 clamp 0 ⇒ ④ 的地板断必须失配。
-   * ⚠️ 必须 `replaceAll`：该表达式在源码里出现**两次**（`data-eta-remain` 属性 + 文案），
-   *    只 `replace` 第一个会让变异的 body 仍含第二个 ⇒ 误判为"检不出"（第一版就这么错的）。
+   * 变异 a：把「距下车」地板改成 clamp 0 ⇒ ④ 的地板断必须失配。
+   * `replaceAll` 保留（无害）；**前置条件 `body.includes(ALIGHT_FLOOR)` 才是防退化的关键**。
    */
-  const mutated = body.replaceAll("Math.max(1, Math.round(remainMin))", "Math.round(remainMin)");
-  ok(!mutated.includes("Math.max(1, Math.round(remainMin))"), "[变异] 地板被改成 clamp 0 能被检出");
+  const mutated = body.replaceAll(ALIGHT_FLOOR, "Math.round(alightMin)");
+  ok(
+    body.includes(ALIGHT_FLOOR) && !mutated.includes(ALIGHT_FLOOR),
+    "[变异] 地板被改成 clamp 0 能被检出（且证明变异真的发生）",
+    body.includes(ALIGHT_FLOOR) ? "" : "✗ 变异无效：源码里没有该表达式",
+  );
+}
+{
+  /** 变异 b：`data-nav-remain-min` 改成「不显示时输出 0」⇒ ④b 的「属性不输出」断必须失配 */
+  const from = 'data-nav-remain-min={remainMin == null ? undefined : String(remainMin)}';
+  const mutated = body.replaceAll(from, 'data-nav-remain-min={String(remainMin ?? 0)}');
+  ok(
+    body.includes(from) && !/data-nav-remain-min=\{remainMin == null \? undefined :/.test(mutated),
+    "[变异] 「不显示 ⇒ 不输出属性」被改成输出 0 能被检出",
+    body.includes(from) ? "" : "✗ 变异无效：源码里没有该表达式",
+  );
+}
+{
+  /** 变异 c：`data-eta-scope` 固定成 alight（丢掉上车前那一档）⇒ ④b 的 scope 断必须失配 */
+  const from = 'data-eta-scope={mode === "post" ? "alight" : "board"}';
+  const mutated = body.replaceAll(from, 'data-eta-scope="alight"');
+  ok(
+    body.includes(from) && !/data-eta-scope=\{mode === "post" \? "alight" : "board"\}/.test(mutated),
+    "[变异] scope 丢掉 board 档能被检出（否则上车前会被当成「到下车」）",
+    body.includes(from) ? "" : "✗ 变异无效：源码里没有该表达式",
+  );
 }
 {
   /**
-   * 变异 b：故意造两路分叉 ⇒ ③ 的恒等断必须失配。
+   * ⚠️ DOM 级断言的纪律（本脚本读的是源码，做不了 DOM 断言，故在此登记，防止后来人写错）：
+   *   · `data-nav-remain-min` 不显示时**整个属性不存在** ⇒ Playwright 用
+   *     `locator.getAttribute(...) === null` / `hasAttribute`，**不能**拿 `""` 或 `0` 比；
+   *   · 赶车标签 `data-tag` 隐藏时**节点不存在** ⇒ 必须 `expect(locator).toHaveCount(0)`，
+   *     **不能**用 `toBeHidden()`（它对 `opacity: 0` 也通过 —— 那正是要防的假绿）；
+   *   · `data-nav-info-h` 在 effect 里写、卸载移除，首帧 paint 后一两帧才出现 ⇒
+   *     必须 `waitForSelector('[data-nav-info-h]')` 或轮询，**不要** `evaluate` 立刻读。
+   */
+}
+{
+  /**
+   * 变异 d：故意造两路分叉 ⇒ ③ 的恒等断必须失配。
    * ⚠️ **不能**用 `pairOf()` 造：它是"自洽构造"（arriveAt 由 remainingMin 反推）
    *    ⇒ 传任何 remainingMin 两路都一致，Δ 恒 0（第一版就这么错的）。
    *    必须显式让 `arriveAt` 与 `remainingMin` 不匹配。
