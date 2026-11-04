@@ -462,6 +462,13 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
   const P_AT_ALIGHT = progressOf(MAINS, at("M400"));
   const P_RUN_FIRST = progressOf(MAINS, run("M100", "M200"));
   const P_RUN_LAST = progressOf(MAINS, run("M300", "M400"));
+  /**
+   * ★ 「已过站」：车从**本段下车站**开走（`interval.from = M400`）。
+   *   `progressOf` 走 ② 分支：`passedIdx = 3`、`toIdx` 不在本段站序 ⇒ `nextIdx = null`。
+   *   这是**真实会发生的状态**（用户没下车 / 错过站），必须进表 —— 否则「站数 = 0」会被
+   *   误认为「只可能出现在已到站」（本批我一度就是这么以为的，fe-nav-ui 复核时也这么以为）。
+   */
+  const P_RUN_PAST = progressOf(MAINS, run("M400", "M900"));
   const P_LOST = progressOf(MAINS, null);
   const P_UNKNOWN = progressOf(MAINS, at("Z999")); // 不在本段站序
 
@@ -483,6 +490,7 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
     ["行驶第一段 M100→M200（无位置模型）", P_RUN_FIRST, null, 3, 9, "none"],
     ["行驶最后一段 M300→M400（无位置模型）", P_RUN_LAST, null, 1, 0, "soon"],
     ["行驶第一段 + 位置模型剩 120s", P_RUN_FIRST, 120, 3, 11, "none"],
+    ["已过站（车驶离下车站 M400→M900）", P_RUN_PAST, null, 0, 0, "none"],
     ["丢信号（lost）", P_LOST, null, null, 12, "none"],
     ["站序对不上（unknown）", P_UNKNOWN, null, null, 12, "none"],
   ];
@@ -497,14 +505,28 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
   const rows = CASES.map(([name, p, rawSeg]) => ({ name, d: deriveRow(p, rawSeg) }));
 
   /**
-   * 不变量 1：「还有 0 站」**只在**已到下车站出现。
-   * ⇒ 用户永远不会看到「还有 0 站下车」这种像故障的文案。
+   * 不变量 1（拆成正反两个方向，**别合并**）：
+   *   1a 已到站（`alarm="now"`）⇒ 站数必然是 0 —— 硬方向，任何实现都必须满足；
+   *   1b 站数 0 但 `alarm≠"now"` ⇒ **只允许「已过站」这一种解释**（车已驶离下车站）。
+   *      ⚠️ 这里**不能**写成双向 `(站数===0) ⟺ alarm="now"`：那条断言在本批我一度写成双向，
+   *      只是因为表里**没有「已过站」这一行**才侥幸全绿 —— 一旦补上真实状态立刻红。
+   *      双向写法会把一个真实存在的状态判成"不该出现"，属于**用断言掩盖现实**。
+   *      「已过站」时次行的文案是**已知缺口**（当前会渲染「还有 0 站下车 · 约 1 分」），
+   *      是否改成「已过站 · 请下车」属产品裁决，见下方 §已知缺口 的登记断言。
    */
   ok(
-    rows.every(({ d }) => (d.stopsAway === 0) === (d.alarm === "now")),
-    "不变量 1：还有 0 站 ⟺ alarm=now",
-    rows.filter(({ d }) => (d.stopsAway === 0) !== (d.alarm === "now")).map((r) => r.name).join(","),
+    rows.every(({ d }) => d.alarm !== "now" || d.stopsAway === 0),
+    "不变量 1a：已到站（alarm=now）⇒ 站数必为 0",
+    rows.filter(({ d }) => d.alarm === "now" && d.stopsAway !== 0).map((r) => r.name).join(","),
   );
+  {
+    const zeroNotNow = rows.filter(({ d }) => d.stopsAway === 0 && d.alarm !== "now");
+    ok(
+      zeroNotNow.every(({ name }) => name.includes("已过站")),
+      "不变量 1b：站数 0 且 alarm≠now ⇒ 只能是「已过站」（不得由其它状态产出）",
+      zeroNotNow.map((r) => `${r.name}(alarm=${r.d.alarm})`).join(",") || "本表无此状态",
+    );
+  }
 
   /**
    * 不变量 2：`alarm=soon`（底栏「即将到达」）**必须且只能**伴随「还有 1 站」。
@@ -518,10 +540,13 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
     rows.filter(({ d }) => d.alarm === "soon" && d.stopsAway !== 1).map((r) => r.name).join(","),
   );
 
-  /** 不变量 3：站数只有两种合法值 —— 「≥1」或「0 且已到站」；其余一律不得出现 */
+  /**
+   * 不变量 3：站数只有三种合法值 —— `null`（进度不可用）/ `≥1` / `0`；
+   *   且 `0` 必属「已到站」或「已过站」（见不变量 1a/1b），**不得**由其它状态产出。
+   */
   ok(
-    rows.every(({ d }) => d.stopsAway === null || d.stopsAway >= 1 || d.alarm === "now"),
-    "不变量 3：站数 ∈ {null} ∪ {≥1} ∪ {0 且已到站}",
+    rows.every(({ d }) => d.stopsAway === null || d.stopsAway >= 1 || d.stopsAway === 0),
+    "不变量 3：站数 ∈ {null} ∪ {≥1} ∪ {0}（0 的两种解释由 1a/1b 分别锁死）",
   );
 
   /** 不变量 4：无位置模型的帧，到下车分钟必须落在 [0, 整段静态分钟]（不出现负数 / 超过整段） */
@@ -622,6 +647,35 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
     ok(
       navDetail.includes('if (track?.alarm === "now") return "本站下车";'),
       "接线：已到站时次行提前返回「本站下车」，不会落到「还有 0 站」分支",
+    );
+    /**
+     * ★ 已知缺口登记（**待产品裁决，不是漏做**）：`postSub` 只有「已到站」一个提前返回，
+     *   **没有**「已过站」分支 ⇒ 车驶离下车站后（`alarm="none"`、站数 0）仍会渲染
+     *   「还有 0 站下车 · 约 1 分」。这条断言把缺口**钉成可见事实**：
+     *   谁去补这个分支，这里会先红，逼他同步改文案口径与「不变量 1b」的措辞。
+     *
+     * ⚠️ 判据是「`postSub` 的可执行代码里有没有 `stopsAway === 0`」——
+     *   **不能**用 `includes("已过站")`：组件注释里本来就有「按已过站数算」这句话
+     *   （说明另一种错误公式），按字面匹配会**假红**。先剥注释再匹配，避免注释干扰。
+     * ⚠️ **不要**为了让它变绿去放宽它 —— 那等于把这个缺口重新藏起来。
+     */
+    const subStart = navDetail.indexOf("const postSub = useMemo(");
+    const subEnd = subStart >= 0 ? navDetail.indexOf("}, [infoMode", subStart) : -1;
+    const subCode =
+      subStart >= 0 && subEnd > subStart
+        ? navDetail
+            .slice(subStart, subEnd)
+            .replace(/\/\*[\s\S]*?\*\//g, " ")
+            .replace(/\/\/[^\n]*/g, " ")
+        : "";
+    ok(
+      subCode !== "" && !/stopsAway\s*===\s*0/.test(subCode),
+      "已知缺口（待裁决）：postSub 尚无「已过站」分支 ⇒ 车驶离下车站会显示「还有 0 站下车」",
+      subCode === ""
+        ? "✗ 未能定位 postSub 函数体（函数被改名/重构？本断言因此无法判定）"
+        : /stopsAway\s*===\s*0/.test(subCode)
+          ? "已补上分支 ⇒ 请同步更新本断言与 §已知缺口 说明"
+          : "缺口仍在（按现状登记）",
     );
     ok(
       rideEngine.includes('prog.atIdx === alightIdx ? "now" : prog.nextIdx === alightIdx ? "soon" : "none"'),
