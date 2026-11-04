@@ -40,7 +40,7 @@ import { amapPlanToSeed, modelOption, type ModeledOption } from "@/lib/recommend
 import { contextFor, loadStatics, type RecStatic } from "@/lib/recommend/query";
 import { loadHeadway } from "@/lib/recommend/headway";
 import { PREF_DEFAULTS, type Prefs } from "@/lib/recommend/score";
-import type { ScheduleHideReason } from "@/lib/recommend/schedule";
+import { holidayFallbackOf, type ScheduleHideReason } from "@/lib/recommend/schedule";
 import { mainCodeOf } from "@/lib/recommend/segment-lookup";
 import type { AltBusView, OptionSeed, RecommendCard, SchoolZone } from "@/lib/recommend/types";
 import { candidatesToSeeds, chainToCandidates, pathsToCandidates, LOCAL_SUMMARY } from "./enumerate-nav";
@@ -158,6 +158,8 @@ export interface NavOutput {
    * 记录 `{route, boardMain, reason}` —— 没有这一位，「因运营时间隐藏」就不可观测。
    */
   skipped_by_schedule: { route: string; boardMain: string; reason: ScheduleHideReason }[];
+  /** ★ 2026-11-04（U8）：假期表不可用 ⇒ U8 本轮**未生效**（一律不因时间隐藏） */
+  holiday_fallback: boolean;
   stats: NavStats;
   generatedAt: number;
 }
@@ -674,6 +676,7 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
     excluded: [...new Set(baseCtx.excluded)],
     missed: [...new Set(baseCtx.missed)],
     skipped_by_schedule: baseCtx.skippedBySchedule ?? [],
+    holiday_fallback: holidayFallbackOf(headway),
     stats: {
       staticMs,
       transitMs,

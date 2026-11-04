@@ -27,7 +27,7 @@ import { ALT_BUSES_MAX, RECOMMEND_LIMIT_DEFAULT } from "./limits";
 import { modelOption, sortCards, type ModeledOption } from "./model";
 import { contextFor, loadStatics, optionsFor, type RecStatic } from "./query";
 import { PREF_DEFAULTS, type Prefs } from "./score";
-import type { ScheduleHideReason } from "./schedule";
+import { holidayFallbackOf, type ScheduleHideReason } from "./schedule";
 import type { RecommendCard, SchoolZone } from "./types";
 
 const CACHE_TTL_MS = 10_000;
@@ -77,6 +77,12 @@ export interface RecommendResult {
    * 没有这一位，「因运营时间隐藏」就不可观测（属静默变更）。
    */
   skipped_by_schedule: { route: string; boardMain: string; reason: ScheduleHideReason }[];
+  /**
+   * ★ 2026-11-04（U8）：**假期表不可用** ⇒ 日期类型只能按星期判（`headway.ts` 的退化分支），
+   * 此时本引擎**不提供任何时间维度的隐藏依据**（一律 `no_data`）。true 即说明本轮 U8
+   * 实际**未生效** —— 这是可观测事实，不是错误。
+   */
+  holiday_fallback: boolean;
   /**
    * ★ 2026-11-04（U9）：`pin` 指定的那张卡（详情页「另有 N 个下车点」回查用）。
    *
@@ -226,6 +232,7 @@ export async function recommend(
     excluded: [...new Set(ctx.excluded)],
     missed: [...new Set(ctx.missed)],
     skipped_by_schedule: ctx.skippedBySchedule ?? [],
+    holiday_fallback: holidayFallbackOf(headway),
     pinned,
     stats: {
       candidates: seeds.length,
