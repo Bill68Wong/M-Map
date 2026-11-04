@@ -7,6 +7,20 @@
    ⚠️ 深色模式本次不改设计（Spec §3），仅补新 Token 的深色取值保证新组件不裸奔。
    ============================================================ */
 
+/* ---------- ★ U11（2026-11-04）：涟漪半径注册为可插值类型 ----------
+   `radial-gradient(circle var(--press-r) …)` 里的半径若只是**普通自定义属性**，
+   浏览器把它当字符串，动画 end 值直接跳变、不会逐帧插值。
+   用 `@property` 声明 `syntax: "<length>"` 后它成为**真正可动画的长度**。
+   ⚠️ 实测（chromium-headless-shell，动画中途读 computed `--press-r`）：
+      150ms → 146.66px / 350ms → 190px / 550ms → 200px（非整数的中间值 = 真在插值）。
+   ⚠️ 语法写错（缺 initial-value）会让整条 @property 被丢弃 ⇒ 退化为"涟漪不生长"
+      但状态层仍在（最坏退化是"无涟漪"，绝不是"无反馈"）。 */
+@property --press-r {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
 /* ---------- ① M Map Token · 浅色（默认） ---------- */
 :root {
   color-scheme: light;
@@ -259,6 +273,31 @@
   --state-hover: brightness(0.965);
   --state-active: brightness(0.9);
 
+  /* ---------- ★ U11（2026-11-04）：统一按压体系 ----------
+     ── 为什么换掉 `filter: brightness(0.9)` ────────────────────────────────
+       `filter` 作用于**整个元素及其子元素**：主按钮里的车牌标签（`--plate-ink: #ffd400`）
+       会被一起压成约 #e5be00，偏离车牌标准色。改用叠层后**只压底色，子元素保持原色**。
+     ── 为什么只有一个不透明度常量 ──────────────────────────────────────────
+       全站 pressed 只允许 `--press-op-pressed` 一个值；任何元素都不得再写第二个
+       opacity 数字。这是 U1（now/ahead 两套参数只改一半）的同型缺陷，在 U11 就堵死。
+       取值 0.12 来自 Material 3 `_md-sys-state.scss` 的 pressed state-layer opacity
+       （可核对来源优先于估算）。
+     ── 时序 ────────────────────────────────────────────────────────────────
+       按下 90ms / 抬起 180ms（原 240ms 超 200ms 上限）。
+       两个方向**分别给曲线变量**（入口分离：将来改抬起不必动按下）。 */
+  --press-on-color: var(--fg); /* 浅色=近黑（压暗）/ 深色=浅字色（提亮）；与 --state-active 同语义 */
+  --press-op-pressed: 0.12;
+  --press-dur-in: 90ms;
+  --press-dur-out: 180ms;
+  --press-ease-in: cubic-bezier(0.2, 0, 0, 1);
+  --press-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  /* T8 地图 pin 的外扩描边环（不缩放、不动锚点） */
+  --press-ring-map: var(--accent);
+  /* 涟漪半径（由 `@property` 注册为 <length> 才能插值；值由控制器写 --press-x/y/d 决定） */
+  --press-x: 50%;
+  --press-y: 50%;
+  --press-d: 200px;
+
   /* 字体层级（旧名 → 新字号） */
   --fs-display: var(--text-3xl);
   --fs-headline: 24px;
@@ -467,16 +506,20 @@ button,
   touch-action: manipulation;
   user-select: none;
   -webkit-user-select: none;
-  /* v0.13.x Spring 回弹：transform 走「释放曲线」（松手回弹 overshoot、时长略长）；
-     其余属性走快速按压曲线 */
+  /**
+   * ★ U11（2026-11-04）：去掉 `--spring-release` 的 1.9 过冲，改标准缓出。
+   *   变更原因（与 :197 的既有禁令对齐）：`:197` 明写「禁弹跳曲线 —— 不使用
+   *   --spring-release」，而本处与 `.rc` 两处一直在用它 ⇒ 代码与注释自相矛盾。
+   *   现在抬起走 `--press-ease-out`（cubic-bezier(0.16,1,0.3,1)，单调减速、无超调），
+   *   时长 240ms → 180ms（200ms 上限）。
+   */
   transition:
-    transform var(--dur-release) var(--spring-release),
-    filter var(--dur-press) var(--spring-press),
-    background-color var(--dur-press) var(--spring-press),
-    color var(--dur-press) var(--spring-press),
-    border-color var(--dur-press) var(--spring-press),
-    box-shadow var(--dur-press) var(--spring-press),
-    opacity var(--dur-press) var(--spring-press);
+    transform var(--press-dur-out) var(--press-ease-out),
+    background-color var(--press-dur-in) var(--press-ease-in),
+    color var(--press-dur-in) var(--press-ease-in),
+    border-color var(--press-dur-in) var(--press-ease-in),
+    box-shadow var(--press-dur-in) var(--press-ease-in),
+    opacity var(--press-dur-in) var(--press-ease-in);
 }
 
 button:focus-visible,
@@ -490,31 +533,171 @@ button:hover:not(:disabled) {
   filter: var(--state-hover);
 }
 
-/* v0.13.x：按下态覆写 transition 为「快速按压曲线」（90ms 快沉，不弹），
-   手指松开 :active 移除 → 自动切回默认「释放曲线」（240ms back-out 超调回弹） */
-button:active:not(:disabled),
-.btn:active {
-  transition:
-    transform var(--dur-press) var(--spring-press),
-    filter var(--dur-press) var(--spring-press),
-    background-color var(--dur-press) var(--spring-press),
-    color var(--dur-press) var(--spring-press),
-    border-color var(--dur-press) var(--spring-press),
-    box-shadow var(--dur-press) var(--spring-press),
-    opacity var(--dur-press) var(--spring-press);
-  transform: scale(0.96);
-  filter: var(--state-active);
+/* ══════════════════════════════════════════════════════════════════════════
+   ★ U11（2026-11-04）：**统一按压基元** —— 状态层（必需通道，全站唯一）
+   ──────────────────────────────────────────────────────────────────────────
+   驱动端：`src/components/ui/press-feedback.ts`（唯一写 `data-pressed` 的地方）。
+   这里只认属性，不认元素类型 —— 所以 `<a>` / `<summary>` / `<div role=button>`
+   与 `<button>` 走的是同一条规则，不会再出现"整类漏掉"。
+
+   ── 为什么用 `::before` 而不是 `::after` ────────────────────────────────
+     `::after` 在本项目**已被命中区扩容器占用**：`.btn--undo::after`（inset -10px -8px）、
+     `.lp-head__back::after` / `.lp-head__rev::after`（inset -5px）、
+     `.lrt-switch::after`（inset -10px 0）。若状态层也用 `::after`，
+     每个这类元素都得单独开例外（正是"往选择器后面追加类名"的老毛病）。
+     改用 `::before` 后：全站可点元素**没有一个**自己占用 ::before
+     （`.rc-row::before` / `.rc-alt::before` / `.nav-plan-sub::before` 都挂在子元素上，
+      `.step-sheet__grip::before` 挂在把手的子节点上，均不冲突）。
+
+   ── 为什么子元素不会被压暗（本项最有价值的修复）────────────────────────
+     `isolation: isolate` 让元素自成层叠上下文，`z-index: -1` 的伪元素落在
+     「元素背景之后、内容之前」这一层 ⇒ 只盖底色，`--plate-ink: #ffd400` 这类
+     子元素颜色**保持原值**（改前的 `filter: brightness(0.9)` 会把它压成 ≈#e5be00）。
+     ⚠️ `position: relative` 只为让 `inset: 0` 找到包含块；不改变任何元素的位置、
+        尺寸与 `z-index`（无 offset 的相对定位不产生位移）。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* 状态层的唯一不透明度来源（全站仅此一处；任何元素不得再写第二个 opacity 数字） */
+[data-pressed="true"] {
+  position: relative;
+  isolation: isolate;
 }
 
-/* ★ v1.1.7 防回归：基元下沉后必须补回两处「不该缩放」的元素 ——
-   · .chip 在 4 列网格里，缩放会串味（M3 的 chip 本来就不缩放）
-   · .btn--icon 是圆形图标键，缩放幅度要小一点才不晃 */
-.chip:active:not(:disabled) {
+[data-pressed="true"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--press-on-color);
+  opacity: var(--press-op-pressed);
+  pointer-events: none;
+}
+
+/**
+ * 按下态：把入口曲线换成 `--press-dur-in`/`--press-ease-in`（90ms 快沉），
+ * 抬起时属性移除 → 自动回落到基元的 `--press-dur-out`/`--press-ease-out`（180ms）。
+ * ⚠️ `filter: var(--state-active)` **已删除** —— 它连子元素一起压暗（见上）。
+ *    状态层已经把"按下"表达清楚了，不需要再叠一层亮度滤镜。
+ */
+button[data-pressed="true"]:not(:disabled),
+.btn[data-pressed="true"] {
+  transition:
+    transform var(--press-dur-in) var(--press-ease-in),
+    background-color var(--press-dur-in) var(--press-ease-in),
+    color var(--press-dur-in) var(--press-ease-in),
+    border-color var(--press-dur-in) var(--press-ease-in),
+    box-shadow var(--press-dur-in) var(--press-ease-in),
+    opacity var(--press-dur-in) var(--press-ease-in);
+}
+
+/* ── 分档（按**元素短边**决定形变，不由谁写的 CSS 决定）───────────────────
+   T1 主按钮（短边 ≤56px）：scale(0.97) + 状态层 + 硬投影 2px→1px
+   T2 次按钮 / 图标键：      scale(0.94) + 状态层
+   T3 卡片（.rc / .rv-card）：**1.00 不缩放** + 状态层 + 涟漪（全站唯一允许涟漪的档）
+   T4 列表行（长列表）：     1.00 + 状态层，**不加涟漪**
+   T5 底导 / 分段：         只缩图标盒
+   T6 chip：                1.00，仅状态层
+   T7 开关：                1.00
+   T8 地图 pin：            **不缩放 / 无涟漪**，只外扩描边环
+   T9 拖拽摘要面：          1.00
+   T10 .help-faq__q：       1.00，仅状态层 + chip 圆角
+   ──────────────────────────────────────────────────────────────────────── */
+button[data-pressed="true"]:not(:disabled),
+.btn[data-pressed="true"] {
+  transform: scale(0.97);
+}
+
+/* T1 硬投影 2px → 1px（"按下去"的实体感；与状态层同向，不叠加滤镜） */
+.btn--primary[data-pressed="true"] {
+  box-shadow: 1px 1px 0 0 var(--accent-deep);
+}
+
+.btn--icon[data-pressed="true"]:not(:disabled) {
+  transform: scale(0.94); /* T2：圆形图标键缩得小一点才不晃 */
+}
+
+/* T6：chip 在 4 列网格里，缩放会串味（M3 的 chip 本来就不缩放） */
+.chip[data-pressed="true"]:not(:disabled) {
   transform: none;
 }
 
-.btn--icon:active:not(:disabled) {
+/* ★ U11 迁移记录（改前 12 条反馈类 :active 已全部删除，此处只作考古留档）：
+     迁移前分散在 chip / chip--on / btn--undo / ssheet__item / rpanel__row /
+     rv-card / nav-linechip__x / fav-flat__main / lp-head__back|rev / line-result /
+     nav-sbox__row / rc 上的「换底色 / filter:brightness / opacity:.9」现已全部删除：
+     按压只由**唯一状态层**表达（`--press-op-pressed`），避免出现第二个 pressed 不透明度。
+   ⚠️ 观感差异**已实测**（不靠估）：
+      `.rc` 改前按下换底 = --surface-dim #eaece7（L*=93.13）；
+            改后 = #ffffff 上叠 12% --press-on-color #0f1720 → #e2e3e4（L*=90.19）。
+      ⇒ ΔL* = **2.94**（改后比改前**深** 2.94，不是更轻）。差异很小，无需调全局常量。 */
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ★ U11（2026-11-04）：**此前完全漏掉的 5 个可点元素**（根因见控制器文件头）
+   ──────────────────────────────────────────────────────────────────────────
+   它们全是非 button 元素，旧基元（`button, .btn, .btn--undo`）一个都覆盖不到，
+   所以「按住毫无反应」。现在属性一旦写上，状态层自动生效；这里只补**分档**差异。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* 类 A：链接类 —— `.link-hit`（HomeClient 页脚）/ `.rc-report__link`（换乘报告）
+   `.link-hit` 是纯文字链接（T4 列表档口径：1.00），`.rc-report__link` 是 32×32 图标键（T2） */
+.link-hit[data-pressed="true"] {
+  transform: none;
+}
+.rc-report__link[data-pressed="true"] {
   transform: scale(0.94);
+}
+
+/* 类 B：品牌牌 `.nav-brand`（`<a>` 或 `<div>`）—— 站牌式小盒，归 T2 */
+.nav-brand[data-pressed="true"] {
+  transform: scale(0.94);
+}
+
+/* 类 C：T9 拖拽摘要面 `.route-sheet__peek` —— **1.00 不缩放**。
+   ⚠️ 它同时是"起拖区"：控制器对它走 16ms 消歧窗口 + 6px 位移取消。
+      若直接沿用 `:active`，整个拖拽期都会常亮，手指一滑就是一块高亮跟着走。 */
+.route-sheet__peek[data-pressed="true"] {
+  transform: none;
+}
+
+/* 类 D：T10 原生披露行 `.help-faq__q`（`<summary>`）—— 1.00，仅状态层。
+   补 chip 圆角：`<summary>` 默认无圆角，12% 叠层会露出直角、与相邻圆角元素不齐。 */
+.help-faq__q[data-pressed="true"] {
+  transform: none;
+  border-radius: var(--radius-chip);
+}
+
+/* ── T5 底部导航 / 分段：**只缩图标盒**，不缩整 tab ──────────────────────
+   整 tab 缩放会连文字与选中指示条一起动，读起来像"整条底栏在抖"。 */
+.bottom-nav__tab[data-pressed="true"] {
+  transform: none;
+}
+.bottom-nav__tab[data-pressed="true"] .bottom-nav__icon {
+  transform: scale(0.92);
+  transition: transform var(--press-dur-in) var(--press-ease-in);
+}
+.bottom-nav__icon {
+  transition: transform var(--press-dur-out) var(--press-ease-out);
+}
+
+/* ── T7 开关 / 分段：1.00（`::before` 状态层自动生效；`::after` 是命中区，不受影响）── */
+.lrt-switch[data-pressed="true"],
+.pref-switch__opt[data-pressed="true"] {
+  transform: none;
+}
+
+/* ── T8 地图 pin：**不缩放、无涟漪**，只允许外扩细描边环 ────────────────
+   ⚠️ 实测取舍：高德自己监听 touch 做平移/缩放，而站点 pin 是容器内的 DOM
+      （`data-code` 元素）⇒ 控制器**整棵 `.amap-container` 排除**，不写属性。
+      所以这条规则目前是"备用"：将来若给某个地图内元素显式加 `[data-press]`
+      才会触发。宁可地图 pin 无按压反馈，也不要每次拖地图都闪一下高亮。
+   环用两层 box-shadow（白衬 + 主色），**不改 z-index、不动锚点**（不动 offset）。 */
+.nav-map__station[data-pressed="true"],
+[data-press="map"][data-pressed="true"] {
+  transform: none;
+  box-shadow:
+    0 0 0 2px #fff,
+    0 0 0 4px var(--press-ring-map);
 }
 
 /* ★ v1.1.7：禁用态。
@@ -538,6 +721,29 @@ button[aria-disabled="true"] {
   background: transparent;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   ★ U11-1（2026-11-04）：reduced-motion **统一收口**（改前 3 个补丁块 → 改后 1 块）
+   ──────────────────────────────────────────────────────────────────────────
+   改前形变抑制分散在三处，且第三处正是"漏了非 button 元素"的证据：
+     · 全局 + `button:active`（本块原位）
+     · `@media` 只补 `.rc:active`（原 :1755-1759）      ← 为什么只有 .rc 要单独补？
+     · `@media` 只补 `.nav-locate-fab`（原 :2707-2711）  ← 为什么只有它要单独补？
+   答案：旧基元绑在元素类型上（`button`），任何非 button 的形变元素都落在覆盖之外，
+   只能一个个打补丁。现在状态端统一到 `[data-pressed]`，一条规则即可覆盖全站。
+   补丁块数量：**3 → 1**（约束：不得增加）。
+
+   ── 为什么是 `html [data-pressed="true"]:not(:disabled)`（特异度 0,2,2）──────
+   实测（chromium-headless-shell；**真实按下**让 `:active` 真生效 + 模拟
+   `prefers-reduced-motion: reduce`，读 `getComputedStyle().transform`）：
+     · `html [data-pressed="true"]:not(:disabled)` → `none`
+       ✔ 压过 `.rc[data-pressed="true"]`(0,2,0)，也压过旧 `.rc:active`(0,2,0)
+     · `:where([data-pressed="true"])`(0,0,0) → 仍 `matrix(0.96,0,0,0.96,0,0)`
+       ✗ **压不住**（0,0,0 输给 0,2,0）⇒ `:where()` 方案被证伪
+     · 对照组（只有 `.rc:active`、无收口规则）→ 仍 `matrix(0.96,…)`
+       ⇒ 证明 `:active` 确实被触发、`reduce` 本身不会关掉它（排除假阴性）
+   故不依赖源码顺序、不使用 `!important` 堆叠。
+   ⚠️ 块内仅保留的 3 个 `!important` 是既有的"时长归一"约定（原样继承）。
+   ══════════════════════════════════════════════════════════════════════════ */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -547,8 +753,29 @@ button[aria-disabled="true"] {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-  button:active:not(:disabled) {
+
+  /* ① 形变一律归零（含非 button 的可点元素）—— 全站唯一一条 */
+  html [data-pressed="true"]:not(:disabled) {
     transform: none;
+  }
+
+  /* ② T5 的形变发生在**子元素**（整 tab 不缩、只缩图标盒）⇒ 必须单独中和，
+        否则「reduced-motion 下不得有形变」会被子元素绕过。
+        ★ 实测踩到过：只写 ① 时 `#navTab` 的 icon 仍读到 `matrix(0.92,…)`。 */
+  html [data-pressed="true"]:not(:disabled) .bottom-nav__icon {
+    transform: none;
+  }
+
+  /* ③ 涟漪：**只撤几何，不 display:none**。
+     状态层与涟漪共用同一个 `::after`（同色同 opacity，差别只在 mask）
+     ⇒ `display:none` 会把状态层一起杀掉，用户按下毫无确认感。
+     撤掉 mask 后 `::after` 退化为**平铺 12% 状态层** = 无涟漪、仍有反馈。
+     ⚠️ 特异度必须是 (0,2,1) 才压得过 `.rc[data-pressed="true"]::after` (0,2,0)：
+        写成裸 `[data-pressed="true"]::after` 只有 (0,1,0) —— **实测压不住**
+        （读到 afterMask 仍是 `radial-gradient(…727.6px…)`），故加 `html … :not(:disabled)`。 */
+  html [data-pressed="true"]:not(:disabled)::after {
+    -webkit-mask-image: none;
+    mask-image: none;
   }
 }
 
@@ -717,9 +944,11 @@ button[aria-disabled="true"] {
     box-shadow var(--dur-press) var(--spring-press);
 }
 
-.press-card:active:not(:disabled) {
-  transform: scale(0.96);
-  background: var(--surface-dim);
+/* ★ U11：`.press-card` 是整卡可点（min-height 64px）⇒ 归 **T1 主按钮档**的形变
+   （scale .97），但**不加涟漪** —— 涟漪只留给 T3 的路线卡（`.rc` / `.rv-card`）。
+   改前的 `background: var(--surface-dim)` 换底已删：按压统一由唯一状态层表达。 */
+.press-card[data-pressed="true"]:not(:disabled) {
+  transform: scale(0.97);
 }
 
 /* 进行中强调卡（ok 语义） */
@@ -733,12 +962,6 @@ button[aria-disabled="true"] {
   filter: none;
   background: var(--ok-container);
   box-shadow: inset 0 0 0 1px var(--ok);
-}
-
-.press-card--ok:active:not(:disabled) {
-  filter: none;
-  transform: scale(0.96);
-  background: var(--ok-container);
 }
 
 /* 首页方案卡主题色（v0.7.0+）：载具主题色作卡片背景；v0.8.0 起实色（用户指定原色），文字对比由组件算好内联 */
@@ -876,20 +1099,17 @@ button[aria-disabled="true"] {
   justify-content: center;
 }
 
-.chip:active:not(:disabled) {
-  background: var(--primary-container);
-  color: var(--on-primary-container);
+/* ★ U11：chip 归 **T6 档** —— 1.00 不缩放、仅状态层。
+   改前的 `background: var(--primary-container)` 换底 + `.chip--on:active { opacity: 0.9 }`
+   已删除：后者正是"第二个 pressed 不透明度数字"（U1 同型缺陷），
+   且两者同时作用会与状态层叠成双重反馈。 */
+.chip[data-pressed="true"]:not(:disabled) {
+  transform: none;
 }
 
 .chip--on {
   background: var(--primary);
   color: var(--on-primary);
-}
-
-.chip--on:active {
-  background: var(--primary);
-  color: var(--on-primary);
-  opacity: 0.9;
 }
 
 .chip-row {
@@ -1093,9 +1313,9 @@ button[aria-disabled="true"] {
   position: absolute;
   inset: -10px -8px; /* 24 → 44 高 */
 }
-.btn--undo:active {
-  background: var(--error-container);
-}
+/* ★ U11：改前的 `background: var(--error-container)` 换底已删 —— 按压统一走唯一状态层。
+   ⚠️ 本元素的 `::after` 已被**命中区扩容器**占用（见上），
+      这正是状态层选 `::before`、涟漪只给 `.rc`/`.rv-card` 的原因。 */
 .btn--undo:disabled {
   opacity: 0.5;
 }
@@ -1232,13 +1452,16 @@ button[aria-disabled="true"] {
 .rc {
   padding: 14px 15px 12px;
   cursor: pointer;
+  /* ★ U11：`--spring-release`（1.9 过冲）→ `--press-ease-out`（单调减速）；240→180ms */
   transition:
-    transform var(--dur-release) var(--spring-release),
+    transform var(--press-dur-out) var(--press-ease-out),
     box-shadow var(--dur-med) var(--ease-em),
     background-color var(--dur-fast) var(--ease-em);
   /* 顶部一条极细的强调线，暗示「这是可点的路线条目」 */
   position: relative;
   overflow: hidden;
+  /* ★ U11：涟漪/状态层要落在「底色之后、内容之前」⇒ 自成层叠上下文 */
+  isolation: isolate;
 }
 
 /* ★ 零模糊阴影：hover 用「主描边」提亮，不用投影（避免「1px 边框 + 大 blur」幽灵卡片） */
@@ -1246,19 +1469,70 @@ button[aria-disabled="true"] {
   border-color: var(--border-strong);
 }
 
-/* ★ v1.1.7：修「5 张路线大卡按下去几乎没反应 + 按下还在弹」。
-   旧写法只改 `transition-duration`、且缩放仅 0.985、不改背景，而 `.rc` 是 `div[role=button]`
-   → 继承不到 `button` 基元的 `--state-active` 加深，所以整卡几乎没有按压反馈。
-   现按 `button:active` 的写法**整条重写 transition**（按压走 90ms 快沉，松手回落走释放曲线），
-   缩放提到与其它按钮一致的 .96，并补一层 `surface-dim` 底色加深。 */
-.rc:active {
-  transition:
-    transform var(--dur-press) var(--spring-press),
-    filter var(--dur-press) var(--spring-press),
-    background-color var(--dur-press) var(--spring-press),
-    box-shadow var(--dur-press) var(--spring-press);
-  transform: scale(0.96);
-  background: var(--surface-dim);
+/* ★ U11：`.rc` 归 **T3 卡片档**（短边 > 56px ⇒ **1.00 不缩放**）＋ 状态层 ＋ **涟漪**。
+   ── 为什么卡片不缩放（不是偷懒）────────────────────────────────────────
+     卡宽约 350px，缩 4% = 内容位移约 14px；且非整数缩放会让文字**重新栅格化发虚**。
+     参照：YouTube 的卡片、Google Maps 的地点卡，按下都不缩放。
+   ── 涟漪自裁（为什么必须用宿主自身的 ::after + mask）───────────────────
+     `.rc` 有 `overflow: hidden`，但 `.rv-card` **没有** ⇒ 不能靠"子盒圆 + 父级裁切"，
+     必须让承载涟漪的伪元素**自己裁自己**：`border-radius: inherit` + mask。
+     ⚠️ **不得**给父级新增 `overflow: hidden` —— 那会把 `focus-visible` 的 outline
+        和角标一起裁掉。
+   ── 降级行为 ───────────────────────────────────────────────────────────
+     mask 不受支持 ⇒ 涟漪不可见，但 `::after` 仍是平铺 12% 状态层。
+     最坏退化是"无涟漪"，**绝不能是"无反馈"**。
+   ── 为什么 ::before 让位给 ::after ─────────────────────────────────────
+     涟漪就是"生长中的状态层"（Material 3 口径）：mask 圈住的那部分才显示，
+     动画结束时半径盖满整卡 = 均匀 12%。若让 ::before(平铺) 与 ::after(涟漪)
+     同时存在会叠成 ~23% —— 违反"全站只有一个 pressed 不透明度"。 */
+.rc[data-pressed="true"]::before,
+.rv-card[data-pressed="true"]::before {
+  display: none;
+}
+
+.rc[data-pressed="true"]::after,
+.rv-card[data-pressed="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  /* 在 isolation:isolate 建立的层叠上下文内，负 z 落在「底色之后、内容之前」 */
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--press-on-color);
+  opacity: var(--press-op-pressed);
+  pointer-events: none;
+  /* 半径 0 → --press-d（对角线×2）；触点来自真实坐标（--press-x/--press-y）
+     ⚠️ 曲线**刻意不用** `--press-ease-out`（cubic-bezier(0.16,1,0.3,1)）：实测该曲线
+        前段极快，420ms 动画在 ~118ms 时半径已达最终的 85%（623/727px）⇒ 读起来像
+        "整块瞬间亮起"而不是"从触点扩散"。改 `--ease-standard`（0.2,0,0,1）后
+        扩散过程可见，且仍是减速收尾。 */
+  --press-r: var(--press-d);
+  -webkit-mask-image: radial-gradient(
+    circle var(--press-r) at var(--press-x) var(--press-y),
+    #000 99%,
+    transparent 100%
+  );
+  mask-image: radial-gradient(
+    circle var(--press-r) at var(--press-x) var(--press-y),
+    #000 99%,
+    transparent 100%
+  );
+  animation: press-ripple-grow 420ms var(--ease-standard) both;
+}
+
+@keyframes press-ripple-grow {
+  from {
+    --press-r: 0px;
+  }
+  to {
+    --press-r: var(--press-d);
+  }
+}
+
+.rc[data-pressed="true"],
+.rv-card[data-pressed="true"] {
+  /* T3：**不缩放**（见上）；按下只换入口曲线，抬起的 180ms 缓出由各卡自身 transition 管 */
+  transform: none;
 }
 
 .rc:focus-visible {
@@ -1752,11 +2026,11 @@ button[aria-disabled="true"] {
   justify-content: center;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .rc:active {
-    transform: none;
-  }
-}
+/* ★ U11-1：原此处有一个只补 `.rc:active { transform: none }` 的 reduced-motion 块
+   （形变抑制的第 2 个补丁块）。已收口到文件上方唯一的 reduced-motion 规则
+   `html [data-pressed="true"]:not(:disabled) { transform: none }`，故删除。
+   ⚠️ 保留本注释是为了让「为什么 .rc 曾需要单独补块」这个信号可被 review 看见：
+   `.rc` 不是 button，旧基元绑在元素类型上 ⇒ 非 button 的形变元素整类漏在覆盖外。 */
 
 /* 窄屏（<380px）压缩一点字号，保证一行放得下 */
 @media (max-width: 379px) {
@@ -2463,8 +2737,11 @@ button[aria-disabled="true"] {
 .nav-sbox__row:hover {
   filter: var(--state-hover);
 }
-.nav-sbox__row:active {
-  filter: var(--state-active);
+/* ★ U11：T4 列表行 —— 1.00 不缩放，只走唯一状态层。
+   改前的 `filter: var(--state-active)` 已删（`filter` 会连子元素一起压暗）。
+   注：`hover` 的 `--state-hover` 是**既有的悬停**语义，本轮不动（不在 U11 范围）。 */
+.nav-sbox__row[data-pressed="true"] {
+  transform: none;
 }
 .nav-sbox__row--pending {
   color: var(--on-surface-var);
@@ -2704,11 +2981,9 @@ button[aria-disabled="true"] {
 html[data-sheet-dragging="on"] .nav-locate-fab {
   transition: none;
 }
-@media (prefers-reduced-motion: reduce) {
-  .nav-locate-fab {
-    transition: none;
-  }
-}
+/* ★ U11-1：原此处有一个只补 `.nav-locate-fab { transition: none }` 的
+   reduced-motion 块（形变抑制的第 3 个补丁块）。已收口 —— 上方统一规则里的
+   `transition-duration: 0.01ms !important` 对**所有元素**生效，本块完全冗余，故删除。 */
 
 /* ── 顶置目的地搜索条（★ 标牌式；白底 + 蓝框 + 硬投影） ── */
 .nav-searchbar {
@@ -3542,6 +3817,10 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   cursor: grab;
   flex: none;
 }
+/* ⚠️ U11 保留的唯一一条非 reduced-motion `:active` —— 它**不是按压反馈**，
+   只是拖拽把手的**光标语义**（grab → grabbing）。
+   若改成 `[data-pressed]`，拖动 6px 后 press 态被撤销 ⇒ 光标会弹回 grab，
+   在拖动过程中光标变化是错的。故此处保留 `:active`，且不产生任何视觉状态层。 */
 .step-sheet__handle:active {
   cursor: grabbing;
 }
@@ -4403,8 +4682,11 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   text-align: left;
   cursor: pointer;
 }
-.ssheet__item:active {
-  background: var(--surface-2);
+/* ★ U11：T4 列表行 —— 1.00 不缩放，只走唯一状态层，**不加涟漪**
+   （长列表性能 + 滚动手势：滚动中控制器会撤属性，涟漪会闪）。
+   改前的 `background: var(--surface-2)` 换底已删（统一由 `--press-op-pressed` 表达）。 */
+.ssheet__item[data-pressed="true"] {
+  transform: none;
 }
 .ssheet__type {
   flex: none;
@@ -4518,8 +4800,9 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   text-align: left;
   cursor: pointer;
 }
-.rpanel__row:active {
-  background: var(--surface-2);
+/* ★ U11：T4 列表行（同 `.ssheet__item`）—— 1.00 / 状态层 / 无涟漪 */
+.rpanel__row[data-pressed="true"] {
+  transform: none;
 }
 .rpanel__dot {
   flex: none;
@@ -4673,9 +4956,18 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   color: var(--fg);
   text-align: left;
   cursor: pointer;
+  /* ★ U11：涟漪/状态层需要包含块 + 层叠上下文（与 `.rc` 同法）；
+     `position: relative` 只为让 `inset: 0` 的伪元素有参照，不产生位移。 */
+  position: relative;
+  isolation: isolate;
+  transition: transform var(--press-dur-out) var(--press-ease-out);
 }
-.rv-card:active {
-  background: var(--surface-2);
+/* ★ U11：`.rv-card` 归 **T3 卡片档** —— 1.00 不缩放 + 状态层 + **涟漪**
+   （涟漪的 `::after` 规则写在文件上方 `.rc` 段，两卡共用同一份，避免出现第二处 opacity 数字）。
+   ⚠️ `.rv-card` **没有** `overflow: hidden` ⇒ 必须靠伪元素自身的 `border-radius: inherit`
+      + mask 自裁，**不得**给父级加 `overflow: hidden`（会裁掉 focus outline 与角标）。 */
+.rv-card[data-pressed="true"] {
+  transform: none;
 }
 .rv-card__labels {
   display: flex;
@@ -5037,8 +5329,9 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   text-shadow: 0 1px 1px rgba(0, 0, 0, 0.18);
   box-shadow: 0 1px 2px rgba(15, 23, 32, 0.2);
 }
-.rl-chip:active {
-  transform: scale(0.96);
+/* ★ U11：T6 chip 档 —— 1.00 不缩放（`rl-chip` 是线路色块，缩放会与相邻块串味） */
+.rl-chip[data-pressed="true"] {
+  transform: none;
 }
 
 /* 轻轨行：3 张较宽卡片（名字较长） */
@@ -5105,8 +5398,10 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   color: #fff;
   cursor: pointer;
 }
-.nav-linechip__x:active {
-  background: rgba(255, 255, 255, 0.36);
+/* ★ U11：T2 图标键（20×20，短边 ≤56）—— scale(0.94) + 状态层。
+   改前的 `background: rgba(255,255,255,0.36)` 换底已删（白底叠白底在线路色块上看不出层级）。 */
+.nav-linechip__x[data-pressed="true"] {
+  transform: scale(0.94);
 }
 
 /* 右侧竖排按钮组（★ v2.10.0）：自上而下 = 刷新 → 公共交通路线 → 定位 → M Map */
@@ -7503,8 +7798,10 @@ body[data-nav-phase]:not([data-nav-phase="off"]) .nav-brandbar__acts { display: 
   text-align: left;
   cursor: pointer;
 }
-.fav-flat__main:active {
-  background: var(--surface-2);
+/* ★ U11：T4 列表行 —— 1.00 / 状态层 / 无涟漪。
+   改前的 `background: var(--surface-2)` 换底已删（统一由唯一状态层表达）。 */
+.fav-flat__main[data-pressed="true"] {
+  transform: none;
 }
 .fav-flat__main:focus-visible {
   outline: none;
@@ -7760,11 +8057,16 @@ body[data-nav-phase]:not([data-nav-phase="off"]) .nav-brandbar__acts { display: 
   /* ★ T1：**走廊 ghost**（非当前段的完整步行走廊，全程常驻地图）—— 独立语义组。
      ⚠️ 走廊是**另一段路的预告**，不承载当前唯一可执行指引 ⇒
         **不得与未走段同值**（4/0.6 vs 6/0.75）；它比当前步更细更淡，不抢注意力。
+        可断言判据（严格小于，不是"不相等"）：
+          --map-walk-w-corridor  < --map-walk-w-unwalked      (4 < 6)
+          --map-walk-op-corridor < --map-walk-op-unwalked     (0.6 < 0.75)
+        写成"严格小于"是为了连"误把 corridor 调得比主线段更粗更亮"这类回归也一并挡住。
      层级 68 = 全部步行线之下（不压乘车彩段 72，与乘车段共线时线路色仍在上）。
      ★ v3.8.1：ghost 也随 `common()` 实线化（细一档淡一档的区分保留）。
      ★ U1：op 0.4 → 0.6（0.4 在白瓦片上几乎与底图路名混作一片），done 档 0.5 → 0.75。
-       注：0.6 混色后 2.61:1 低于 3:1 —— 这是**刻意例外**：走廊不是可执行指引，
-       只承担"下车后还有一段"的存在感；真正要跟着走的线是未走段（3.44:1，达标）。 */
+       注：0.6 混色到 --bg #f2f4f0 上实测 **2.61:1**，低于图形元素 3:1 —— 这是
+       team-lead 批准的**刻意例外**：走廊不是可执行指引，只承担"下车后还有一段"的
+       存在感；真正要跟着走的线是未走段（0.75 → 3.44:1，达标）。 */
   --map-walk-w-corridor: 4;
   --map-walk-op-corridor: 0.6;
   --map-walk-op-corridor-done: 0.75;
@@ -8196,9 +8498,12 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
   position: absolute;
   inset: -5px;
 }
-.lp-head__back:active,
-.lp-head__rev:active {
-  background: var(--surface-2);
+/* ★ U11：T2 图标键（视觉 34×34）—— scale(0.94) + 状态层。
+   ⚠️ 这两个元素的 `::after` 已被**命中区扩容器**占用（inset -5px，见上），
+      所以状态层只能用 `::before` —— 这也正是全站状态层统一走 `::before` 的原因。 */
+.lp-head__back[data-pressed="true"],
+.lp-head__rev[data-pressed="true"] {
+  transform: scale(0.94);
 }
 .lp-head__rev[data-busy] {
   opacity: 0.5;
@@ -8434,7 +8739,10 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
   color: var(--fg);
   cursor: pointer;
 }
-.line-result:active { background: var(--surface-2); }
+/* ★ U11：T4 列表行（线路搜索结果）—— 1.00 / 状态层 / 无涟漪 */
+.line-result[data-pressed="true"] {
+  transform: none;
+}
 .line-result:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
