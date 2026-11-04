@@ -5,7 +5,7 @@
  *
  * 只放**无副作用**的取景计算与运行时读值：
  *   · `readToken`   —— 运行时读 CSS Token 的 resolved 具体值（AMap 画布拿不到 `var()`）；
- *   · `maskFill`    —— 域外遮罩填充色（读 `--fg`）；
+ *   · `maskFill`    —— 域外遮罩填充色（恒深色）；
  *   · `zoomForAcross` —— 「一屏宽的横向米数」→ zoom（标准 Web Mercator）；
  *   · `fitGapPx` / `panelTopPx` —— 取景呼吸边距 / 面板顶边像素探针。
  *
