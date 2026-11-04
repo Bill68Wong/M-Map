@@ -269,7 +269,12 @@
   --ok-container: var(--success-soft);
   --on-ok-container: #06392a;
 
-  /* 状态层（亮度模拟；与弹簧回弹动效配套） */
+  /* 状态层（亮度模拟；与弹簧回弹动效配套）
+     ★ U11：`--state-active`（按下）已**无任何引用** —— 按下改走 `--press-op-pressed` 叠层。
+       保留定义仅为回滚安全；新代码禁止引用。
+     ★ U11-hover：`--state-hover` 同样已**无引用** —— hover 改走 `--press-op-hover` 叠层
+       （`filter` 会连子元素一起压暗，且移动端 tap 后 `:hover` 残留会让车牌一直偏暗）。
+       两条都保留定义做回滚锚点，删除前请先 grep 确认零引用。 */
   --state-hover: brightness(0.965);
   --state-active: brightness(0.9);
 
@@ -277,16 +282,17 @@
      ── 为什么换掉 `filter: brightness(0.9)` ────────────────────────────────
        `filter` 作用于**整个元素及其子元素**：主按钮里的车牌标签（`--plate-ink: #ffd400`）
        会被一起压成约 #e5be00，偏离车牌标准色。改用叠层后**只压底色，子元素保持原色**。
-     ── 为什么只有一个不透明度常量 ──────────────────────────────────────────
-       全站 pressed 只允许 `--press-op-pressed` 一个值；任何元素都不得再写第二个
-       opacity 数字。这是 U1（now/ahead 两套参数只改一半）的同型缺陷，在 U11 就堵死。
+     ── 两个不透明度 token 的语义边界（⚠️ 勿合并，它们是不同档位不是重复值）──
+       `--press-op-hover`   = 悬停强度（0.04）。只有 hover 用。
+       `--press-op-pressed` = 按下强度（0.12）。全站**唯一** pressed 常量，不得有第二个。
        取值 0.12 来自 Material 3 `_md-sys-state.scss` 的 pressed state-layer opacity
-       （可核对来源优先于估算）。
+       （可核对来源优先于估算）；0.04 的等效换算见下方 hover 段注释。
      ── 时序 ────────────────────────────────────────────────────────────────
        按下 90ms / 抬起 180ms（原 240ms 超 200ms 上限）。
        两个方向**分别给曲线变量**（入口分离：将来改抬起不必动按下）。 */
-  --press-on-color: var(--fg); /* 浅色=近黑（压暗）/ 深色=浅字色（提亮）；与 --state-active 同语义 */
+  --press-on-color: var(--fg); /* 浅色=近黑（压暗）/ 深色=浅字色（提亮） */
   --press-op-pressed: 0.12;
+  --press-op-hover: 0.04; /* 等效改前 filter:brightness(0.965) on #ffffff（ΔR=1） */
   --press-dur-in: 90ms;
   --press-dur-out: 180ms;
   --press-ease-in: cubic-bezier(0.2, 0, 0, 1);
@@ -529,9 +535,10 @@ button:focus-visible,
   border-radius: 4px;
 }
 
-button:hover:not(:disabled) {
-  filter: var(--state-hover);
-}
+/* ★ U11-hover：改前这里是 `filter: var(--state-hover)`（= brightness(0.965)）。
+   整条删除 —— 不能"留一半"：若叠层与 filter 并存，hover 会**双重变暗**
+   （filter 压子元素 + 叠层压底色），比改前更糟。
+   现已并入上方 U11-hover 段的 `:where(:hover)` 叠层规则。 */
 
 /* ══════════════════════════════════════════════════════════════════════════
    ★ U11（2026-11-04）：**统一按压基元** —— 状态层（必需通道，全站唯一）
@@ -571,6 +578,59 @@ button:hover:not(:disabled) {
   border-radius: inherit;
   background: var(--press-on-color);
   opacity: var(--press-op-pressed);
+  pointer-events: none;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ★ U11-hover（2026-11-04）：**hover 也走同一套叠层**（拆掉最后一个 filter）
+   ──────────────────────────────────────────────────────────────────────────
+   缺陷（与 pressed 同源，只是漏在后面）：改前 `button:hover:not(:disabled)` 与
+   `.nav-sbox__row:hover` 用 `filter: var(--state-hover)` = `brightness(0.965)`，
+   而 `filter` 作用于**整个子树** ⇒ 主按钮里的车牌标签同样被压暗。
+   叠加**移动端 Chrome 在 tap 后保留 `:hover`** ⇒ 点完主按钮，车牌停在被压暗状态，
+   直到点别处才恢复（实测 `#ffd400` 渲染成 `#f6cd00`，Δ≈9/通道）。
+   本轮改成叠层后：hover 态车牌像素与静止态**零差异**。
+
+   ── 两个 token 的语义边界（⚠️ 下一个人请勿合并）──────────────────────
+     · `--press-op-hover`   = **悬停**强度（指针悬停其上、尚未按下）。只有 hover 用。
+     · `--press-op-pressed` = **按下**强度。全站**唯一**的 pressed 常量，不得有第二个。
+   二者是**不同语义档位**（M3 也把 hover 与 pressed 分开定义），
+   不是"同一个值抄了两遍" ⇒ 不违反「全站只有一个 pressed 不透明度」这条不变量。
+
+   ── `--press-op-hover: 0.04` 的取数依据（不是拍脑袋）────────────────────
+     目标是**换机制、不换观感**：把改前 `filter: brightness(0.965)` 等效成叠层。
+     以浅色 `--surface #ffffff` 为底、`--press-on-color: var(--fg) #0f1720` 为叠层色：
+       改前 brightness(0.965) → #f6f6f6（L\*=96.88，相对静止底 ΔL\* = −3.12）
+       α=0.04              → #f5f6f6（L\*=96.81，ΔL\* = −3.19）  ← 与改前 ΔR=1，肉眼不可分
+       （α=0.03 偏浅 ΔR=2；α=0.06 偏深 ΔR=5；α=0.08 明显更深 ΔR=10 —— 均不取）
+     深色不单独调：`--press-on-color` 在深色取 `--fg #e2e2e9`（压**亮**，与改前
+     `brightness(1.07)` 同向），ΔL\* 由 +1.03 变 +3.89，仍在"轻微可察觉"区间。
+
+   ── 为什么 hover 选择器要包 `:where()`（关键，别拆）────────────────────
+     原生写法 `button:hover:not(:disabled)::before` 特异度是 (0,2,1)，会**压过**
+     `[data-pressed="true"]::before` 的 (0,1,0) ⇒ 按下时状态层只剩 4%，
+     "按下比悬停更深"的层级倒挂，按下反馈反而变弱。
+     `:where()` 贡献 0 特异度 ⇒ hover 规则降为 (0,0,1)，按下规则 (0,1,0) 稳定胜出。
+     **已实测**：真按住瞬间读 `::before` 的 opacity，读到 0.12 而非 0.04。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* 只有原本用 filter 做 hover 的这两类元素 —— 不扩大 hover 面 */
+button:where(:hover:not(:disabled)),
+.nav-sbox__row:where(:hover) {
+  position: relative;
+  isolation: isolate;
+}
+
+/* 叠层几何与 pressed 完全同一份（同一 background、同一 --press-on-color） */
+button:where(:hover:not(:disabled))::before,
+.nav-sbox__row:where(:hover)::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--press-on-color);
+  opacity: var(--press-op-hover);
   pointer-events: none;
 }
 
@@ -2734,12 +2794,9 @@ button[aria-disabled="true"] {
 .nav-sbox__row:last-child {
   border-bottom: none;
 }
-.nav-sbox__row:hover {
-  filter: var(--state-hover);
-}
-/* ★ U11：T4 列表行 —— 1.00 不缩放，只走唯一状态层。
-   改前的 `filter: var(--state-active)` 已删（`filter` 会连子元素一起压暗）。
-   注：`hover` 的 `--state-hover` 是**既有的悬停**语义，本轮不动（不在 U11 范围）。 */
+/* ★ U11-hover：改前这里是 `filter: var(--state-hover)`，整条删除（理由同上：
+   叠层 + filter 并存会双重变暗）。hover 叠层已并入文件上方 U11-hover 段。 */
+/* ★ U11：T4 列表行 —— 1.00 不缩放，只走唯一状态层。 */
 .nav-sbox__row[data-pressed="true"] {
   transform: none;
 }
