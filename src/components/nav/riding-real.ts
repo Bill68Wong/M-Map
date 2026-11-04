@@ -36,6 +36,12 @@
  *     或安全网判定「疑似还没上车」⇒ 才认定为"人不在车上"。
  *   ⇒ 需要「车离上车站多远」这个量，等实现方提供后再做（下一批）。
  *   **不要**在此处擅自加 `setTimeout` / 秒数常量。
+ *
+ *   ✅ **该信号已就绪**（2026-11-05 实现方落地）：`RideTrackView.refVehDistToBoardM`
+ *   = 参照车距上车站的直线距离（米）。落地时只需在本文件加一条：
+ *   `entry === "station" && !posEvidence && 距离 > 阈值 ⇒ false 且允许安全网接管`
+ *   —— **阈值必须先由负责人/实现方定**（它同时决定"用户刚上车还在站台附近"的容忍度），
+ *     本文件不预设任何数值。
  */
 import type { BoardEntry, RidePhase } from "./useRideTracking";
 
@@ -69,33 +75,25 @@ export function ridingRealOf(input: RidingRealInput): boolean {
 /**
  * ★ 与 `RideTrackView` 的**唯一字段名耦合点**（两处调用点都调本函数，不各自读字段）。
  *
- * ── 为什么要有这一层（而不是在调用点直接写 `ride.xxx`）────────────────────
- *   ① **字段名正在变**：实现方先落地了 `boardEntry` / `hasPosEvidence`，
- *      随后按 team-lead 口径改名为 `enteredVia` / `boardedByPosition`（改名在途）。
- *      若在两个调用点各写一次字段名，改名要改两处、漏一处就编译不过或读到 `undefined`。
- *      收成这一处后，改名只需改这里一行。
- *   ② **踩过的坑**：本批已经因为「同一份证据在两处各自演化」出过事（只改锁存没改 `infoMode`）。
- *      单一读取点让「两处共用同一份证据」在结构上成立，而不是靠约定。
- *
- * ⚠️ 改名落地后应收窄为最终名（届时删除另一分支）。**过渡期两个名字都收**，
- *   是因为改名 WIP 尚未提交，此刻写死任一侧都会让其中一种状态编译失败。
+ * ── 为什么要有这一层（而不是在调用点直接写 `t.enteredVia`）────────────────
+ *   本批已经因为「同一份证据在两处各自演化」出过事（只改锁存没改 `infoMode`）。
+ *   单一读取点让「两处共用同一份证据」在**结构上**成立，而不是靠约定；
+ *   将来 `RideTrackView` 再改字段名，也只改这里一行。
  */
 export interface RideLatchSource {
   phase: RidePhase;
-  /** 改名后的名字（team-lead 2026-11-05 口径） */
-  enteredVia?: BoardEntry | null;
-  /** 改名前的名字（实现方初版） */
-  boardEntry?: BoardEntry | null;
-  /** 改名后的名字（team-lead 2026-11-05 口径） */
-  boardedByPosition?: boolean;
-  /** 改名前的名字（实现方初版） */
-  hasPosEvidence?: boolean;
+  /** 本次 riding 的进入方式（`null` = 不在 riding） */
+  enteredVia: BoardEntry | null;
+  /** 「人在车上」的位置证据是否已成立 */
+  boardedByPosition: boolean;
 }
 
 /** 从追踪视图读判定所需的两个量（**唯一**读字段的地方） */
 export function ridingRealOfRide(t: RideLatchSource | null | undefined): boolean {
   if (!t) return false;
-  const entry = t.enteredVia ?? t.boardEntry ?? null;
-  const posEvidence = t.boardedByPosition ?? t.hasPosEvidence ?? false;
-  return ridingRealOf({ phase: t.phase, entry, posEvidence });
+  return ridingRealOf({
+    phase: t.phase,
+    entry: t.enteredVia,
+    posEvidence: t.boardedByPosition,
+  });
 }
