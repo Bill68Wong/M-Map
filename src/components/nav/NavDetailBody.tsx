@@ -32,10 +32,12 @@ import type { RecommendCard, SegmentStrip } from "@/lib/recommend/types";
 import {
   ARRIVE_OVERDUE_TEXT,
   REMAIN_ARRIVED_TEXT,
+  legRemainMinOf,
   remainOf,
   remainServedOf,
   remainTotalMinOf,
 } from "@/lib/nav/remaining-view";
+import { remainFromIdxOf } from "@/lib/nav/track";
 import type { RideTrackView } from "./useRideTracking";
 /* ★ v3.6.0 S5：步行预览（展开键 + 静态步骤列表） */
 import WalkSegToggle from "@/components/walk/WalkSegToggle";
@@ -543,26 +545,43 @@ export default function NavDetailBody({
   const showTag = !hasEnteredRiding;
 
   /* ══════════════════════════════════════════════════════════════════════
-     ★ U4（2026-11-04）：**到下车（本段终点）剩余分钟 —— 全界面唯一口径**
+     ★ U4 / U3（2026-11-04）：**到下车（本段终点）剩余分钟 —— 全界面唯一口径**
      ─────────────────────────────────────────────────────────────────────
-     ⛔ 旧实现（`etaBaseMin`）在 `segProgress` 可用时直接用 `segRemainSec / 60` ——
+     ⛔ 更旧的实现（原 `etaBaseMin`）在 `segProgress` 可用时直接用 `segRemainSec / 60` ——
         那是「到**下一站**」的时长（`segFrom → segTo` 是相邻两站之间的区间），
-        漏掉了 `nextIdx` 之后到下车点的所有跳 ⇒ 数字系统性偏小。这就是需求 4 的根因。
+        漏掉了基准站之后到下车点的所有跳 ⇒ 数字系统性偏小。这就是需求 4 的根因。
 
-     ① **服务端优先**：`liveStrips` 是服务端 `buildStrips(patchedCard)` 的产物，
-        其 `rideMin` = `patchedCard.rides[legIndex].minutes` = 服务端 `curRemainMin`
-        （公式正是 `segRemainSec / 60 + hopMinutesFrom(pivotIdx)`，即「到下车」）。
-     ② 服务端值不可用（请求未返回 / 首帧 / 该段无重算）⇒ 回落**整段静态时长**
-        `card.rides[legIndex].minutes`：保守偏长，宁可让用户早到，不谎报更短。
-     ③ ⛔ 不再自己按「到下一站」重算，也不做本地秒级递减 —— 每 12s 车辆帧到达时
-        服务端重算并整份替换纵条，数字随之重校准（与顶部「全程剩余」同一节拍）。
+     ★ 现在**唯一口径 = `lib/nav/remaining-view.ts#legRemainMinOf`**（与服务端
+        `remaining.ts` 的当前腿剩余逐条同式）：
+        `segRemainSec / 60 + Σ minToNext[基准站 .. 倒数第二站]`，
+        基准站由 `lib/nav/track.ts#remainFromIdxOf(prog)` 给（停靠态 = 所停站，不是 `prog.nextIdx`）。
+     ① 为什么**不再**读服务端 `liveStrips[legIdx].rideMin`（U3 收口前它曾是最优来源）：
+        那个值只在 `POST /api/nav/remaining` **成功返回**时更新。该请求失败时
+        （403 / 5xx / 断网，`liveRemainFail` 会留痕）`liveStrips` 会**无限期停在上一份**，
+        而 `segProgress` 仍随每帧车辆数据更新 ⇒ 用户看到「到下车分钟卡住不动」。
+        改成本地按同一口径现算后：帧一拍，数字就跟着动；服务端那份仍是**同式**，不会打架。
+     ② 口径分散两处早晚会漂（服务端一份、前端一份）—— 现在只有 `legRemainMinOf` 一处，
+        服务端若改公式，两侧同源单点可查。
+     ③ 兜底语义**未变**（宁可偏长）：`segRemainSec` 与基准站**成对**才用首跳+逐跳；
+        只有首跳（基准站未知）或都没有 ⇒ 回落**整段静态时长** `card.rides[legIdx].minutes`。
+     ④ 仍**不做**本地秒级递减：每帧（12s）由 `segProgress` 重新校准，与顶部「全程剩余」
+        同一节拍（绝对锚每秒递减那条通道只服务顶部，见 `remainNowMs`）。
      ══════════════════════════════════════════════════════════════════════ */
   const alightMin = useMemo(() => {
-    const served = liveStrips?.[legIdx]?.rideMin;
-    if (served != null && Number.isFinite(served) && served >= 0) return served;
     const full = card.rides[legIdx]?.minutes;
-    return full != null && Number.isFinite(full) && full >= 0 ? full : null;
-  }, [liveStrips, legIdx, card.rides]);
+    const legMinutes = full != null && Number.isFinite(full) && full >= 0 ? full : null;
+    const seg = track?.segProgress?.segRemainSec ?? null;
+    const pivotIdx = remainFromIdxOf(track?.prog ?? null);
+    // 三样都没有 ⇒ 无值（**不写「约 0 分」**：那读起来像已到站，会与到站提醒抢语义）
+    if (legMinutes === null && seg === null && pivotIdx === null) return null;
+    const min = legRemainMinOf({
+      segRemainSec: seg,
+      pivotIdx,
+      minToNext: trackStops.map((s) => s.minToNext),
+      legMinutes: legMinutes ?? 0,
+    });
+    return Number.isFinite(min) && min >= 0 ? min : null;
+  }, [track?.segProgress?.segRemainSec, track?.prog, trackStops, legIdx, card.rides]);
   /** 显示值：地板 1 分（写「约 0 分」读起来像已到站，会与到站提醒抢语义 —— 沿用既有口径） */
   const shownAlightMin = alightMin == null ? null : Math.max(1, Math.round(alightMin));
   /** 到下车还有几站（`null` = 进度未知 / 站序不足两站：不写「还有 0 站」，那是假精确） */

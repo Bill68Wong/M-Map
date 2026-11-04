@@ -253,6 +253,14 @@ export interface RideTrackView {
   mapVehicles: VehicleLite[];
   /** ★ v3.4.0（进度模型）：本段位置感知剩余（riding 且有 progress 时非空；否则 NavDetailBody 用逐跳兜底） */
   segProgress: RideSegProgress | null;
+  /**
+   * ★ U3：车辆帧**明确停靠**在本段某站（`prog.kind === "at"` 且 `status === "stopping"`）。
+   *
+   * 语义只有一个：**本帧「到下一站（基准站）」的首跳剩余已经走完** ⇒ `/api/nav/remaining`
+   * 的 `segRemainSec` 必须显式传 `0`（见 `lib/nav/track.ts#segRemainSecOf`）。
+   * ⚠️ 不要用 `segProgress === null` 代替：那同时意味着「车丢了」，当停靠用会把剩余算成 0。
+   */
+  stoppedAtStation: boolean;
   /** ★ 本批：自动下车瞬态（`data-track-state='alighted'` 窗口） */
   justAlighted: boolean;
   onStart: () => void;
@@ -517,6 +525,21 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   const [legIndex, setLegIndex] = useState(0);
   const [plate, setPlate] = useState<string | null>(null);
   const [prog, setProg] = useState<TrackProgress | null>(null);
+  /**
+   * ★ U3：本帧车辆是否**明确停靠在**本段某站（供 `/api/nav/remaining` 的 `segRemainSec` 用）。
+   *
+   * ── 为什么必须是独立信号，不能拿 `segProgress` 缺失代替 ──────────────────
+   *   `attachProgress` 只给 `status === "moving"` 的车挂 `progress`（`progress.ts:201`），
+   *   而 `segProgress === null` 同时覆盖「车停靠中」「车数据丢了」「几何/里程表缺行」三种情况。
+   *   拿缺失当停靠 ⇒ 把「丢车」也说成「到站」，剩余时间被**静默**算成 0。
+   *
+   * ── 取值条件（刻意比 `v.atStation` 严一格）────────────────────────────
+   *   `progOfFrame.kind === "at"` **且** `v.status === "stopping"`：
+   *   · `kind === "at"` 已含「`atStation` 命中**本段站序**」这一必要条件 ——
+   *     直接用 `!!v.atStation` 会把「停在本段站序之外的站」（如已驶过的上车站后方）也算进来；
+   *   · `status` 再排除 `terminal`（总站待发还没进入本次行程）。
+   */
+  const [stoppedAtStation, setStoppedAtStation] = useState(false);
   const [alarm, setAlarm] = useState<"none" | "soon" | "now">("none");
   const [traveled, setTraveled] = useState<LL[] | null>(null);
   /**
@@ -1079,7 +1102,15 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         }
 
         const p = progressOf(stopMains, v);
-        if (p.kind === "at" || p.kind === "between") setProg(p);
+        if (p.kind === "at" || p.kind === "between") {
+          setProg(p);
+          /**
+           * ★ U3：停靠信号**与本帧进度同批写入**（两者必须成对，否则会出现
+           *   「`prog` 还是上一帧的行驶态、`stoppedAtStation` 已是本帧的停靠」这种撕裂，
+           *   下游会把「基准站 = 区间终点」和「首跳剩余 = 0」拼在一起，凭空少算一跳）。
+           */
+          setStoppedAtStation(p.kind === "at" && v.status === "stopping");
+        }
 
         // ★ 本批（07 §c.4 裁定）：**视觉层（已驶过灰线 + 蓝点）一律用 GPS 切割**
         //   —— 车辆帧**不再**更新 `traveled`（逻辑层进度仍以车辆为权威）。
@@ -1542,7 +1573,14 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
           ts: res.ts,
           badStreak: res.badStreak,
         };
-        if (res.progress.kind !== "lost") setProg(res.progress);
+        if (res.progress.kind !== "lost") {
+          setProg(res.progress);
+          /**
+           * ★ U3：定位推算**推不出**「车辆明确停靠」这个显式信号（本节刻意不用"缺失/推算"判停靠），
+           *   故此处一律归 false —— 否则上一次车辆帧留下的 `true` 会跟着 GPS 帧继续生效。
+           */
+          setStoppedAtStation(false);
+        }
         if (res.frozen && res.badStreak >= 2) setNote(NOTE_LRT_WEAK);
         else if (!res.frozen && note === NOTE_LRT_WEAK) setNote("");
         /**
@@ -2167,6 +2205,8 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     mapVehicles,
     justAlighted,
     segProgress: phase === "riding" ? segProgress : null,
+    /** ★ U3：非乘车态一律 false（不把上一段的停靠结论带到新一段） */
+    stoppedAtStation: phase === "riding" && stoppedAtStation,
     onStart: start,
     onStop: stop,
     onBoard: board,

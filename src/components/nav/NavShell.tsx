@@ -50,6 +50,7 @@ import { useWalkFollow } from "@/components/walk/useWalkFollow";
 import WalkTurnBanner from "@/components/walk/WalkTurnBanner";
 import type { WalkStep } from "@/lib/walk/walk-shared";
 import { distM } from "@/lib/nav/route-overview";
+import { remainFromIdxOf, segRemainSecOf } from "@/lib/nav/track";
 
 /** 稳定的空 steps 引用（避免每次渲染新建数组 ⇒ 触发 hook 内部 effect 重跑） */
 const EMPTY_WALK_STEPS: WalkStep[] = [];
@@ -494,8 +495,19 @@ export default function NavShell({
     open: rsOpen && pane === "detail",
     phase: ride.phase,
     legIndex: ride.legIndex,
-    segRemainSec: ride.segProgress?.segRemainSec ?? null,
-    nextIdx: ride.prog?.nextIdx ?? null,
+    /**
+     * ★ U3：`segRemainSec` 是「到**基准站**的首跳剩余」，且**必须与 `nextIdx` 成对**。
+     *   · 停靠态（`ride.stoppedAtStation`）**显式传 0** —— 不用 `segProgress` 缺失推停靠
+     *     （那只是"车丢了"，见 `lib/nav/track.ts#segRemainSecOf`）；
+     *   · 成对才能算准：服务端/本地的公式都是 `segRemainSec/60 + 基准站之后逐跳`。
+     */
+    segRemainSec: segRemainSecOf(ride.stoppedAtStation, ride.segProgress?.segRemainSec ?? null),
+    /**
+     * ★ U3：**基准站**下标，不是「下一站」下标。
+     *   停靠态的 `ride.prog.nextIdx` 指向「所停站的**下一站**」，用它起算会整跳漏掉
+     *   「所停站 → 下一站」（用户停在 C 站还要 C→D + D→E，系统只算 D→E）。
+     */
+    nextIdx: remainFromIdxOf(ride.prog),
     frameTs: ride.lastVehicleTs,
   });
 
