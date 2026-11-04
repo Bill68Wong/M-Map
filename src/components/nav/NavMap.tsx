@@ -5,7 +5,7 @@
  *
  * ── 职责 ──────────────────────────────────────────────────────────────
  *   · 高德 JS API 2.0 底图（`amap-loader`，懒加载，`ssr:false` 由调用方保证）；
- *   · ★【S1 新增】**只显示澳门**：`setLimitBounds`（拖动限制）+ `setZooms([11,18])`（缩放收敛）
+ *   · ★【S1 新增】**只显示澳门**：`setLimitBounds`（拖动限制）+ `setZooms([11,19])`（缩放收敛）
  *     + `setBounds`（初始视野 = 澳门全境）+ **域外遮罩**（大矩形镂空澳门，半透明压暗）。
  *     边界取自高德官方 `AMap.DistrictSearch`（见 `src/lib/amap/district.ts`，**不自绘**）。
  *     **降级原则**：边界/遮罩任一环节失败 → 回落到「仅范围限制 + 兜底矩形」，**绝不阻塞**底图/搜索/定位。
@@ -30,7 +30,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import BrandRouteLoader from "@/components/brand/BrandRouteLoader";
-import { isInsideRings, loadMacauDistrict, maskOuterRing, type MacauDistrict } from "@/lib/amap/district";
+import { isInsideRings, loadMacauDistrict, maskOuterRing, padBounds, type MacauDistrict } from "@/lib/amap/district";
 import { type ColoredLeg, type LL } from "@/lib/nav/route-overview";
 import { loadAMap } from "./amap-loader";
 /* ★ v3.3.0（AC-92 · ADR-102）：起终点钉内联 SVG 单一真源 */
@@ -529,7 +529,10 @@ export default function NavMap({
           districtRef.current = dist;
           const b = dist.bounds;
           const bounds = new AMap.Bounds([b.minLng, b.minLat], [b.maxLng, b.maxLat]);
-          map.setLimitBounds(bounds); // ① 拖不出澳门
+          // ★ 2026-11-04：限界再外扩 0.05°（≈5.5km）。手机屏窄，原 1.3km 余量在海岸/角落放大时
+          //   视野会顶出界 ⇒ AMap 把缩放卡住（实测「某些角落放不大」）；外扩后域外仍由遮罩压暗。
+          const lb = padBounds(b, 0.05);
+          map.setLimitBounds(new AMap.Bounds([lb.minLng, lb.minLat], [lb.maxLng, lb.maxLat])); // ① 拖不出澳门
           map.setZooms([MIN_ZOOM, MAX_ZOOM]); // ② 拉不远
           applyCamera(() => map.setBounds(bounds)); // ③ 首屏 = 澳门全境（程序化，打标）
           boundsAppliedRef.current = true;
@@ -537,9 +540,9 @@ export default function NavMap({
           canvas?.setAttribute("data-limit-bounds-src", dist.source);
           canvas?.setAttribute("data-nav-zoom", String(map.getZoom?.() ?? ""));
 
-          // ④ 域外遮罩（有大矩形 + 澳门官方环 + 能取到 Token 色才画；否则跳过）
+          // ④ 域外遮罩（有大矩形 + 澳门官方环即画；填充恒为深色，见 `maskFill`）
           const fill = maskFill();
-          if (dist.rings.length && fill) {
+          if (dist.rings.length) {
             try {
               const path = [maskOuterRing(b), ...dist.rings, ...dist.exclaveRings];
               maskRef.current = new AMap.Polygon({
