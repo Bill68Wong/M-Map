@@ -15,6 +15,7 @@
 import {
   ANOMALY_CONFIRM,
   ANOMALY_MIN_GAP_MS,
+  AUTO_TRIES_PER_LEG,
   BOARDING_START_GRACE_MS,
   R1_ACCEL_DISPLACE_FACTOR,
   R2_DISPLACE_MIN_M,
@@ -29,9 +30,18 @@ import {
   detectPausedOf,
   GPS_PAUSE_MS,
   nextLegCooldownOf,
+  r2Of,
   type AutoBoardInput,
   type FixLite,
 } from "@/lib/nav/boarding-detect";
+import { departedCandidatesOf, pickLockPlateOf } from "@/lib/nav/plate-lock";
+import {
+  FOLLOW_MAX_SLOPE_MPS,
+  FOLLOW_MIN_ALONG_M,
+  FOLLOW_MIN_FRAMES,
+  followSlopeOf,
+} from "@/lib/nav/follow-slope";
+import { followFramesOf, type FollowFrame, type VehFrame } from "@/lib/nav/follow-frames";
 import type { TrackVehicle } from "@/lib/nav/track";
 import type { LL } from "@/lib/nav/route-overview";
 
@@ -108,6 +118,9 @@ function fixesFromStation(kmh: number, n: number, gapMs: number, endTs = 100_000
 }
 
 
+/** 本段站序主码（下标 0 = 上车站 T100）—— 锁牌的 L-b 判据用 */
+const STOP_MAINS = ["T100", "T101", "T102", "T103"];
+
 /** 基准输入：几何可用、无车、冷却已过、未触发过 */
 function inputOf(patch: Partial<AutoBoardInput> = {}): AutoBoardInput {
   return {
@@ -116,13 +129,65 @@ function inputOf(patch: Partial<AutoBoardInput> = {}): AutoBoardInput {
     colored: PATH,
     boardMain: "T100",
     boardPos: { ...atM(0) },
+    stopMains: STOP_MAINS,
     vehicles: [],
+    vehFrames: [],
     fixes: [],
     lastSwitchTs: 0,
     nowMs: 1_000_000,
-    autoUsed: false,
+    autoLeft: AUTO_TRIES_PER_LEG,
     streak: 0,
     ...patch,
+  };
+}
+
+/**
+ * ★ I-3 夹具：把「每帧的用户里程 / 车辆里程」直接写成定位帧 + 车辆帧历史。
+ *
+ * 为什么必须给**车辆帧历史**而不只是当前一帧车辆：斜率判据要在两帧车辆快照之间
+ * 内插出 `v(t)`，把车辆里程对齐到用户定位的时间戳。本夹具让车辆帧与定位帧同戳
+ * （取端点，不引入内插误差）；内插本身另有专门用例（⑯-e）。
+ */
+function fixesAt(uM: number[], gapMs = 3_000, startTs = 100_000): FixLite[] {
+  return uM.map((m, i) => {
+    const p = atM(m);
+    return { lng: p.lng, lat: p.lat, accuracy: 10, ts: startTs + i * gapMs };
+  });
+}
+
+function vehAt(plate: string, m: number, ts: number, extra: Partial<TrackVehicle> = {}): VehFrame {
+  const p = atM(m);
+  return {
+    ts,
+    vehicles: [
+      {
+        plate,
+        lat: p.lat,
+        lng: p.lng,
+        status: "moving",
+        interval: { from: { code: "T100" }, to: { code: "T101" } },
+        atStation: null,
+        ...extra,
+      },
+    ],
+  };
+}
+
+function vehHistOf(plate: string, vM: number[], extra: Partial<TrackVehicle> = {}): VehFrame[] {
+  return vM.map((m, i) => vehAt(plate, m, 100_000 + i * 3_000, extra));
+}
+
+function followFixture(o: {
+  uM: number[];
+  vM: number[];
+  gapMs?: number;
+  startTs?: number;
+  plate?: string;
+}): { fixes: FixLite[]; vehFrames: VehFrame[] } {
+  const plate = o.plate ?? "MB0001";
+  return {
+    fixes: fixesAt(o.uM, o.gapMs, o.startTs),
+    vehFrames: o.vM.map((m, i) => vehAt(plate, m, (o.startTs ?? 100_000) + i * (o.gapMs ?? 3_000))),
   };
 }
 
@@ -268,7 +333,7 @@ console.log("\n[⑥ 硬门]");
   eq(autoBoardOf(inputOf({ fixes, colored: [PATH[0]] })).hit, false, "几何仅 1 点 ⇒ 不判");
   eq(autoBoardOf(inputOf({ fixes, legDegraded: true })).hit, false, "legDegraded ⇒ 不判（旧版巴士会退化成 R1-only）");
 
-  eq(autoBoardOf(inputOf({ fixes, autoUsed: true })).hit, false, "本腿已自动触发过 ⇒ 不判");
+  eq(autoBoardOf(inputOf({ fixes, autoLeft: 0 })).hit, false, "本腿自动判定次数用尽 ⇒ 不判");
 
   const cooling = autoBoardOf(
     inputOf({ fixes, lastSwitchTs: 1_000_000 - (SWITCH_COOLDOWN_MS - 1), nowMs: 1_000_000 }),
@@ -554,7 +619,243 @@ console.log("\n[⑮ colored[0] === board 契约]");
   );
 }
 
-/* ══════════ 汇总 ══════════ */
+/* ══════════ ⑯ I-3 · I1「相对距离斜率」：正常上车必须判上并锁牌 ══════════ */
+/**
+ * 这一组是 P0「正常上车也匹配不到车牌」的**回归防线**。
+ *
+ * 根因：旧判据只量「用户自己的平均速度」⇒ 用户上车后站着不动（等关门 / 挤门口 / 塞车）
+ *   ⇒ 位移不增而窗口时长照增 ⇒ 平均速度被稀释到 8km/h 以下 ⇒ 判定迟迟不过；
+ *   而锁牌只认「车刚离站」的一个站间窗口 ⇒ 判定通过时牌已锁不上。
+ *
+ * 新判据 `followSlopeOf`：量 `d(t) = |u − v|` 的斜率，分母是**车自己的位移**。
+ */
+console.log("\n[⑯ I1 相对距离斜率]");
+{
+  /** 用例 1：5 帧 |u−v| = [12,10,14,9,13]（斜率≈0）+ 车已离站 ⇒ hit 且**同帧**锁牌 */
+  const f1 = followFixture({ uM: [32, 20, 54, 41, 73], vM: [20, 30, 40, 50, 60] });
+  const r1 = autoBoardOf(inputOf({ fixes: f1.fixes, vehFrames: f1.vehFrames, vehicles: f1.vehFrames[4].vehicles }));
+  eq(r1.hit, true, "车里站着不动（d 稳定）+ 车已离站 ⇒ 判上（旧判据会漏）");
+  eq(r1.plate, "MB0001", "同帧锁到车牌（判定与锁牌不分离）");
+  eq(r1.source, "vehicle", "有牌 ⇒ 来源 vehicle");
+  eq(r1.evidence, "slope", "证据 = slope");
+  ok(
+    r1.followSlope != null && Math.abs(r1.followSlope) <= FOLLOW_MAX_SLOPE_MPS,
+    "观测值 data-follow-slope ≈ 0（已上车）",
+    `实际=${r1.followSlope?.toFixed(2)} m/s`,
+  );
+  eq(r1.need, R2_STREAK_WITH_VEHICLE, "斜率判据自带 ≥5 帧窗 ⇒ need=2");
+
+  /** 用例 2：d = [10,20,30,40,50]（斜率≈车速）+ 人在站台不动 ⇒ 不判 */
+  const f2 = followFixture({ uM: [0, 0, 0, 0, 0], vM: [10, 20, 30, 40, 50] });
+  const r2 = autoBoardOf(inputOf({ fixes: f2.fixes, vehFrames: f2.vehFrames, vehicles: f2.vehFrames[4].vehicles }));
+  eq(r2.hit, false, "车在开走、人还在站台（d 按车速增长）⇒ 不判");
+  eq(r2.plate, null, "未命中 ⇒ 不锁牌");
+  eq(r2.evidence, "station", "证据只剩「车已离站」");
+
+  /** 用例 3：车**停靠本站** + d≡0 ⇒ 不判（物理不可分，如实不判） */
+  const parked: TrackVehicle = {
+    plate: "MB0002",
+    lat: atM(0).lat,
+    lng: atM(0).lng,
+    status: "stopping",
+    interval: null,
+    atStation: { code: "T100" },
+  };
+  const parkedHist = [0, 1, 2, 3, 4].map((i) => ({ ts: 100_000 + i * 3_000, vehicles: [parked] }));
+  const r3 = autoBoardOf(
+    inputOf({ fixes: fixesAt([0, 0, 0, 0, 0]), vehFrames: parkedHist, vehicles: [parked] }),
+  );
+  eq(r3.hit, false, "车停靠本站 + 人在站台 + d≡0 ⇒ 不判（信号上不可分，不硬判）");
+  eq(r3.plate, null, "A2（停靠本站）仍**不锁牌**");
+  eq(r3.evidence, "none", "无任何「车已离站」证据");
+
+  /** 用例 4：只给 4 帧 ⇒ 不判（**锁死 5 帧下限**，防有人缩到 3 帧引入假阳性） */
+  eq(FOLLOW_MIN_FRAMES, 5, "最小样本帧数硬下限 = 5（不得下调）");
+  const f4 = followFixture({ uM: [32, 20, 54, 41], vM: [20, 30, 40, 50] });
+  const frames4: FollowFrame[] = followFramesOf({
+    fixes: f4.fixes,
+    vehFrames: f4.vehFrames,
+    colored: PATH,
+    plate: "MB0001",
+  });
+  const fs4 = followSlopeOf(frames4);
+  eq(fs4.n, 4, "4 帧全部进入窗口");
+  eq(fs4.ok, false, "4 帧 ⇒ 判据不成立（3~4 帧的斜率标准误与车速同量级）");
+  eq(fs4.why, "too-few", "原因 = 样本不足");
+  eq(
+    autoBoardOf(inputOf({ fixes: f4.fixes, vehFrames: f4.vehFrames, vehicles: f4.vehFrames[3].vehicles })).hit,
+    false,
+    "4 帧时端到端也不得判上",
+  );
+
+  /** 用例 5：车已驶过下一站（`interval.from` 不再是本站），但 L-b 成立 ⇒ 仍能锁牌 */
+  const midRide: TrackVehicle = {
+    plate: "MB0003",
+    lat: atM(0).lat,
+    lng: atM(0).lng,
+    status: "moving",
+    interval: { from: { code: "T101" }, to: { code: "T102" } },
+    atStation: null,
+  };
+  const midHist = [300, 310, 320, 330, 340].map((m, i) => vehAt("MB0003", m, 100_000 + i * 3_000, { interval: midRide.interval }));
+  const midFix = fixesAt([306, 313, 325, 334, 346]);
+  const dep5 = departedCandidatesOf({
+    vehicles: [midRide],
+    boardMain: "T100",
+    stopMains: STOP_MAINS,
+    colored: PATH,
+    fix: { lng: atM(346).lng, lat: atM(346).lat },
+  });
+  ok(dep5.length === 1 && dep5[0].via.includes("L-b"), "L-b 成立：车已在本段站序内前移（passedIdx≥0）");
+  const r5 = autoBoardOf(
+    inputOf({ fixes: midFix, vehFrames: midHist, vehicles: [{ ...midRide, lat: atM(340).lat, lng: atM(340).lng }] }),
+  );
+  eq(r5.hit, true, "整段乘车（非「刚离站」站间）仍可判定");
+  eq(r5.plate, "MB0003", "整段乘车仍能锁牌（旧版只认一个站间 ⇒ 这里必然 null）");
+}
+
+/* ══════════ ⑰ I-3 · I2 多车歧义：差 <2σ 不锁 / >2σ 锁近者 ══════════ */
+console.log("\n[⑰ I2 多车歧义]");
+{
+  eq(pickLockPlateOf([{ plate: "A", d: 10, via: ["L-a"] }, { plate: "B", d: 28, via: ["L-a"] }]).plate, null, "d 差 18m < 2σ ⇒ 不锁（分不出是哪辆）");
+  ok(pickLockPlateOf([{ plate: "A", d: 10, via: ["L-a"] }, { plate: "B", d: 28, via: ["L-a"] }]).ambiguous, "歧义标记");
+  eq(pickLockPlateOf([{ plate: "A", d: 10, via: ["L-a"] }, { plate: "B", d: 45, via: ["L-a"] }]).plate, "A", "d 差 35m > 2σ ⇒ 锁 d 小者");
+  eq(pickLockPlateOf([{ plate: "A", d: null, via: ["L-a"] }]).plate, "A", "唯一候选且无里程（L-a 强证据）⇒ 锁它");
+  eq(pickLockPlateOf([{ plate: "A", d: null, via: ["L-b"] }, { plate: "B", d: null, via: ["L-c"] }]).plate, null, "多候选且都无里程 ⇒ 不猜");
+  eq(
+    pickLockPlateOf([{ plate: "A", d: 2000, via: ["L-b"] }]).plate,
+    null,
+    "L-b/L-c 放宽来源必须有位置确认：2km 外的同线车**不得**锁（防错锁）",
+  );
+
+  /** 端到端：r2 命中时，两车里程差决定「锁谁 / 锁不锁」 */
+  const uM6 = [0, 16.7, 33.3, 50, 66.7]; // 20km/h × 12s = 66.7m ⇒ r2 位移门(60m)过
+  const fix6 = fixesAt(uM6);
+  const histNear = vehHistOf("MA0101", uM6.map((x) => x + 10));
+  const histFar = vehHistOf("MA0102", uM6.map((x) => x + 45));
+  const merge = (a: VehFrame[], b: VehFrame[]): VehFrame[] =>
+    a.map((f, i) => ({ ts: f.ts, vehicles: [...f.vehicles, ...b[i].vehicles] }));
+
+  const wide = autoBoardOf(inputOf({ fixes: fix6, vehFrames: merge(histNear, histFar), vehicles: merge(histNear, histFar)[4].vehicles }));
+  eq(wide.hit, true, "两车里程差 35m ⇒ 判定成立");
+  eq(wide.plate, "MA0101", "锁 d 小者");
+
+  const histNear2 = vehHistOf("MA0101", uM6.map((x) => x + 10));
+  const histFar2 = vehHistOf("MA0102", uM6.map((x) => x + 28)); // 差 18m < 20m
+  const near2 = merge(histNear2, histFar2);
+  const narrow = autoBoardOf(inputOf({ fixes: fix6, vehFrames: near2, vehicles: near2[4].vehicles }));
+  eq(narrow.hit, true, "里程差 <2σ ⇒ 仍可判「在车上」");
+  eq(narrow.plate, null, "但**不锁牌**（分不出是哪辆 ⇒ 不猜）");
+  eq(narrow.source, "gps", "无牌 ⇒ 来源退回 gps");
+}
+
+/* ══════════ ⑱ I-3 · I1 判据门槛（隔离测试）══════════ */
+console.log("\n[⑱ I1 门槛隔离]");
+{
+  // 用户自己在动、但相对距离被拉开 ⇒ 只能由 G-e（斜率门）否决
+  const g = followFramesOf({
+    fixes: fixesAt([20, 40, 60, 80, 100]),
+    vehFrames: vehHistOf("MB0009", [10, 40, 70, 100, 130]),
+    colored: PATH,
+    plate: "MB0009",
+  });
+  const fs = followSlopeOf(g);
+  ok(fs.alongM != null && fs.alongM >= FOLLOW_MIN_ALONG_M, "用户沿线前移达门槛（排除 G-d 干扰）", `alongM=${fs.alongM?.toFixed(1)}`);
+  eq(fs.ok, false, "d 从 10 拉到 30（斜率≈2m/s > 上限）⇒ 不成立");
+  eq(fs.why, "growing", "原因 = 相对距离被拉开");
+
+  // 精度不足的帧**整帧不参与**（不是拿来用）
+  const bad = followFixture({ uM: [32, 20, 54, 41, 73], vM: [20, 30, 40, 50, 60] });
+  const badFixes = bad.fixes.map((f) => ({ ...f, accuracy: 200 }));
+  const badFrames = followFramesOf({ fixes: badFixes, vehFrames: bad.vehFrames, colored: PATH, plate: "MB0001" });
+  const badSlope = followSlopeOf(badFrames);
+  eq(badSlope.n, 0, "accuracy=200m 的帧全部不参与拟合");
+  eq(badSlope.ok, false, "整条不判（精度不足如实拒绝，不硬判）");
+  eq(
+    autoBoardOf(inputOf({ fixes: badFixes, vehFrames: bad.vehFrames, vehicles: bad.vehFrames[4].vehicles })).hit,
+    false,
+    "整条低精度 ⇒ 端到端也不判",
+  );
+
+  // 车停着不动 ⇒ 「d 不变」是平凡解，不可判（物理限制）
+  const stillCar = followFramesOf({
+    fixes: fixesAt([0, 0, 0, 0, 0]),
+    vehFrames: vehHistOf("MB0010", [10, 10, 10, 10, 10]),
+    colored: PATH,
+    plate: "MB0010",
+  });
+  eq(followSlopeOf(stillCar).why, "veh-still", "车停着 ⇒ 原因 = veh-still（不把平凡解当已上车）");
+
+  /** 内插：车辆帧 12s 一帧、定位 3s 一帧 ⇒ v 必须（且只能）内插对齐到定位时间戳 */
+  const sparse: VehFrame[] = [vehAt("MC0001", 0, 100_000), vehAt("MC0001", 40, 112_000)];
+  const interp = followFramesOf({ fixes: fixesAt([0, 10, 20, 30, 40]), vehFrames: sparse, colored: PATH, plate: "MC0001" });
+  eq(interp.length, 5, "两端车辆帧之间 5 个定位帧全部配上（含末帧）");
+  ok(
+    interp.every((f, i) => Math.abs(f.v - i * 10) <= 1),
+    "v 按内插对齐到定位时间戳（10/20/30/40）",
+    `实际=${interp.map((f) => f.v.toFixed(1)).join(",")}`,
+  );
+  ok(followSlopeOf(interp).ok, "内插后同速随车（d≈0）⇒ 判据成立（否则 d 会按车速锯齿增长）");
+}
+
+/* ══════════ ⑲ I-3 · I3 方向：沿线里程递减的窗口不成立 ══════════ */
+console.log("\n[⑲ I3 方向校验]");
+{
+  const r2opts = { displaceM: 100, speedMinKmh: 8, minSamples: 3 };
+  const fwd: FixLite[] = [
+    { ...atM(20), accuracy: 10, ts: 100_000 },
+    { ...atM(80), accuracy: 10, ts: 108_000 },
+    { ...atM(140), accuracy: 10, ts: 116_000 },
+  ];
+  eq(r2Of(fwd, PATH, r2opts), true, "对照：正向 120m / 16s ⇒ 成立");
+  const back: FixLite[] = [
+    { ...atM(140), accuracy: 10, ts: 100_000 },
+    { ...atM(80), accuracy: 10, ts: 108_000 },
+    { ...atM(20), accuracy: 10, ts: 116_000 },
+  ];
+  eq(r2Of(back, PATH, r2opts), false, "反向 120m / 16s ⇒ 不成立（旧版 Math.abs 会判 true）");
+}
+
+/* ══════════ ⑳ I-3 · I4 误判可纠正：本腿 2 次自动判定 + 20s 冷却 ══════════ */
+console.log("\n[⑳ I4 次数与冷却]");
+{
+  eq(AUTO_TRIES_PER_LEG, 2, "本腿自动判定次数初值 = 2");
+  const f = followFixture({ uM: [32, 20, 54, 41, 73], vM: [20, 30, 40, 50, 60] });
+  const base = { fixes: f.fixes, vehFrames: f.vehFrames, vehicles: f.vehFrames[4].vehicles };
+  const T = 1_000_000;
+
+  let streak = 0;
+  let left = AUTO_TRIES_PER_LEG;
+  let lastSwitch = 0;
+  const frame = (nowMs: number) => {
+    const r = autoBoardOf(inputOf({ ...base, autoLeft: left, streak, nowMs, lastSwitchTs: lastSwitch }));
+    streak = r.streak;
+    return r;
+  };
+
+  frame(T);
+  const switched1 = frame(T);
+  ok(switched1.hit && switched1.streak >= switched1.need, "第 1 次：连续命中达 need ⇒ 自动上车");
+  left -= 1; // `switchToRiding` 里扣次数
+  lastSwitch = T;
+  streak = 0; // 切换后清零
+  eq(left, 1, "第 1 次后剩余 1 次");
+
+  // 用户点「我没上车」：只起冷却，不扣次数
+  lastSwitch = T;
+  eq(frame(T + 5_000).hit, false, "回到等车后 20s 冷却内不再判（防抖）");
+
+  const again = frame(T + SWITCH_COOLDOWN_MS); // 冷却刚过
+  eq(again.hit, true, "冷却过后仍能自动判定（旧版此处被永久关闭）");
+  left -= 1;
+  streak = 0;
+  eq(left, 0, "第 2 次后次数用尽");
+
+  lastSwitch = T + SWITCH_COOLDOWN_MS;
+  eq(frame(T + SWITCH_COOLDOWN_MS * 3).hit, false, "第 3 次不再自动（次数用尽 ⇒ 如实停手）");
+}
+
+
 const total = pass + fail;
 console.log(`\n结果：${fail === 0 ? "PASS" : "FAIL"} · ${pass}/${total} 通过${fail ? ` · ${fail} 失败` : ""}`);
 process.exit(fail === 0 ? 0 : 1);

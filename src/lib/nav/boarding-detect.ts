@@ -5,10 +5,22 @@
  *   把判据抽成**纯函数**（可单测、可对拍），供 `useRideTracking` 调用：
  *     · `r1Of`       —— 车辆侧（**★ v3.6.0 起不再作触发器**，仅用于候选排序/文案）；
  *     · `auxOf`      —— 车辆辅助信号（只降门槛，**不得单独触发**）；
- *     · `r2Of`       —— GPS 侧：45s 窗口内投影 / 沿线位移 / 速度；
- *     · `autoBoardOf`—— 组合判定（★ **定位主导**；轻轨仅 R2 收紧档）；
+ *     · `r2Of`       —— GPS 侧：45s 窗口内投影 / 沿线**带符号**位移 / 速度；
+ *     · `departedCandidatesOf` / `pickLockPlateOf`（`plate-lock.ts`）—— ★ I-3 锁牌依据；
+ *     · `followSlopeOf` / `followFramesOf`（`follow-slope.ts` / `follow-frames.ts`）—— ★ I-3 跟车斜率；
+ *     · `autoBoardOf`—— 组合判定（★ v3.6.0 **定位主导**；★ I-3 起并入「跟车斜率」）；
  *     · `detectPausedOf` —— 判定是否已「事实上停止」（AC-25a 的 `data-board-detect`）；
  *     · `anomalyOf`  —— 安全网异常检出（A1 疑似未上车 / A2 疑似提前下车）。
+ *
+ * ── ★ I-3（2026-11-04）为什么必须加「跟车斜率」（用户投诉：正常上车也匹配不到车牌）
+ *   旧判定只有一个证据源 `r2Of`，量的是「回看窗口内**用户自己**的平均位移速度」。
+ *   用户上车后常常**静止**（等关门 / 挤门口 / 塞车）⇒ 位移不增而窗口时长照增 ⇒
+ *   平均速度被稀释到速度门以下 ⇒ 判定迟迟不过；等它过了，锁牌窗口（只认 `aux.strong`，
+ *   有效约一个站间）早已关闭 ⇒ 本段再无锁牌机会。
+ *   ⇒ 新增 `followSlope`（`lib/nav/follow-slope.ts`）：量「用户与参照车的**相对距离**斜率」，
+ *     分母是车自己的位移 ⇒ 用户静止不会稀释；并把锁牌放宽为三条件并集（见 `departedCandidatesOf`）
+ *     ⇒ **判定成立的那一帧，锁牌条件必然同时成立**（斜率判据的前提 ⊆ 并集）。
+ *     `r2Of` 原样保留为并存证据源（避免回归既有行为）。
  *
  * ── ★ v3.6.0 为什么改成「定位主导」（用户口径）───────────────────────
  *   旧版 R1（车辆停靠/刚离上车站）是**触发器**：第一辆车到站就判「用户已上车」，
@@ -23,6 +35,12 @@
  */
 import { cumDistM, distM, nearestOnPath, type LL } from "./route-overview";
 import { mainOf, rankBoardingVehicles, type TrackVehicle } from "./track";
+import { followFramesOf, type VehFrame } from "./follow-frames";
+import { followSlopeOf, type FollowSlope } from "./follow-slope";
+import { departedCandidatesOf, pickLockPlateOf } from "./plate-lock";
+
+/** ★ I-3：本腿允许的**自动判定次数**（初值）。用尽后仅剩手动/纠错入口（见 I4） */
+export const AUTO_TRIES_PER_LEG = 2;
 
 /** 自动上车总开关（Spec R-1：关掉即回退 v2.13「我已上车」手动） */
 export const AUTO_BOARDING_ENABLED = true;
@@ -181,7 +199,17 @@ export function r2Of(fixes: FixLite[], colored: LL[], opts: R2Opts = {}): boolea
 
   const i0 = projs[0].idx;
   const i1 = projs[projs.length - 1].idx;
-  const disp = Math.abs(cum[i1] - cum[i0]);
+  /**
+   * ★ I-3（2026-11-04）：**去掉 `Math.abs`** —— 原式 `|cum[i1] − cum[i0]|` 把方向信息抹掉了：
+   *   人在线路上**反向**移动（走回头路 / 折返同路段 / 投影跳到环线的另一遍）也算「正向位移」，
+   *   于是「反向 80m + 速度 20km/h」可以满足「沿线位移 ≥60m 且速度 ∈[8,80]」⇒ 误判已上车。
+   *   本项目 `colored` 是「本段乘车方向」的折线，里程**递增 = 沿乘车方向前移**是唯一合法方向。
+   *   ⇒ 改为带符号差值 + 单调前移校验：位移必须为正，否则该窗口不成立（**不取绝对值**、
+   *     也不 `clamp` 到 0 —— 夹紧会让「反向」悄悄退化成「位移 0」再被位移门拦下，
+   *     虽然结果相同，但诊断上再也看不出方向错了）。
+   */
+  const disp = cum[i1] - cum[i0];
+  if (!(disp >= 0)) return false;
   if (disp < displace) return false;
 
   const dtSec = (win[win.length - 1].ts - win[0].ts) / 1000;
@@ -248,16 +276,34 @@ export interface AutoBoardInput {
   colored: LL[];
   boardMain: string;
   boardPos?: { lng: number; lat: number } | null;
+  /**
+   * ★ I-3（I2）：本段站序主码（下标 0 = 上车站）。缺省 ⇒ 锁牌的 L-b 判据不可用
+   * （只剩 L-a / L-c），**不影响** r2 判据。
+   */
+  stopMains?: string[] | null;
   vehicles: TrackVehicle[];
+  /**
+   * ★ I-3（I1）：最近若干帧车辆快照（升序）。缺省 ⇒ 跟车斜率判据不可用（如实不判）。
+   * 由调用方在每次车辆帧到达时 `push({ ts, vehicles })`。
+   */
+  vehFrames?: VehFrame[] | null;
   fixes: FixLite[];
   /** 上次切换时刻（冷却用） */
   lastSwitchTs: number;
   nowMs: number;
-  /** 本次会话该 leg 是否已自动触发过（单次会话单次） */
-  autoUsed: boolean;
+  /**
+   * ★ I-3（I4）：本腿**剩余**自动判定次数（初值 `AUTO_TRIES_PER_LEG = 2`）；
+   * 每次自动上车消耗 1 次，用户点「我没上车」**不消耗**（消耗的是那次误判）。
+   * 次数用尽 ⇒ 不再自动判，只剩手动 / 纠错入口（如实停手，不假装还能自动）。
+   * 缺省 = 未消耗过。
+   */
+  autoLeft?: number;
   /** 调用方维护的连续命中帧数 */
   streak?: number;
 }
+
+/** 本帧**最强可用证据**（`station` = 只有车辆侧「已离站」证据，未构成命中） */
+export type BoardEvidence = "slope" | "r2" | "station" | "none";
 
 export interface AutoBoardResult {
   hit: boolean;
@@ -272,6 +318,16 @@ export interface AutoBoardResult {
    *   调用方**唯一**的切换条件 = `hit && streak >= need`（不再按 `reason` 特判）。
    */
   need: number;
+  /**
+   * ★ I-3：本帧命中的是哪条证据（观测钩子 `data-board-evidence` 的值源）。
+   * ⚠️ 非命中帧也会给值（此时含义是「最强可用证据」，用于区分
+   * 「压根没有机会」(`none`/`station`) 与「有机会但没判上」）。
+   */
+  evidence: BoardEvidence;
+  /** ★ I-3：本帧相对距离斜率（m/s；`null` = 无可用样本）—— 观测钩子 `data-follow-slope` */
+  followSlope: number | null;
+  /** ★ I-3：斜率判据未成立的原因（诊断；`ok` 时为 `ok`） */
+  followWhy: FollowSlope["why"];
 }
 
 /** 未命中基线（`streak` 由调用方覆盖） */
@@ -282,6 +338,9 @@ const NO_HIT: AutoBoardResult = {
   reason: "none",
   streak: 0,
   need: R2_STREAK_ALONE,
+  evidence: "none",
+  followSlope: null,
+  followWhy: "no-frame",
 };
 
 /** 取「可信帧」（accuracy ≤ 精度门；缺失按 0 视为可信） */
@@ -300,34 +359,88 @@ function adaptiveOpts(fixes: FixLite[], baseTolM: number): { tolM: number; displ
   return { tolM: tol, displaceM: displace };
 }
 
+/** 空斜率（轻轨 / 几何不可用） */
+const NO_FOLLOW: FollowSlope = {
+  slope: null,
+  n: 0,
+  ok: false,
+  dNow: null,
+  alongM: null,
+  vehMps: null,
+  spanMs: 0,
+  plate: null,
+  why: "no-frame",
+};
+
 /**
- * 组合判定 —— ★ v3.6.0 **定位主导**（架构 §3.1）
+ * 组合判定 —— ★ v3.6.0 **定位主导** + ★ I-3 **相对距离斜率**
  *
  * ```
  * ① 硬门（任一不满足 ⇒ 不判）
- *    G1 几何可用   G2 有 ≥3 帧可信 GPS   G3 冷却已过且本腿未自动触发过
- * ② 定位三项（主判据）
- *    P1 邻线投影 ≤ tol   P2 沿线位移 ≥ 门槛   P3 平均速度 ∈ [5.5, 80] km/h
- * ③ 车辆辅助（只降门槛，不得单独触发）
- *    A1/A2 成立 ⇒ 位移门 ×0.6、所需帧数 3→2
- * ④ 出结论：hit = P1∧P2∧P3；调用方按 `hit && streak >= need` 切换
+ *    G1 几何可用   G2 有 ≥3 帧可信 GPS   G3 剩余次数 > 0 且冷却已过
+ * ② 车辆侧证据（I-3 并集；属**测量**，冷却中也算 —— 观测钩子要能看到）
+ *    L-a 车刚从本站开走 · L-b 车已在本段站序内前移 · L-c 车停靠在别的站
+ *    ⇒ 唯一且不歧义的候选 = **可锁车牌**（`departedCandidatesOf` / `pickLockPlateOf`）
+ * ③ 两个判定源（任一成立即 hit）
+ *    r2  ：邻线投影 ≤ tol ∧ **带符号**沿线位移 ≥ 门槛 ∧ 平均速度 ∈ (8, 80] km/h
+ *    slope：`followSlopeOf` 的 G-a…G-f（相对距离不拉开；用户静止**不稀释**）
+ * ④ 车辆辅助（只降门槛，不得单独触发）：A1/A2 ⇒ 位移门 ×0.6、所需帧数 3→2
+ * ⑤ 出结论：hit = r2 ∨ slope；牌取 ② 的结果（**与判定同帧**，无任何补牌/记忆）
  * ```
  */
 export function autoBoardOf(input: AutoBoardInput): AutoBoardResult {
   const prevStreak = Math.max(0, input.streak ?? 0);
-  const noHit = (): AutoBoardResult => ({ ...NO_HIT, streak: 0 });
-
-  /* ① 硬门 G3：总开关 / 单次会话 / 冷却 */
-  if (!AUTO_BOARDING_ENABLED) return noHit();
-  if (input.autoUsed) return noHit();
-  if (input.nowMs - input.lastSwitchTs < SWITCH_COOLDOWN_MS) return noHit();
 
   /* ① 硬门 G1：几何缺失 ⇒ 一律不自动判（旧版巴士会退化成 R1-only，那是误判来源） */
   const geomOk = input.colored.length >= 2 && !input.legDegraded;
-  if (!geomOk) return noHit();
+  if (!geomOk) return { ...NO_HIT, streak: 0 };
 
-  /* ① 硬门 G2：定位主导 ⇒ 没有足够可信帧就不判 */
   const fixes = trustedFixes(input.fixes);
+  const latest = fixes[fixes.length - 1] ?? null;
+
+  /* ② 车辆侧证据 + 跟车斜率（纯测量，放在硬门之前：冷却 / 次数用尽时也要写进观测钩子） */
+  const dep =
+    input.legKind === "bus"
+      ? departedCandidatesOf({
+          vehicles: input.vehicles,
+          boardMain: input.boardMain,
+          stopMains: input.stopMains,
+          colored: input.colored,
+          fix: latest ? { lng: latest.lng, lat: latest.lat } : null,
+          tolM: Math.max(
+            R2_TOL_M,
+            (latest && Number.isFinite(latest.accuracy) ? latest.accuracy : 0) * R2_ACC_TOL_FACTOR,
+          ),
+        })
+      : [];
+  const lock = pickLockPlateOf(dep);
+  const follow =
+    input.legKind === "bus"
+      ? followSlopeOf(
+          followFramesOf({
+            fixes,
+            vehFrames: input.vehFrames ?? [],
+            colored: input.colored,
+            plate: lock.plate,
+          }),
+        )
+      : NO_FOLLOW;
+  /** 未命中：带上本帧**最强可用证据**（`data-board-evidence` / `data-follow-slope` 的值源） */
+  const noHit = (): AutoBoardResult => ({
+    ...NO_HIT,
+    streak: 0,
+    evidence: follow.ok ? "slope" : dep.length ? "station" : "none",
+    followSlope: follow.slope,
+    followWhy: follow.why,
+  });
+
+  /* ③ 硬门 G3：总开关 / 本腿剩余次数 / 冷却 */
+  if (!AUTO_BOARDING_ENABLED) return noHit();
+  const autoLeft = input.autoLeft ?? AUTO_TRIES_PER_LEG;
+  if (!(autoLeft > 0)) return noHit();
+  if (input.nowMs - input.lastSwitchTs < SWITCH_COOLDOWN_MS) return noHit();
+
+  /* ③ 硬门 G2：定位主导 ⇒ 没有足够可信帧就不判 */
   if (fixes.length < R2_STREAK_ALONE) return noHit();
 
   /* ── 轻轨：无逐车数据 ⇒ 仅 R2 收紧档（投影 ≤60m、速度 ≥12、≥3 帧、≥3 连续帧）── */
@@ -347,36 +460,44 @@ export function autoBoardOf(input: AutoBoardInput): AutoBoardResult {
       reason: "gps",
       streak: prevStreak + 1,
       need: R2_STREAK_ALONE,
+      evidence: "r2",
+      followSlope: null,
+      followWhy: follow.why,
     };
   }
 
-  /* ── 巴士：定位主导 + 车辆辅助降门槛 ── */
+  /* ── 巴士：定位主导 + 车辆辅助降门槛 + 跟车斜率 ── */
   const aux = auxOf(input.vehicles, input.boardMain, input.boardPos);
   const assisted = aux.strong || aux.weak;
   const opts = adaptiveOpts(fixes, R2_TOL_M);
   const displaceM = opts.displaceM * (assisted ? R1_ACCEL_DISPLACE_FACTOR : 1);
   const need = assisted ? R2_STREAK_WITH_VEHICLE : R2_STREAK_ALONE;
 
-  const hit = r2Of(fixes, input.colored, {
+  const hitR2 = r2Of(fixes, input.colored, {
     tolM: opts.tolM,
     displaceM,
     speedMinKmh: R2_SPEED_MIN_KMH_FLEX,
     minSamples: R2_STREAK_ALONE,
   });
-  if (!hit) return noHit();
-
   /**
-   * 车牌只在 **A1（车刚从本站开走）且唯一** 时锁定。
-   * ⚠️ A2（车正停靠在站）**不锁牌** —— 站里可能停着好几辆，锁错会让进度跟错站。
+   * ★ I1：斜率判据成立 ⇒ **车牌必然非空**（`followFramesOf` 没有 `plate` 就产不出样本，
+   *   `ok` 也就恒为 false）⇒ 「判定成功那一帧必然能锁牌」是**结构性**保证，不靠时序运气。
    */
-  const lockedPlate = aux.strong ? aux.plate : null;
+  const hitFollow = follow.ok && lock.plate != null;
+  if (!hitR2 && !hitFollow) return noHit();
+
   return {
     hit: true,
-    plate: lockedPlate,
-    source: lockedPlate ? "vehicle" : "gps",
-    reason: lockedPlate ? "gps+vehicle" : "gps",
+    // ★ I2：锁牌口径 = 三条件并集（不再是「只认刚离站」的一个站间窗口）
+    plate: lock.plate,
+    source: lock.plate ? "vehicle" : "gps",
+    reason: lock.plate ? "gps+vehicle" : "gps",
     streak: prevStreak + 1,
-    need,
+    /** 斜率判据自带「≥5 帧 / ≥10s 窗」+ 车已离站证据 ⇒ 不再额外要求 3 连帧 */
+    need: hitFollow ? R2_STREAK_WITH_VEHICLE : need,
+    evidence: hitFollow ? "slope" : "r2",
+    followSlope: follow.slope,
+    followWhy: follow.why,
   };
 }
 
