@@ -1,0 +1,360 @@
+# 导航优化迭代 · API 契约增量（OpenAPI 3.0 片段）
+#
+# 说明：全量 API 早已上线并稳定运行（约 40 个 route handler），本次**不重写全量契约**——
+#   只登记本迭代要动的**增量**。前后端以此片段为准；未在此处出现的端点/字段一律不得改动。
+# 版本：v1（路径前缀 /api/v1 尚未启用；现状为 /api/*，本迭代不引入版本前缀迁移，
+#   以免与「性能优化」目标混在一起。若将来要加 v1 前缀，属独立 ADR。）
+
+openapi: 3.0.3
+info:
+  title: M Map API · 导航优化迭代增量
+  version: 0.1.0-delta
+  description: 仅含本迭代新增/变更的字段与端点。未列出的端点保持现状不变。
+
+paths:
+  /api/route-vehicles:
+    get:
+      summary: 某线路某方向的在途车辆（本期**无字段变更**；progress.mileM 不采用，见文末说明）
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema: { type: string }
+          description: 线路码（如 MT1、26A）。轻轨为 LRT-<线名>，直接返回空数组。
+        - name: dir
+          in: query
+          required: true
+          schema: { type: string, enum: ["0", "1"] }
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string, enum: [bus, lrt] }
+        - name: progress
+          in: query
+          required: false
+          schema: { type: string, enum: ["1"] }
+          description: 传 1 时服务端补 progress（本期字段不变；mileM 不采用）
+      responses:
+        "200":
+          description: 成功（失败一律收敛为空数组，不 5xx）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: { type: string }
+                  dir: { type: string }
+                  kind: { type: string, enum: [bus, lrt] }
+                  fetchedAt: { type: string, format: date-time }
+                  color: { type: string, nullable: true }
+                  company: { type: string, nullable: true }
+                  lastBusPlate: { type: string, nullable: true }
+                  badCar:
+                    type: array
+                    items: { type: string }
+                  vehicles:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Vehicle"
+                  note: { type: string, nullable: true }
+        "400":
+          description: 缺 code 或 dir 非法
+
+  /api/nav/detail-body:
+    post:
+      summary: 路线详情弹窗体（本次计划拆分「本站台其他线路」实时报站，见 ADR C5）
+      description: |
+        现状：一次性返回 strips + otherRoutes + foldLive + legs。
+        C5 已拍板并实现：`fold` **可选，缺省 false**。
+          · 不传 / fold=false（缺省）—— **不查 DSAT**，foldLive 恒为空对象（首包快 ~3s）；
+          · fold=true（或 `?fold=1`）—— 才计算 foldLive，供折叠栏展开时按需取。
+        响应结构不变（foldLive 字段恒存在），老前端不崩。
+      parameters:
+        - name: fold
+          in: query
+          required: false
+          schema: { type: string, enum: ["0", "1"], default: "0" }
+          description: 与 body 的 `fold: boolean` 等价；任一为真即查 DSAT。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [card]
+              properties:
+                card:
+                  type: object
+                  description: 与 /api/nav 响应的 cards[] 元素同构（前端已持有，直接回传）
+                fold:
+                  type: boolean
+                  default: false
+                  description: 【本期新增】true = 计算 foldLive（查 DSAT）；缺省 false = 不查。
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  strips: { type: array, items: { type: object } }
+                  otherRoutes: { type: array, items: { type: string } }
+                  foldLive:
+                    type: object
+                    additionalProperties: { type: string }
+                    description: 线路码 -> 「还有 N 站 · 约 X 分钟」。fold 缺省（false）时恒为空对象；空对象 = **未查询**，不等于「没有班次」。
+                  stationLabel: { type: string, nullable: true }
+                  legs: { type: array, items: { type: object } }
+
+  /api/nav/remaining:
+    post:
+      summary: 导航中「只重算时间、不重新规划路线」（需求1 · 1-B′，★ 本期新增）
+      description: |
+        在当前这条推荐路线内重算剩余时间，并**整份**返回重算后的纵条 `strips`。
+        **不重新规划、不切换路线、不提示更快方案**（产品已拍板口径）。
+
+        口径（负责人原话）：「总时长不是从当前时间重新走一遍，而是减掉用户已经花的时间、
+        已经经过的路程，算的是从现在这个地方到达目的地所需时间。」
+        ⇒ 已发生的部分（出发步行 `walkOut`、当前腿已走的里程、当前腿的候车）一律不计入。
+
+        算法要点（实现见 `src/lib/nav/remaining.ts`）：
+          · 当前腿剩余 = `segRemainSec`；缺失则按 `nextIdx` 逐跳累加；再缺则取该段全量静态分钟。
+          · 下游各段乘车分钟 = `card.rides[i].minutes`（静态，不重估）。
+          · **下游各段候车 = 按「预计到达该换乘站的绝对时刻」查 `route_frequency` 重估**
+            （偏保守 `(lo + 2·hi)/3`；未命中取班距中位数；仍无则保留卡面原值）。
+          · 末段步行 = `card.walkIn.minutes`。
+          · `remainingMin` 一律 clamp 到 ≥ 0（绝不出现「-3 分」）。
+
+        ★ 成本红线：**0 次 DSAT、0 次高德**。只读已缓存的静态索引（`loadStatics` / `loadHeadway`）。
+          热路径单次计算为亚毫秒级；冷实例首调需加载静态索引，耗时**待部署后复测**。
+
+        ★ 为什么同时给三个时间字段（少一个都会退化成老问题）：
+          · `remainingMin` 是**相对快照**，命中服务端 2s 微缓存时会偏大 ⇒ 只可用于显示；
+          · `arriveAt` 是**绝对锚** ⇒ 倒计时以此为准，免疫网络往返与缓存陈旧；
+          · `serverNowMs` 供客户端算 `offsetMs = serverNowMs − Date.now()`，
+            即 `/api/station/eta` 的现成范式（该处注释记了「相对快照命中缓存时整体偏大」这个坑）。
+          · `recomputedAt` = 本次重算的基准时刻；命中微缓存时**早于** `serverNowMs`。
+
+        鉴权：公开只读，但 handler 内做**同源校验**（跨站或来源不明 ⇒ 403），
+          与 AC-50c 同款判据；**不使用**令牌桶（一次 DB 事务约 230ms，会把亚毫秒端点打穿）。
+        缓存：`cache-control: no-store`（服务端另有一层 2s 进程内微缓存，仅用于合并重复请求）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [card, legIndex]
+              properties:
+                card:
+                  type: object
+                  description: 与 /api/nav 响应的 cards[] 元素同构（前端已持有，直接回传）
+                legIndex:
+                  type: integer
+                  minimum: 0
+                  description: 当前所在载具段下标（`card.rides` 下标）；越界 ⇒ 400
+                segRemainSec:
+                  type: number
+                  nullable: true
+                  minimum: 0
+                  description: |
+                    本段区间剩余秒数（客户端 `track.segProgress.segRemainSec` =
+                    服务端位置模型 `progress.remainSecD` 与客户端时间项的融合值）。
+                    缺省/null ⇒ 回退逐跳累加（需 nextIdx）→ 再回退该段全量静态分钟。
+                nextIdx:
+                  type: integer
+                  nullable: true
+                  description: |
+                    本段「下一站」在站条里的下标（客户端 `track.prog.nextIdx`）。
+                    仅当 `segRemainSec` 缺失时用于「从下一站起累加 minToNext」的精确回退。
+                clientNowMs:
+                  type: number
+                  nullable: true
+                  description: 客户端时刻（epoch ms）——**仅用于日志诊断，不参与计算**（以服务端时钟为准）
+      responses:
+        "200":
+          description: 成功（`strips` 为整份替换用的产物）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemainingResponse"
+        "400":
+          description: 缺参 / `card.rides` 非法 / `legIndex` 越界 ⇒ `ok:false` + `error: bad_request`
+        "403":
+          description: 跨站或来源不明 ⇒ `ok:false` + `error: forbidden`
+        "500":
+          description: 静态索引装载失败 ⇒ `ok:false` + `error: upstream_error`（细节只进服务端日志）
+
+components:
+  schemas:
+    RemainingResponse:
+      type: object
+      description: |
+        `POST /api/nav/remaining` 的响应（需求1 · 1-B′）。
+        ⚠️ **刻意不下发 `patchedCard`**：它只用于服务端内部 `buildStrips` 整形；
+           前端若把它存回 state，会污染 `RecommendCard.tsx:143` 的
+           `rides.slice(1).reduce((s, r) => s + r.waitMin, 0)` 加总
+           （推荐列表卡与详情 pane 的数字会打架）。
+      required: [ok, remainingMin, arriveAt, recomputedAt, serverNowMs, strips]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        remainingMin:
+          type: number
+          minimum: 0
+          description: 剩余门到门分钟（服务端已 clamp 到 ≥0，**永不为负**）
+        arriveAt:
+          type: number
+          description: 预计到达时刻（epoch ms，**绝对锚 —— 倒计时以此为准**）
+        recomputedAt:
+          type: number
+          description: 本次重算的基准时刻（epoch ms；命中微缓存时 = 原重算时刻）
+        serverNowMs:
+          type: number
+          description: 服务端当前时刻（epoch ms；供客户端算时钟偏移）
+        strips:
+          type: array
+          items: { type: object }
+          description: |
+            重算后的纵向站条（`buildStrips(patchedCard)` 产物），**整份**替换前端现有那份。
+            其中 `rideMin` 已是「剩余」、`transferAfter.waitMin` 已按新到达时刻重估 ⇒
+            顶部倒计时与纵条数字同源同帧，不会「上面在动、下面冻住」。
+            结构同 `SegmentStrip`（见 `src/lib/recommend/types.ts`）。
+
+    VehicleProgress:
+      type: object
+      description: 区间进度（v3.4.0）。本期**保持原样**（mileM 不采用，理由见下方该字段说明）。
+      required: [p, remainSecD, mdSec, w, segFrom, segTo, segLenM]
+      properties:
+        p:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 区间内相对进度（0 = 刚离站，1 = 即将到站）
+        remainSecD:
+          type: number
+          description: 位置模型剩余秒数
+        mdSec:
+          type: number
+          description: 区间中位时长（秒）
+        w:
+          type: number
+          description: 融合权重
+        segFrom: { type: string, description: 区间起点站主码 }
+        segTo: { type: string, description: 区间终点站主码 }
+        segLenM: { type: number, description: 区间沿线路长度（米） }
+        mileM:
+          type: number
+          nullable: true
+          description: |
+            【本期不采用 —— 仅为将来其它消费方预留的形状说明，实现中**不存在**该字段】
+            若实现：车辆在**整条线路几何**上的绝对沿线里程（米，从**方向起点**算起）。
+            来源 = `projectMile(route_shapes.polyline, [lng,lat])`。
+
+            **不采用的理由（口径，勿改成"做不到"）**：
+            现有 `leg.colored` 轴插值已自洽（`p` 是区间内比值、与里程原点无关），
+            引入第二套原点只会增加对齐风险：`projectMile(shape)` 的原点是**线路方向起点**，
+            而客户端 `buildLrtLadder(leg.colored)` 的原点是**上车站** ⇒ 两者直接相减恒差
+            「上车站到方向起点的里程」，属沉默算错。
+            此字段与车辆匹配算法**无关**；若将来引入，必须同时下发
+            「上车站在 direction 轴上的里程偏移」才可比。
+
+    Vehicle:
+      type: object
+      required: [plate, lat, lng, status, isLast, interval, atStation]
+      properties:
+        plate: { type: string }
+        busCode: { type: string, description: 车队编号；取不到时该键整体不出现 }
+        busType: { type: string, nullable: true }
+        lat: { type: number, description: "GCJ-02 纬度（服务端已从 WGS84 转好）" }
+        lng: { type: number, description: "GCJ-02 经度" }
+        status:
+          type: string
+          enum: [moving, stopping, terminal, unknown]
+        isLast: { type: boolean }
+        interval:
+          type: object
+          nullable: true
+          required: [from, to]
+          properties:
+            from: { $ref: "#/components/schemas/StopRef" }
+            to: { $ref: "#/components/schemas/StopRef" }
+        atStation:
+          allOf:
+            - $ref: "#/components/schemas/StopRef"
+          nullable: true
+        progress:
+          allOf:
+            - $ref: "#/components/schemas/VehicleProgress"
+          nullable: true
+
+    StopRef:
+      type: object
+      required: [code, name]
+      properties:
+        code: { type: string, description: 站主码（已剥站台后缀） }
+        name: { type: string }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 客户端纯函数契约（不放 OpenAPI，登记在此以便前后端与测试对齐）
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# 新增模块：src/lib/nav/match-vehicle.ts （client-safe 纯函数，禁 import pg）
+#   配套：match-params.ts（参数与类型）、match-mile.ts（里程轴工具）、match-score.ts（单车打分）
+#
+# ⚠️ 总开关：MATCH_VEHICLE_ENABLED = false（默认关；可用 input.enabled 覆盖做灰度）
+#    关时 matchVehicle 恒返回 { plate: null, confidence: "low", reasons: ["switch:disabled"] }
+#
+# export interface MatchInput {
+#   colored: LL[];                       // 本段乘车折线（GCJ-02），colored[0] = 上车站
+#   ladder: LrtLadder;                   // buildLrtLadder(colored, stops) 的结果
+#   dUser: number | null;                // 用户沿线里程（advanceLrt 的 distNow）；null = 不可信
+#   userSpeedKmh: number | null;         // 用户沿线速度（Slope of dU）
+#   vehicles: TrackVehicle[];            // 该线路该方向**全部在途车**（不过滤 passedBoardOf）
+#   excludedPlates: string[];            // 「不是这辆」累积排除
+#   nowMs: number;
+#   // ↓ 以下均为可选；缺省即相应能力降级（**stopMains 缺省会直接不判**）
+#   stopMains?: string[];                // 与 ladder.ladder 下标对齐的站主码（progress 靠它锚里程）
+#   userAccuracyM?: number;              // 定位精度，决定 σ_p = max(60, 1.5×acc)
+#   userHistory?: MileSample[];          // 90s 用户里程帧（逐帧比对与 SPRT 累积）
+#   vehicleHistory?: Record<string, MileSample[]>;  // 车牌→里程帧（S4 冷启动判据）
+#   enabled?: boolean;                   // 覆盖总开关（单测 / 灰度）
+# }
+#
+# export interface MatchResult {
+#   plate: string | null;                // 高/中置信时为锁定车牌，低置信为 null
+#   confidence: "high" | "medium" | "low";
+#   score: number;                       // 0..1（加权均分，未参与项按比例回填权重）
+#                                        //   ⚠️ confidence==="low" 时恒 0
+#   margin: number;                      // score_1 - score_2（单辆时 = score_1）
+#                                        //   ⚠️ confidence==="low" 时恒 0
+#   poolSize: number;                    // 可打分候选数（验收用：必须 > 0 才可能锁定）
+#   logL: number;                        // 逐帧对数似然比之和（nats）
+#                                        //   ⚠️ confidence==="low" 时恒 0
+#   frames: number;                      // 参与比对的对齐帧数
+#                                        //   ⚠️ confidence==="low" 时恒 0（契约，非实现巧合）
+#
+#   ★ 归零契约（四个字段共用，勿删）：low 分支把 score/margin/logL/frames **全部写成 0**。
+#     原因：若 low 时回带真实数值，下游会把「1 帧」当成「有 1 帧证据可用」反推可信度
+#     （实际是被帧数门拦下的）。代价是**不能用返回值反推单帧内部分数** ——
+#     要看内部分数请直接调 `scoreVehicle`（`match-score.ts`），它不归零。
+#     判断「有没有结论」请用 `confidence`，**不要**用 `score > 0`。
+#   reasons: string[];                   // 逐项判负原因（"s3:direction" / "gate:frames" / "skip:no-mile:AB1234"）
+#   evidence: { key: "s1"|"s2"|"s3"|"s4"|"s5"; value: number; weight: number }[];
+#   ranking: { plate: string; score: number; logL: number; frames: number; dM: number }[];
+# }
+#
+# export function matchVehicle(input: MatchInput): MatchResult;
+#
+# 置信度分级（阈值见 match-params.ts）：
+#   high   = logL ≥ 3.0 ∧ score ≥ 0.75 ∧ margin ≥ 0.20 ∧ frames ≥ 3 ∧ 未发散
+#   medium = logL ≥ 1.0 ∧ score ≥ 0.60 ∧ frames ≥ 2   ⇒ 锁定但**只允许标注「车牌待确认」**，
+#            调用方**不得**据此报站读数值（一旦锁牌 progressSource 会变 vehicle）
+#   low    = 其余 ⇒ plate 恒 null
+#
+# 不变量（写进测试断言）：
+#   1. poolSize === 0 ⇒ confidence === "low" 且 plate === null（绝不猜）
+#   2. excludedPlates 命中当前 plate ⇒ 结果不得再返回同一 plate
+#   3. dUser === null ⇒ confidence === "low"（无用户锚不判）
+#   4. 同一输入两次调用结果完全一致（纯函数、无 Date.now() 内部取时）
