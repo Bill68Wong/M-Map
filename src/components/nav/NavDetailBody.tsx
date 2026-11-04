@@ -520,6 +520,17 @@ export default function NavDetailBody({
         正常不会打架；万一将来 Context 的下发时序变了，也不会把乘车态渲染成候车态。
      ⚠️ 不要在这里用 `ride.phase === "boarding"` 判「已到站」，那正是历史缺陷 #1 的成因
         （「步行去车站」一路上 `ride.phase` 已经是 `boarding`）。
+
+     ── ⚠️ 显式待办：**换乘候车期（第二程 boarding）不渲染信息行**───────────
+       现象：下第一程车、在换乘站台等第二程时（锁存已置位 + `phase === "boarding"`），
+             本行整块消失。**这是 v3.11 的刻意取舍，不是漏做**，别当缺陷"修"回去。
+       ① 为什么不能直接复用 `pre` 行：`pre` 行的左槽硬绑 `card.rides[0]`，
+          换乘期拿它会显示**第一程**的等车 ETA —— 那是错数据，宁可不显示
+          （底栏「等待上车 · 站名」与纵条仍在，不是死路）。
+       ② 要支持需要：把 `pre` 行改成按 `legIdx` 取 `card.rides[legIdx]`，
+          并把上车站名同步成 `card.rides[legIdx]` 对应的那一站（现在写死第一程）。
+       ③ 另一个前置条件：U2 规定赶车标签「进入 riding 起至本次导航结束前永不复活」，
+          所以换乘期的 `pre` 行**必须**继续受 `showTag` 约束（只补数据，别顺手把标签放回来）。
      ══════════════════════════════════════════════════════════════════════ */
   const hasEnteredRiding = useContext(CatchTagLatchContext);
   const riding = track?.phase === "riding";
