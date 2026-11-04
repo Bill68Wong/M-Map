@@ -50,7 +50,7 @@ console.log("── ① ridingRealOf 判据表 ──");
   );
   ok(
     ridingRealOf({ phase: "riding", entry: "manual", posEvidence: false }) === true,
-    "手动「我已上车」（manual）⇒ true（用户本人断言，视同证据充分）",
+    "手动「我已上车」（manual）⇒ true（人工声明短路，非位置证据）",
   );
 
   ok(
