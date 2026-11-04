@@ -103,6 +103,64 @@ export function progressOf(stopMains: string[], v: TrackVehicle | null): TrackPr
   return { kind: "unknown", passedIdx: -1, atIdx: null, nextIdx: null };
 }
 
+/* ══════════════ 剩余时间口径：**基准站**（U3 · 本批新增） ══════════════
+ *
+ * ── 背景：一次「口径断裂」而非速度假设错误 ─────────────────────────────
+ *   客户端上行的 `segProgress.segRemainSec` 是**到下一站**的剩余
+ *   （位置模型 `md × h[1−p]`，`progress.ts:237`，`md` 取相邻站对中位时长），
+ *   **不是**「到本段下车站」的整段剩余。下游若把它当整段用，就少算了
+ *   「下一站之后到下车点」的那几跳 ⇒ 车辆从「站间行驶」切到「进站停靠」时，
+ *   载体从「首跳剩余」换成「逐跳累加」，数字会整段**突变**。
+ *   ⇒ 剩余必须先定义「以哪一站为基准」，两侧（客户端 / 服务端）用**同一条规则**。
+ */
+
+/**
+ * **基准站**（pivot）下标 = 剩余时间计算的起算点。纯函数，可单测。
+ *
+ * 规则（只有两条，不接受第三种解释）：
+ *   · `kind === "at"`（车停靠在本段某站）⇒ 基准站 = **所停站 `atIdx`**。
+ *     ⚠️ **不是 `atIdx + 1`**：`progressOf` 在停靠态给出的 `nextIdx` 是
+ *     「所停站的**下一站**」（见下方 `progressOf` ① 分支）。从那里起累加会
+ *     **整跳漏掉「所停站 → 下一站」** —— 车停在 C 站，实际还要 C→D + D→E，
+ *     从 D 起算就少算了 C→D（典型 3 分钟）。
+ *   · `kind === "between"`（车在区间内）⇒ 基准站 = `nextIdx`（区间终点站），
+ *     因为 `segRemainSec` 正是「到该站」的剩余。
+ *   · `unknown` / `lost` ⇒ `null` —— 数据对不上本段站序时**如实返回 null**，
+ *     由调用方降级（宁可用整段静态分钟，也不猜一个位置）。
+ */
+export function remainFromIdxOf(prog: TrackProgress | null | undefined): number | null {
+  if (!prog || prog.kind === "lost" || prog.kind === "unknown") return null;
+  // 兜底 `passedIdx + 1`：停靠态等于 `atIdx`、行驶态等于区间起点 + 1（都与上面两条同义）
+  const raw = prog.kind === "at" ? (prog.atIdx ?? prog.passedIdx + 1) : (prog.nextIdx ?? prog.passedIdx + 1);
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
+}
+
+/**
+ * 本帧「到基准站」的剩余秒数 = 上行 `/api/nav/remaining` 的 `segRemainSec`。
+ *
+ * ① 车辆帧**显式**停靠在本段某站（`atStation` 存在且 `status === "stopping"`）⇒ 返回 `0`；
+ * ② 否则有位置模型融合值（`RideSegProgress.segRemainSec`）⇒ 原样返回；
+ * ③ 都没有 ⇒ `null`（下游回退「从基准站逐跳累加」）。
+ *
+ * ⚠️ **不得**用「`progress` 字段缺失」推断停靠：`attachProgress` 只给 `status === "moving"`
+ *   的车挂 `progress`（`progress.ts:201`），而 `progress` 缺失同时覆盖
+ *   「车停靠」「车数据丢了」「几何/里程表缺行」三种完全不同的情况。
+ *   拿缺失当停靠 ⇒ 把「丢车」也说成「到站」，剩余被**静默**算成 0（用户看不出错）。
+ *   ⇒ 停靠信号只认车辆帧的显式字段，由调用方在本帧上下文里算好传进来。
+ */
+export function segRemainSecOf(
+  /** 本帧是否**明确**停靠在本段站：`!!v.atStation?.code && v.status === "stopping"` */
+  stoppedAtStation: boolean,
+  /** 客户端融合后的「到下一站」剩余秒（`RideSegProgress.segRemainSec`） */
+  fusedSec: number | null | undefined,
+): number | null {
+  if (stoppedAtStation) return 0;
+  if (fusedSec === null || fusedSec === undefined) return null;
+  const n = Number(fusedSec);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 /**
  * ★ v3.6.1（需求 7 · 追踪补漏）：**候车锚**——`start()` 时记下首帧排序第一名的身份与位置。
  *

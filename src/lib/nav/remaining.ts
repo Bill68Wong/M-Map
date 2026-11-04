@@ -14,10 +14,24 @@
  * ── 三段时间的来源（这是本模块存在的理由）──────────────────────────────
  *   | 段 | 取法 | 为什么 |
  *   |---|---|---|
- *   | 当前腿剩余 | `segRemainSec`（客户端位置模型融合值）→ 无值则逐跳累加 → 再退全段静态分钟 | 只有客户端知道用户在这段的哪里 |
+ *   | 当前腿剩余 | `segRemainSec`（到**基准站**的首跳剩余）+ 基准站之后逐跳 → 无 `segRemainSec` 则逐跳累加 → 再退全段静态分钟 | 只有客户端知道用户在这段的哪里 |
  *   | 下游乘车 | `card.rides[i].minutes`（静态） | `rideOfHops` 是纯查表，与实时无关 |
  *   | **下游候车** | `headwayAt(headway, route, 预计到达该换乘站时刻)` **重估** | **本模块的核心价值**：客户端拿不到 `HeadwayIndex`（`loadHeadway` 需要 `Pool`） |
  *   | 末段步行 | `card.walkIn.minutes`（静态） | 已冻在卡里 |
+ *
+ * ── ★ 口径（U3 修正，改动前必读）──────────────────────────────────────
+ *   `segRemainSec` 是**到下一站（基准站）的首跳剩余**，**不是**整段乘车剩余
+ *   （来源 `md × h[1−p]`，`md` = 相邻站对中位时长，见 `progress.ts:237`）。整段剩余必须再叠加
+ *   「基准站之后到下车点」的逐跳：
+ *   ```
+ *   pivotIdx  = prog.kind === "at" ? prog.atIdx : prog.nextIdx   // track.ts#remainFromIdxOf
+ *   legRemain = segRemainSec / 60 + hopMinutesFrom(ctx, ride, pivotIdx)
+ *   ```
+ *   **基准站**由客户端按同一条规则算好、经 `nextIdx` 上行（字段名不变，语义 = 基准站下标）。
+ *   停靠态必须把 `segRemainSec` 显式传 `0`（`track.ts#segRemainSecOf`），
+ *   **不得**用「`progress` 字段缺失」推断停靠 —— 那只是「车丢了」。
+ *   旧实现直接拿 `segRemainSec/60` 当整段用 ⇒ 车辆从「站间行驶」切到「进站停靠」时，
+ *   载体从「首跳剩余」换成「逐跳累加」，剩余时间整段突变（U3）。
  *
  * ── 红线（硬约束，不是优化建议）──────────────────────────────────────
  *   **0 次 DSAT、0 次高德。** 本模块不 import 任何 `@/lib/dsat/*` / `@/lib/amap/*` 的调用型模块，
@@ -27,36 +41,24 @@
  *   静默计时器主流程 30 分钟（`dsat/client.ts:93`）。
  *
  * ── 为什么输出「patchedCard」而不是「改 buildStrips」────────────────────
- *   `buildStrips` 的四个时间字段全部取自「card 或静态桶」：
- *     `rideMin` ← `ride.minutes`（`strips.ts:134`）· `rideSecText` ← `ride.rideSecText`（`:136`）
- *     `transferAfter.waitMin` ← `t.waitMin`（`:118`）· `minToNext` ← `lookupHop(..., nowBucket)`（`:74`）
- *   ⇒ 只要喂一份「时间已重估」的 card，站条自动整形，`strips.ts` **一行不改**。
- *   （`buildStrips` 只读 `ctx` 三处且函数体内无时间源 ⇒ 确定性纯函数，此结论结构上成立。）
+ *   `buildStrips` 的四个时间字段全部取自「card 或静态桶」：`rideMin` ← `ride.minutes`（`strips.ts:134`）、
+ *   `rideSecText` ← `ride.rideSecText`（`:136`）、`transferAfter.waitMin` ← `t.waitMin`（`:118`）、
+ *   `minToNext` ← `lookupHop(..., nowBucket)`（`:74`）⇒ 只要喂一份「时间已重估」的 card，
+ *   站条自动整形，`strips.ts` **一行不改**（`buildStrips` 函数体内无时间源 ⇒ 确定性纯函数）。
  *
- * ⚠️ **`patchedCard` 只在本模块与服务端内部流转，绝不下发给客户端。**
- *   前端若把它存回 state，会污染 `RecommendCard.tsx:143` 的
- *   `rides.slice(1).reduce((s, r) => s + r.waitMin, 0)` 加总（推荐列表卡与详情 pane 会打架）。
+ * ⚠️ **`patchedCard` 只在服务端内部流转，绝不下发**：前端存回 state 会污染
+ *   `RecommendCard.tsx:143` 的 `rides.slice(1).reduce((s, r) => s + r.waitMin, 0)` 加总。
  *
  * ── 已知边界（实现/接入时必读，不要当成 bug 去「修」）──────────────────
  *   ① ★ **本模块假设用户已上车**（`boarding` 相位不要调用本端点）。
- *
- *      **为什么**：`rides[legIndex].waitMin` 被视为**已发生**、不计入剩余（时间轴从
- *      `legIndex+1` 段起算，见 `recomputeRemaining` 的循环）。boarding 时该段候车**还没花掉**
- *      ⇒ 调了会**漏算当前候车**（典型 3~9 分钟），剩余偏短（乐观）。
- *
- *      **boarding 期怎么算**：不调本端点，直接用原卡的 `totalMin` / `arriveAt` ——
- *      那张卡是在用户还站在站台时算的，行程一分钟都没消耗 ⇒ **它在数学上就等于真实剩余**，
- *      不是"将就"，是"没必要重算"。
- *
- *      ⚠️ **已知残余偏差（不是本端点能修的）**：若规划的那班车已过、用户仍在等车，
- *      原卡快照会**偏乐观（偏小）**。正确做法需服务端支持「未上车」时间轴 ——
- *      入参加 `phase` / `boarded`，候车按 `nowMs` 的 `headwayAt` 重估。
- *      这属**契约扩展，独立批次**，不在本模块范围内。**不要**在这里偷偷用
- *      `segRemainSec == null` 之类的信号去猜「是否已上车」—— 猜错不会有报错，
- *      只会静默给错数字。
- *
- *      （此边界由 UI 侧与算法侧**两处**同时登记：前端 `useNavRemaining` 的 `enabled`
- *        收窄为 `phase === "riding"`；本处为算法侧声明。缺任一边都会有人试着重开这个口子。）
+ *      **为什么**：`rides[legIndex].waitMin` 被视为**已发生**、不计入剩余（时间轴从 `legIndex+1`
+ *      段起算）。boarding 时该段候车**还没花掉** ⇒ 调了会漏算当前候车（典型 3~9 分），剩余偏短。
+ *      **boarding 期怎么算**：不调本端点，直接用原卡的 `totalMin` / `arriveAt` —— 那张卡是在
+ *      用户还站在站台时算的，行程一分钟都没消耗 ⇒ 它在数学上就等于真实剩余。
+ *      ⚠️ 已知残余偏差：若规划的那班车已过、用户仍在等车，原卡快照会偏乐观（偏小）。
+ *      正解需入参加 `phase`/`boarded` 并重估候车（**契约扩展，独立批次**）。
+ *      **不要**在这里用 `segRemainSec == null` 去猜「是否已上车」—— 猜错不会有报错，只会静默给错数。
+ *      （此边界由 UI 侧 `useNavRemaining` 的 `enabled = phase === "riding"` 与本处**两处**同时登记。）
  *   ② **轻轨段候车不重估**（`source:"kept"`）：轻轨候车来自 `lrt_timetables`（需 `LrtPreload`），
  *      本模块刻意不接受该依赖 ⇒ 保留卡面原值。这是**刻意的边界**，不是遗漏。
  *   ③ **站条不裁剪**：`patchedCard` 只改 `minutes`/`waitMin`，不改 `stops[]` ⇒
@@ -91,14 +93,18 @@ export interface RemainingInput {
   /** 当前所在载具段下标（`card.rides` 下标） */
   legIndex: number;
   /**
-   * 本段区间剩余秒数（客户端 `track.segProgress.segRemainSec` = 服务端位置模型 + 客户端时间项融合值）。
-   * `null`/缺省 ⇒ 回退到逐跳累加（需 `nextIdx`）→ 再回退到该段全量静态分钟。
+   * 本段**到基准站**的首跳剩余秒数（客户端 `track.segProgress.segRemainSec` =
+   * 服务端位置模型 + 客户端时间项融合值）。
+   * 必须与 `nextIdx` **成对**上行：单独出现时只说明「到某一站的剩余」，
+   * 基准站未知 ⇒ 回落该段全量静态分钟（保守偏长，**不双计**）。
+   * 停靠态客户端应显式传 `0`（不是 `null`）。
    */
   segRemainSec?: number | null;
   /**
-   * 本段「下一站」在站条里的下标（客户端 `track.prog.nextIdx`）。
-   * 仅当 `segRemainSec` 缺失时用于「从下一站起累加 `minToNext`」的精确回退；
-   * 缺省 ⇒ 从本段首站起累加（= 该段全量静态分钟），语义最保守。
+   * **基准站**下标（客户端 `track.ts#remainFromIdxOf(track.prog)`）。
+   * 停靠态 = 所停站 `atIdx`（**不是** `prog.nextIdx`，那个指向所停站的下一站，
+   * 从那里起累加会整跳漏掉「所停站 → 下一站」）；行驶态 = `prog.nextIdx`（区间终点）。
+   * 仅用于「从基准站起累加 `minToNext`」；缺省 ⇒ 站序精确回退不可用，回落该段静态分钟。
    */
   nextIdx?: number | null;
   /** 重算基准时刻（缺省 `Date.now()`；测试可注入） */
@@ -128,12 +134,9 @@ const numOr0 = (v: unknown): number => {
 };
 
 /**
- * 该段「从第 `fromIdx` 站起」的剩余逐跳分钟。
- *
- * 与前端 `NavDetailBody.tsx:162-166` 的回退口径**逐字对应**：
- *   `for (k = nextIdx; k < stops.length - 1; k++) sum += stops[k].minToNext`
+ * 该段「从第 `fromIdx` 站起」到下车点的剩余逐跳分钟。
+ * 与前端 `NavDetailBody.tsx` 的回退口径逐字对应（`for k = nextIdx; k < stops.length-1; sum += minToNext`）；
  * 站序由 `segmentsOf` 切出「上车站 → 下车站」的切片（与 `buildStrips` 同一个切法，见 `strips.ts:61-68`）。
- *
  * @returns `null` = 站序缺失（调用方回退到 `ride.minutes`）
  */
 function hopMinutesFrom(
@@ -155,20 +158,15 @@ function hopMinutesFrom(
 }
 
 /**
- * 按「预计到达该换乘站的绝对时刻」重估候车。
- *
- * 三档取值（与 `model.ts` 的巴士第 2 段取值同源，见 `headway.ts#conservativeWaitMin`）：
+ * 按「预计到达该换乘站的绝对时刻」重估候车。三档（与 `model.ts` 巴士第 2 段同源）：
  *   ① `headwayAt` 命中时段行 → `(lo + 2·hi)/3`（偏保守，约 P67）
  *   ② 未命中但中位数可用   → 该线全时段班距中位数
  *   ③ 连中位数都没有       → **保留卡面原值**（`source:"kept"`）
  *
  * ⚠️ 档 ③ 为什么**不像 `model.ts` 那样归零**：`model.ts` 归零的同时会改写文案
- *   「等车时间暂无数据」把不确定性显式暴露给用户；本模块无文案通道，
- *   若也归零就等于**凭空把剩余时间变短**（乐观偏差，且用户看不出来）。
- *   ⇒ 宁取卡面原值（保守），并让 `source:"kept"` 可被测试与日志看见。
- *
- * ⚠️ 轻轨段一律 `kept`：轻轨候车来自 `lrt_timetables`（`lrtPre`），
- *   本模块不接受 `LrtPreload` ⇒ 不重估。这是**已知边界**，不是遗漏（见报告 §剩余风险）。
+ *   「等车时间暂无数据」把不确定性显式暴露；本模块无文案通道，归零等于**凭空把剩余变短**
+ *   （乐观偏差，用户看不出来）⇒ 宁取卡面原值，并让 `source:"kept"` 可被测试与日志看见。
+ * ⚠️ 轻轨段一律 `kept`（候车来自 `lrt_timetables`，本模块刻意不接受 `LrtPreload`）：**已知边界**。
  */
 function reestimateWait(
   ctx: RemainingCtx,
@@ -224,20 +222,29 @@ export function recomputeRemaining(ctx: RemainingCtx, input: RemainingInput): Re
   const legIndex = Math.max(0, Math.min(Math.trunc(numOr0(input.legIndex)), lastIdx));
   const curRide = rides[legIndex]!;
 
-  // ── ① 当前腿剩余 ──
+  // ── ① 当前腿剩余（**唯一口径**：到基准站的首跳剩余 + 基准站之后逐跳，见 `track.ts#remainFromIdxOf`）──
   const segSecRaw = input.segRemainSec;
   const hasSegSec =
     segSecRaw !== null && segSecRaw !== undefined && Number.isFinite(Number(segSecRaw)) && Number(segSecRaw) >= 0;
+  const nextIdxRaw = input.nextIdx;
+  const pivotIdx =
+    nextIdxRaw !== null && nextIdxRaw !== undefined && Number.isFinite(Number(nextIdxRaw))
+      ? Math.trunc(Number(nextIdxRaw))
+      : null;
+  /** 基准站之后到下车点的逐跳分钟；`null` = 站序缺失（无从累加） */
+  const tailMin = pivotIdx === null ? null : hopMinutesFrom(ctx, curRide, pivotIdx);
+  const legStaticMin = Math.max(0, numOr0(curRide.minutes));
 
   let curRemainMin: number;
-  if (hasSegSec) {
-    curRemainMin = Number(segSecRaw) / 60;
+  if (hasSegSec && tailMin !== null) {
+    curRemainMin = Number(segSecRaw) / 60 + tailMin;
+  } else if (tailMin !== null && !hasSegSec) {
+    curRemainMin = tailMin;
   } else {
-    const nextIdxRaw = input.nextIdx;
-    const hasNextIdx =
-      nextIdxRaw !== null && nextIdxRaw !== undefined && Number.isFinite(Number(nextIdxRaw));
-    const hopSum = hasNextIdx ? hopMinutesFrom(ctx, curRide, Number(nextIdxRaw)) : null;
-    curRemainMin = hopSum !== null ? hopSum : Math.max(0, numOr0(curRide.minutes));
+    // ⚠️ 只有 `segRemainSec`（基准站未知）时**不得**回落 `segRemainSec/60`：
+    //   它只覆盖到基准站那一跳，拿它当整段会**少算下游跳**（U3 的根因本体）。
+    //   ⇒ 回落该段全量静态分钟（偏长不多算，用户早到不会被骗）。
+    curRemainMin = legStaticMin;
   }
   curRemainMin = Math.max(0, numOr0(curRemainMin));
 

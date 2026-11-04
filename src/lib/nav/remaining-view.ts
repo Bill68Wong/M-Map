@@ -125,6 +125,65 @@ export function remainServedOf(input: ServedRemainInput): RemainView {
   };
 }
 
+/* ══════════════ 「到本段下车站还有几分钟」的唯一口径（U3 · 本批新增） ══════════════
+ *
+ * ── 为什么必须收敛到一处 ───────────────────────────────────────────────
+ *   `segProgress.segRemainSec` 是**到下一站（基准站）**的剩余，不是整段剩余
+ *   （见 `track.ts#remainFromIdxOf` 的口径说明）。旧实现「有它就返回 `seg/60`、
+ *   没有才逐跳累加」⇒ 同一行程里两种口径来回切：站间行驶时少算了基准站之后的几跳，
+ *   一进站停靠又换成完整逐跳和 ⇒ 数字在切换瞬间整段上涨。
+ *   ⇒ 服务端（`remaining.ts` 的当前腿剩余）与本函数**必须同式**，否则顶部与竖条会打架。
+ *
+ * ── 与服务端逐字对应 ───────────────────────────────────────────────────
+ *   ```
+ *   legRemain = segRemainSec / 60 + Σ minToNext[pivotIdx .. 倒数第二站]
+ *   ```
+ *   逐跳项来自 `strips[legIdx].stops[k].minToNext`（`lookupHop` 产物，与服务端同一个源）。
+ */
+export interface LegRemainInput {
+  /** 客户端位置模型融合值（`RideSegProgress.segRemainSec`）；`null` = 无位置模型 */
+  segRemainSec: number | null;
+  /** 基准站下标（`track.ts#remainFromIdxOf(prog)`）；`null` = 无进度 */
+  pivotIdx: number | null;
+  /** 本段站条逐跳分钟（末站没有 `minToNext`，传 `0` 或不传即可） */
+  minToNext: number[];
+  /** 本段静态分钟（`card.rides[legIdx].minutes`）—— 契约不成立时的保守回退 */
+  legMinutes: number;
+}
+
+const numOr0 = (v: unknown): number => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+
+/** 从 `fromIdx` 站起累加到末站（越界由 clamp 兜住，与服务端 `hopMinutesFrom` 同法） */
+function tailMinutesOf(minToNext: number[], fromIdx: number): number {
+  const last = minToNext.length - 1;
+  const start = Math.max(0, Math.min(Math.trunc(fromIdx), Math.max(0, last)));
+  let sum = 0;
+  for (let k = start; k < last; k++) sum += Math.max(0, numOr0(minToNext[k]));
+  return sum;
+}
+
+/**
+ * 当前乘车段的剩余分钟（**已 clamp ≥0**）。三档与 `remaining.ts` 逐条对应：
+ *   ① `segRemainSec` 与 `pivotIdx` 成对 ⇒ 首跳剩余 + 基准站之后逐跳（精确）
+ *   ② 只有 `segRemainSec`（基准站未知）⇒ 该段**全量静态分钟**（保守偏长，**不双计**）
+ *   ③ 只有 `pivotIdx` ⇒ 从基准站逐跳累加；两者都没有 ⇒ 全量静态分钟
+ */
+export function legRemainMinOf(input: LegRemainInput): number {
+  const seg = input.segRemainSec;
+  const hasSeg = seg !== null && seg !== undefined && Number.isFinite(Number(seg)) && Number(seg) >= 0;
+  const pivot = input.pivotIdx;
+  const hasPivot = pivot !== null && pivot !== undefined && Number.isFinite(Number(pivot));
+  const legMin = Math.max(0, numOr0(input.legMinutes));
+
+  if (hasSeg && hasPivot) return Math.max(0, Number(seg) / 60 + tailMinutesOf(input.minToNext, Number(pivot)));
+  if (hasSeg) return legMin; // 只有首跳剩余 ⇒ 基准站不明，宁可整段（偏长也不双计）
+  if (hasPivot) return Math.max(0, tailMinutesOf(input.minToNext, Number(pivot)));
+  return legMin;
+}
+
 /** 全程剩余归零时的替代文案（替代「0 分」，避免与到站提醒混淆） */
 export const REMAIN_ARRIVED_TEXT = "即将到达";
 

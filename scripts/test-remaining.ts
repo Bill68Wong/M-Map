@@ -25,6 +25,9 @@
  *   ⑧ 单段卡：不传 `headway`（null）也不崩，只算「当前腿 + 末段步行」
  *   ⑨ `legIndex` 越界被夹取（防御）
  *   ⑩ 末段下车后立即到达：`legIndex` = 最后一段时不看 transfers
+ *   ⑭ 基准站规则 `remainFromIdxOf` / `segRemainSecOf`（U3：停靠态基准站 = 所停站；停靠显式给 0）
+ *   ⑮ 连续刷新：站间行驶 ↔ 进站停靠 切换不得跳变（单调性 / 恒等式 / B-1·B-2·B-3 / 到达锚上界）
+ *   ⑯ 真实索引联调（连库；不可达则跳过）
  */
 import { buildSegmentIndex, rideOfHops } from "../src/lib/recommend/segment-lookup";
 import { segmentsOf } from "../src/lib/recommend/enumerate";
@@ -40,6 +43,8 @@ import type {
 } from "../src/lib/recommend/types";
 import { recomputeRemaining, type RemainingCtx } from "../src/lib/nav/remaining";
 import { buildStrips } from "../src/lib/nav/strips";
+import { progressOf, remainFromIdxOf, segRemainSecOf, type TrackVehicle } from "../src/lib/nav/track";
+import { PROGRESS_H, PROGRESS_W } from "../src/lib/nav/progress-params";
 
 /* ══════════════════════ 断言工具 ══════════════════════ */
 
@@ -238,15 +243,16 @@ const ctxNoHeadway: RemainingCtx = { ...ctx, headway: null };
 
 console.log("═══ 剩余时间重算 · 纯函数回归（全离线，不连库）═══\n");
 
-/* ── ① 有 segRemainSec ── */
-console.log("① 当前腿有 segRemainSec");
+/* ── ① 有 segRemainSec（**与 nextIdx 成对**：首跳剩余 + 基准站之后逐跳）── */
+console.log("① 当前腿有 segRemainSec（+ nextIdx 成对）");
 {
   const card = mkTwoLegCard(BASE_MS);
-  const r = recomputeRemaining(ctx, { card, legIndex: 0, segRemainSec: 120, nowMs: BASE_MS });
-  // 剩余 = 2（本段剩余）+ 2（换乘步行）+ 8.7（B2 候车重估）+ 8（B2 乘车）+ 2（末段步行）= 22.7
-  ok(r.remainingMin === 22.7, "remainingMin = 22.7（2 + 2 + 8.7 + 8 + 2）", `实际 ${r.remainingMin}`);
-  ok(r.patchedCard.rides[0]!.minutes === 2, "patchedCard 当前腿 minutes 改为剩余 2", `实际 ${r.patchedCard.rides[0]!.minutes}`);
-  ok(r.arriveAtMs === BASE_MS + Math.round(22.7 * 60_000), "arriveAtMs = nowMs + remainingMin×60000");
+  const r = recomputeRemaining(ctx, { card, legIndex: 0, segRemainSec: 120, nextIdx: 1, nowMs: BASE_MS });
+  // 剩余 = 6（本段：首跳 2 + 基准站 A2 之后一跳 4）+ 2（换乘步行）+ 8.7（B2 候车重估）+ 8（B2 乘车）+ 2（末段步行）= 26.7
+  //  ⚠️ 旧期望 22.7 是**少算了下游跳**的旧口径（把首跳剩余当整段剩余）；U3 修正后必须 26.7
+  ok(r.remainingMin === 26.7, "remainingMin = 26.7（6 + 2 + 8.7 + 8 + 2）", `实际 ${r.remainingMin}`);
+  ok(r.patchedCard.rides[0]!.minutes === 6, "patchedCard 当前腿 minutes = 2 + 4 = 6（首跳剩余 + 基准站之后逐跳）", `实际 ${r.patchedCard.rides[0]!.minutes}`);
+  ok(r.arriveAtMs === BASE_MS + Math.round(26.7 * 60_000), "arriveAtMs = nowMs + remainingMin×60000");
   ok(r.retimedWaits.length === 1 && r.retimedWaits[0]!.source === "headway", "候车重估走 headway 档", JSON.stringify(r.retimedWaits));
 }
 
@@ -258,6 +264,20 @@ console.log("\n② 当前腿无 segRemainSec（回退该段全量静态分钟）
   // 8（B1 全段）+ 2 + 8.7 + 8 + 2 = 28.7
   ok(r.remainingMin === 28.7, "remainingMin = 28.7（8 + 2 + 8.7 + 8 + 2）", `实际 ${r.remainingMin}`);
   ok(r.patchedCard.rides[0]!.minutes === 8, "回退值 = 该段静态分钟 8", `实际 ${r.patchedCard.rides[0]!.minutes}`);
+}
+
+/* ── ②b 只传 segRemainSec、不传 nextIdx（契约收紧）──
+ * ── 为什么必须回落「该段全量静态分钟」而不是 `segRemainSec/60` ──────────
+ *   `segRemainSec` 只覆盖到**基准站**那一跳；基准站未知时，它既可能是全程的 1/2，
+ *   也可能是全部。拿它当整段 ⇒ **少算下游跳**（正是 U3 的根因本体）。
+ *   宁可偏长（保守，用户早到不会被骗），也不偏短（会让用户以为快到了）。
+ */
+console.log("\n②b 只有 segRemainSec（无 nextIdx）⇒ 回落该段静态分钟，不拿它当整段");
+{
+  const card = mkTwoLegCard(BASE_MS);
+  const r = recomputeRemaining(ctx, { card, legIndex: 0, segRemainSec: 120, nowMs: BASE_MS });
+  ok(r.patchedCard.rides[0]!.minutes === 8, "segRemainSec 单独出现 ⇒ 本段 8 分（不是 2 分）", `实际 ${r.patchedCard.rides[0]!.minutes}`);
+  ok(r.remainingMin === 28.7, "remainingMin = 28.7（与 ② 同值：宁可偏长）", `实际 ${r.remainingMin}`);
 }
 
 /* ── ③ 无 segRemainSec 但有 nextIdx → 逐跳累加 ── */
@@ -291,7 +311,7 @@ console.log("\n④ remainingMin 永不为负");
 console.log("\n⑤ patchedCard 除时间字段外逐字段一致");
 {
   const card = mkTwoLegCard(BASE_MS);
-  const r = recomputeRemaining(ctx, { card, legIndex: 0, segRemainSec: 120, nowMs: BASE_MS });
+  const r = recomputeRemaining(ctx, { card, legIndex: 0, segRemainSec: 120, nextIdx: 1, nowMs: BASE_MS });
   ok(maskedJson(r.patchedCard) === maskedJson(card), "抹平时间字段后 JSON 全等", `${maskedJson(card).length} bytes`);
   ok(r.patchedCard.planId === card.planId && r.patchedCard.summary === card.summary, "非时间字段（planId/summary）不变");
   ok(
@@ -306,10 +326,10 @@ console.log("\n⑥ buildStrips 的 rideMin / waitMin 随 patchedCard 变化");
   const card = mkTwoLegCard(BASE_MS);
   const stripCtx = { routeIdx, segIdx, nameOf: routeIdx.nameOf, nowBucket: "all" };
   const before: SegmentStrip[] = buildStrips(card, stripCtx);
-  const r = recomputeRemaining(ctx, { card, legIndex: 0, segRemainSec: 120, nowMs: BASE_MS });
+  const r = recomputeRemaining(ctx, { card, legIndex: 0, segRemainSec: 120, nextIdx: 1, nowMs: BASE_MS });
   const after: SegmentStrip[] = buildStrips(r.patchedCard, stripCtx);
   ok(before[0]!.rideMin === 8, "原 card 首段 rideMin = 8", `实际 ${before[0]!.rideMin}`);
-  ok(after[0]!.rideMin === 2, "patched 后首段 rideMin = 2（剩余）", `实际 ${after[0]!.rideMin}`);
+  ok(after[0]!.rideMin === 6, "patched 后首段 rideMin = 6（首跳 2 + 下游跳 4）", `实际 ${after[0]!.rideMin}`);
   ok(before[0]!.transferAfter?.waitMin === 3, "原 card 换乘 waitMin = 3", `实际 ${before[0]!.transferAfter?.waitMin}`);
   ok(after[0]!.transferAfter?.waitMin === 8.7, "patched 后换乘 waitMin = 8.7（重估）", `实际 ${after[0]!.transferAfter?.waitMin}`);
   ok(after[1]!.rideMin === 8, "下游段 rideMin 仍为静态 8（乘车分钟不重估）", `实际 ${after[1]!.rideMin}`);
@@ -323,14 +343,14 @@ console.log("\n⑥ buildStrips 的 rideMin / waitMin 随 patchedCard 变化");
 console.log("\n⑦ 候车按到达换乘站的绝对时刻重估（核心价值）");
 {
   const card = mkTwoLegCard(BASE_MS);
-  // 本段剩余 2 分 + 换乘步行 2 分 = 4 分后到 A3。B2 是 daily 00:00-23:59 定区间 ⇒ 恒命中
-  const r = recomputeRemaining(ctx, { card, legIndex: 0, segRemainSec: 120, nowMs: BASE_MS });
+  // 本段剩余 2 分（首跳）+ 4 分（基准站之后一跳）+ 换乘步行 2 分 = 8 分后到 A3。B2 是 daily 00:00-23:59 定区间 ⇒ 恒命中
+  const r = recomputeRemaining(ctx, { card, legIndex: 0, segRemainSec: 120, nextIdx: 1, nowMs: BASE_MS });
   ok(r.retimedWaits[0]!.waitMin === 8.7, "B2 候车 3 → 8.7（(6+2×10)/3 = 8.67）", `实际 ${r.retimedWaits[0]!.waitMin}`);
   ok(r.patchedCard.rides[1]!.waitMin === 8.7, "回写 rides[1].waitMin");
   ok(r.patchedCard.transfers[0]!.waitMin === 8.7, "同时回写 transfers[0].waitMin（两处必须同值）");
 
   // headway=null ⇒ 保留卡面原值（保守，不归零）
-  const r2 = recomputeRemaining(ctxNoHeadway, { card, legIndex: 0, segRemainSec: 120, nowMs: BASE_MS });
+  const r2 = recomputeRemaining(ctxNoHeadway, { card, legIndex: 0, segRemainSec: 120, nextIdx: 1, nowMs: BASE_MS });
   ok(r2.patchedCard.rides[1]!.waitMin === 3, "headway=null ⇒ 保留原值 3（不归零，避免乐观偏差）", `实际 ${r2.patchedCard.rides[1]!.waitMin}`);
   ok(r2.retimedWaits[0]!.source === "kept", "source 标为 kept（可被日志看见）");
 }
@@ -339,8 +359,9 @@ console.log("\n⑦ 候车按到达换乘站的绝对时刻重估（核心价值�
 console.log("\n⑧ 单段卡（headway=null，无需下游候车）");
 {
   const card = mkOneLegCard(BASE_MS);
-  const r = recomputeRemaining(ctxNoHeadway, { card, legIndex: 0, segRemainSec: 300, nowMs: BASE_MS });
-  ok(near(r.remainingMin, 7), "remainingMin = 5 + 2 = 7（本段剩余 + 末段步行）", `实际 ${r.remainingMin}`);
+  // B1 = A1→A2→A3→A4，codes = [A1,A2,A3,A4]；nextIdx=3 = 下车站 ⇒ 首跳剩余 5 + 之后 0 跳
+  const r = recomputeRemaining(ctxNoHeadway, { card, legIndex: 0, segRemainSec: 300, nextIdx: 3, nowMs: BASE_MS });
+  ok(near(r.remainingMin, 7), "remainingMin = 5 + 2 = 7（首跳剩余 + 末段步行）", `实际 ${r.remainingMin}`);
   ok(r.retimedWaits.length === 0, "无下游段 ⇒ 无重估明细");
   const stripCtx = { routeIdx, segIdx, nameOf: routeIdx.nameOf, nowBucket: "all" };
   const strips = buildStrips(r.patchedCard, stripCtx);
@@ -351,20 +372,24 @@ console.log("\n⑧ 单段卡（headway=null，无需下游候车）");
 console.log("\n⑨ legIndex 越界被夹取（防御）");
 {
   const card = mkTwoLegCard(BASE_MS);
-  const hi = recomputeRemaining(ctx, { card, legIndex: 99, segRemainSec: 60, nowMs: BASE_MS });
-  ok(hi.patchedCard.rides[1]!.minutes === 1, "legIndex=99 ⇒ 夹到最后一段", `实际 ${hi.patchedCard.rides[1]!.minutes}`);
-  const lo = recomputeRemaining(ctx, { card, legIndex: -5, segRemainSec: 60, nowMs: BASE_MS });
-  ok(lo.patchedCard.rides[0]!.minutes === 1, "legIndex=-5 ⇒ 夹到第一段", `实际 ${lo.patchedCard.rides[0]!.minutes}`);
-  const nan = recomputeRemaining(ctx, { card, legIndex: Number.NaN, segRemainSec: 60, nowMs: BASE_MS });
-  ok(nan.patchedCard.rides[0]!.minutes === 1, "legIndex=NaN ⇒ 归 0", `实际 ${nan.patchedCard.rides[0]!.minutes}`);
+  // 判定「夹到了哪一段」靠**哪一段的 minutes 被改写**（两段静态都是 8，不能只看数值）
+  const hi = recomputeRemaining(ctx, { card, legIndex: 99, segRemainSec: 60, nextIdx: 1, nowMs: BASE_MS });
+  ok(hi.patchedCard.rides[1]!.minutes === 5, "legIndex=99 ⇒ 夹到最后一段（1 + 4 = 5）", `实际 ${hi.patchedCard.rides[1]!.minutes}`);
+  ok(hi.patchedCard.rides[0]!.minutes === 8, "  首段未被改写（证明夹取方向正确）", `实际 ${hi.patchedCard.rides[0]!.minutes}`);
+  const lo = recomputeRemaining(ctx, { card, legIndex: -5, segRemainSec: 60, nextIdx: 1, nowMs: BASE_MS });
+  ok(lo.patchedCard.rides[0]!.minutes === 5, "legIndex=-5 ⇒ 夹到第一段（1 + 4 = 5）", `实际 ${lo.patchedCard.rides[0]!.minutes}`);
+  ok(lo.patchedCard.rides[1]!.minutes === 8, "  末段未被改写", `实际 ${lo.patchedCard.rides[1]!.minutes}`);
+  const nan = recomputeRemaining(ctx, { card, legIndex: Number.NaN, segRemainSec: 60, nextIdx: 1, nowMs: BASE_MS });
+  ok(nan.patchedCard.rides[0]!.minutes === 5, "legIndex=NaN ⇒ 归 0（第一段）", `实际 ${nan.patchedCard.rides[0]!.minutes}`);
 }
 
 /* ── ⑩ 最后一段：不看 transfers ── */
 console.log("\n⑩ legIndex = 最后一段时不引入 transfers");
 {
   const card = mkTwoLegCard(BASE_MS);
-  const r = recomputeRemaining(ctx, { card, legIndex: 1, segRemainSec: 180, nowMs: BASE_MS });
-  ok(near(r.remainingMin, 5), "remainingMin = 3 + 2 = 5（本段剩余 + 末段步行）", `实际 ${r.remainingMin}`);
+  // B2 = A3→A5→A6，nextIdx=1 ⇒ 首跳 3 + A5→A6 一跳 4 = 7
+  const r = recomputeRemaining(ctx, { card, legIndex: 1, segRemainSec: 180, nextIdx: 1, nowMs: BASE_MS });
+  ok(near(r.remainingMin, 9), "remainingMin = 3 + 4 + 2 = 9（首跳 + 下游跳 + 末段步行）", `实际 ${r.remainingMin}`);
   ok(r.retimedWaits.length === 0, "无下游段");
   ok(r.patchedCard.transfers[0]!.waitMin === 3, "已发生的换乘候车不被改动", `实际 ${r.patchedCard.transfers[0]!.waitMin}`);
 }
@@ -397,15 +422,16 @@ console.log("\n⑫ boarding 误用的漏算量 = rides[legIndex].waitMin（精�
     ...card,
     rides: card.rides.map((r, i) => (i === 0 ? { ...r, waitMin: 7.5 } : r)),
   };
-  const r = recomputeRemaining(ctx, { card: withWait, legIndex: 0, segRemainSec: 120, nowMs: BASE_MS });
-  // 剩余 = 2（本段剩余）+ 2（换乘步行）+ 8.7（下游候车）+ 8（下游乘车）+ 2（末段步行）
+  const r = recomputeRemaining(ctx, { card: withWait, legIndex: 0, segRemainSec: 120, nextIdx: 1, nowMs: BASE_MS });
+  // 剩余 = 6（首跳 2 + 基准站之后 4）+ 2（换乘步行）+ 8.7（下游候车）+ 8（下游乘车）+ 2（末段步行）
   // 注意：**不含** 7.5（当前腿候车）—— 这就是"假设已上车"的体现
-  ok(r.remainingMin === 22.7, "当前腿 waitMin=7.5 完全不计入剩余（= 22.7）", `实际 ${r.remainingMin}`);
+  ok(r.remainingMin === 26.7, "当前腿 waitMin=7.5 完全不计入剩余（= 26.7）", `实际 ${r.remainingMin}`);
 
   // 反证：若把该 waitMin 计入（即 boarding 语义），结果应恰好多 7.5
-  const boardingSemantics = 22.7 + 7.5;
+  const boardingSemantics = round1(26.7 + 7.5);
   ok(
-    boardingSemantics - r.remainingMin === 7.5,
+    // 比对走 round1：34.2 − 26.7 在二进制浮点下是 7.499999…996，取 1 位小数才是本行的语义
+    round1(boardingSemantics - r.remainingMin) === 7.5,
     "⇒ 误用（boarding 相位）的偏差 = rides[legIndex].waitMin = 7.5（精确等式）",
     `boarding 语义应为 ${boardingSemantics}`,
   );
@@ -415,7 +441,7 @@ console.log("\n⑫ boarding 误用的漏算量 = rides[legIndex].waitMin（精�
     ...card,
     rides: card.rides.map((r2, i) => (i === 0 ? { ...r2, waitMin: 0 } : r2)),
   };
-  const r2 = recomputeRemaining(ctx, { card: withWait2, legIndex: 0, segRemainSec: 120, nowMs: BASE_MS });
+  const r2 = recomputeRemaining(ctx, { card: withWait2, legIndex: 0, segRemainSec: 120, nextIdx: 1, nowMs: BASE_MS });
   ok(
     r2.remainingMin === r.remainingMin,
     "当前腿 waitMin 从 7.5 改成 0 ⇒ remainingMin **不变**（证明它根本没参与计算）",
@@ -439,14 +465,16 @@ console.log("\n⑫ boarding 误用的漏算量 = rides[legIndex].waitMin（精�
 console.log("\n⑬ 时间锚自洽：arriveAt === recomputedAt + remainingMin × 60000");
 {
   const cases: [string, Parameters<typeof recomputeRemaining>[1]][] = [
-    ["有 segRemainSec", { card: mkTwoLegCard(BASE_MS), legIndex: 0, segRemainSec: 120, nowMs: BASE_MS }],
+    ["有 segRemainSec", { card: mkTwoLegCard(BASE_MS), legIndex: 0, segRemainSec: 120, nextIdx: 1, nowMs: BASE_MS }],
+    ["有 segRemainSec 但无 nextIdx", { card: mkTwoLegCard(BASE_MS), legIndex: 0, segRemainSec: 120, nowMs: BASE_MS }],
     ["无 segRemainSec", { card: mkTwoLegCard(BASE_MS), legIndex: 0, segRemainSec: null, nowMs: BASE_MS }],
     ["有 nextIdx", { card: mkTwoLegCard(BASE_MS), legIndex: 0, segRemainSec: null, nextIdx: 1, nowMs: BASE_MS }],
-    ["最后一段", { card: mkTwoLegCard(BASE_MS), legIndex: 1, segRemainSec: 180, nowMs: BASE_MS }],
-    ["单段卡", { card: mkOneLegCard(BASE_MS), legIndex: 0, segRemainSec: 300, nowMs: BASE_MS }],
-    ["晚点（clamp 到 0）", { card: mkTwoLegCard(BASE_MS), legIndex: 1, segRemainSec: 0, nowMs: BASE_MS + 120 * 60_000 }],
-    ["亚分钟小数", { card: mkTwoLegCard(BASE_MS), legIndex: 0, segRemainSec: 7, nowMs: BASE_MS }],
-    ["奇数秒（易暴露取整）", { card: mkTwoLegCard(BASE_MS), legIndex: 0, segRemainSec: 13, nowMs: BASE_MS }],
+    ["最后一段", { card: mkTwoLegCard(BASE_MS), legIndex: 1, segRemainSec: 180, nextIdx: 1, nowMs: BASE_MS }],
+    ["单段卡", { card: mkOneLegCard(BASE_MS), legIndex: 0, segRemainSec: 300, nextIdx: 3, nowMs: BASE_MS }],
+    ["晚点（clamp 到 0）", { card: mkTwoLegCard(BASE_MS), legIndex: 1, segRemainSec: 0, nextIdx: 1, nowMs: BASE_MS + 120 * 60_000 }],
+    ["停靠态（segRemainSec=0）", { card: mkTwoLegCard(BASE_MS), legIndex: 0, segRemainSec: 0, nextIdx: 1, nowMs: BASE_MS }],
+    ["亚分钟小数", { card: mkTwoLegCard(BASE_MS), legIndex: 0, segRemainSec: 7, nextIdx: 1, nowMs: BASE_MS }],
+    ["奇数秒（易暴露取整）", { card: mkTwoLegCard(BASE_MS), legIndex: 0, segRemainSec: 13, nextIdx: 1, nowMs: BASE_MS }],
   ];
   for (const [label, input] of cases) {
     const r = recomputeRemaining(ctx, input);
@@ -459,18 +487,22 @@ console.log("\n⑬ 时间锚自洽：arriveAt === recomputedAt + remainingMin ×
   //   ⚠️ 精确值必须**按实际入参算**，不要抄别处的常量（曾抄错一个 2.5 vs 13s 的差 ⇒ 假失败）
   {
     const segRemainSec = 13;
+    const nextIdx = 1;
     const input: Parameters<typeof recomputeRemaining>[1] = {
       card: mkTwoLegCard(BASE_MS),
       legIndex: 0,
       segRemainSec,
+      nextIdx,
       nowMs: BASE_MS,
     };
     const r = recomputeRemaining(ctx, input);
     const card = input.card;
     // 逐项复算（与 remaining.ts 时间轴同序：本段剩余 → (换乘步行 → 候车 → 乘车)* → 末段步行）
-    //   候车取重估值 8.7（(6+2×10)/3 = 8.6667 → round1），本段剩余 = segRemainSec/60
+    //   本段剩余 = segRemainSec/60 + 「基准站之后逐跳」= 13/60 + 4（A2→A3 一跳）
+    //   候车取重估值 8.7（(6+2×10)/3 = 8.6667 → round1）
     const exactMin =
       segRemainSec / 60 +
+      4 + // hopMinutesFrom(ctx, rides[0], nextIdx=1) = A2→A3 一跳
       (card.transfers[0]?.minutes ?? 0) +
       8.7 +
       (card.rides[1]?.minutes ?? 0) +
@@ -484,7 +516,369 @@ console.log("\n⑬ 时间锚自洽：arriveAt === recomputedAt + remainingMin ×
   }
 }
 
-/* ══════════════════════ ⑭ 真实索引联调（库不可达则跳过）══════════════════════
+/* ══════════════ ⑭ 基准站规则（U3）——「到下一站」与「整段剩余」的分界 ══════════════
+ * 这一节单独测 `track.ts` 的两条纯规则，因为 U3 的根因就在「基准站取错」：
+ *   停靠态的 `prog.nextIdx` 是**所停站的下一站**，从那里起累加会整跳漏掉
+ *   「所停站 → 下一站」；行驶态则必须用 `nextIdx`（区间终点），因为
+ *   `segRemainSec` 正是「到该站」的剩余。
+ */
+console.log("\n⑭ 基准站规则 remainFromIdxOf / segRemainSecOf（纯函数）");
+{
+  // ① 真实帧推导：车停靠在 A2（站序 [A1,A2,A3]）⇒ 基准站必须是 1，而 prog.nextIdx 是 2
+  const stopMains = ["A1", "A2", "A3"];
+  const atA2: TrackVehicle = {
+    plate: "T1",
+    lat: 0,
+    lng: 0,
+    status: "stopping",
+    interval: null,
+    atStation: { code: "A2" },
+    progress: null,
+  };
+  const progAt = progressOf(stopMains, atA2);
+  ok(progAt.kind === "at" && progAt.nextIdx === 2, "progressOf 停靠 A2 ⇒ nextIdx = 2（所停站的下一站）", `${progAt.kind}/${progAt.nextIdx}`);
+  ok(remainFromIdxOf(progAt) === 1, "remainFromIdxOf 停靠 A2 ⇒ 基准站 = 1（**所停站本身**，不是 nextIdx）", `实际 ${remainFromIdxOf(progAt)}`);
+
+  const moving: TrackVehicle = {
+    plate: "T1",
+    lat: 0,
+    lng: 0,
+    status: "moving",
+    interval: { from: { code: "A1" }, to: { code: "A2" } },
+    atStation: null,
+    progress: null,
+  };
+  const progBetween = progressOf(stopMains, moving);
+  ok(
+    remainFromIdxOf(progBetween) === 1,
+    "remainFromIdxOf 行驶中(A1→A2) ⇒ 基准站 = A2 的下标 1（区间终点）",
+    `实际 ${remainFromIdxOf(progBetween)}`,
+  );
+
+  // ② 边界：末站停靠（nextIdx 为 null）仍要给出基准站 = 末站
+  ok(
+    remainFromIdxOf({ kind: "at", passedIdx: 2, atIdx: 3, nextIdx: null }) === 3,
+    "末站停靠（nextIdx=null）⇒ 基准站 = atIdx = 3",
+  );
+  ok(
+    remainFromIdxOf({ kind: "between", passedIdx: 1, atIdx: null, nextIdx: null }) === 2,
+    "行驶态 nextIdx 缺失 ⇒ 基准站退化为 passedIdx + 1",
+  );
+  // ③ 数据对不上 ⇒ 如实 null，不猜
+  ok(remainFromIdxOf({ kind: "lost", passedIdx: -1, atIdx: null, nextIdx: null }) === null, "lost ⇒ null（不猜）");
+  ok(remainFromIdxOf({ kind: "unknown", passedIdx: -1, atIdx: null, nextIdx: null }) === null, "unknown ⇒ null（不猜）");
+  ok(remainFromIdxOf(null) === null, "null ⇒ null");
+
+  // ④ 停靠态显式给 0
+  ok(segRemainSecOf(true, null) === 0, "明确停靠 + 无位置模型 ⇒ 0（不是 null）");
+  ok(segRemainSecOf(true, 123) === 0, "明确停靠 + 有位置模型 ⇒ 仍 0（停靠时首跳剩余已走完）");
+  ok(segRemainSecOf(false, 123) === 123, "未停靠 ⇒ 原样透传融合值");
+  ok(segRemainSecOf(false, null) === null, "未停靠且无融合值 ⇒ null（回退逐跳累加）");
+  ok(segRemainSecOf(false, -5) === null, "负融合值 ⇒ null（脏数据不外泄）");
+  ok(segRemainSecOf(false, Number.NaN) === null, "NaN ⇒ null");
+}
+
+/* ══════════════ ⑮ 连续刷新：切换瞬间不得跳变（U3 · 根因证据 + 回归锁）══════════════
+ *
+ * ── 这一节在验什么 ────────────────────────────────────────────────────
+ *   车辆在「站间行驶」与「进站停靠」之间切换时，刷新后的**预计到达时刻不得整段上涨**。
+ *   判据全部从**记录序列**直接检验（不依赖任何实现细节）：
+ *     · 单调性   —— 相邻两次 `remainingMin` 之差 ≤ 0.25 分（时间只会往前走）
+ *     · 恒等式   —— `arriveAt − (nowMs + remainingMin×60000)` 残差**恰好 0**
+ *     · B-1 方向 —— 切换瞬间 `remaining[i+1] − remaining[i] ≤ +0.1`
+ *     · B-2 幅度 —— 进站那一步（前后基准站同为站 i）`|Δ| ≤ |segRemainSec[i]/60| + 0.1`
+ *     · B-3 幅度 —— 任何一步 `|Δ| ≤ md/60 + 0.1`（完成一跳不可能超过该跳中位时长）
+ *     · 到达锚上界 —— 单段卡相邻两次 `|ΔarriveAt| ≤ 15000 ms`
+ *
+ * ── 帧怎么造（与线上同式，不是编数字）──────────────────────────────────
+ *   `fused = w·D + (1−w)·max(md−u, 0)`，`D = md·h[段型][⌊(1−p)·20⌋]`
+ *   —— 与 `useRideTracking.ts:996` 逐字同式；`md` 取合成卡里每跳 4 分（与 `makeSegRows` 一致），
+ *   刷新间隔取车辆轮询 `POLL_MS = 12s`（`useRideTracking.ts`）。
+ *   停靠帧的载荷按**修好后的客户端**造：`segRemainSec = 0` 且 `nextIdx = 基准站 = 所停站`。
+ */
+console.log("\n⑮ 连续刷新：站间行驶 ↔ 进站停靠 切换不得跳变");
+{
+  /** 与 `useRideTracking.ts:996` 同式的位置模型融合值 */
+  const fusedSecOf = (mdSec: number, uSec: number): number => {
+    const p = Math.min(1, Math.max(0, uSec / mdSec));
+    const b = Math.min(19, Math.max(0, Math.floor((1 - p) * 20)));
+    const D = mdSec * PROGRESS_H.short[b]!;
+    return PROGRESS_W.short * D + (1 - PROGRESS_W.short) * Math.max(mdSec - uSec, 0);
+  };
+  const MD_SEC = 240; // 每跳 4 分（= makeSegRows 的 avg_minutes）
+  const STEP_MS = 12_000; // 车辆轮询节拍
+
+  interface SimFrame {
+    label: string;
+    nowMs: number;
+    /** 车辆帧显式停靠在本段站（`atStation` 存在且 `status === "stopping"`） */
+    stopped: boolean;
+    /** 客户端位置模型融合值（停靠帧无 progress ⇒ null） */
+    fused: number | null;
+    /** 客户端算出的基准站（`remainFromIdxOf(prog)`） */
+    pivot: number;
+  }
+
+  /** 沿一条腿逐跳生成帧序列（每帧 12s，含每站的停靠帧） */
+  const framesOf = (hopCount: number, t0: number): SimFrame[] => {
+    const out: SimFrame[] = [];
+    let t = t0;
+    for (let hop = 0; hop < hopCount; hop++) {
+      for (let u = STEP_MS / 1000; u <= MD_SEC - STEP_MS / 1000; u += STEP_MS / 1000) {
+        out.push({
+          label: `第${hop + 1}跳 u=${u}s`,
+          nowMs: t,
+          stopped: false,
+          fused: fusedSecOf(MD_SEC, u),
+          pivot: hop + 1,
+        });
+        t += STEP_MS;
+      }
+      // 停靠帧：基准站 = **所停站**（= 第 hop 跳的终点站，下标 hop + 1）
+      out.push({ label: `停靠第${hop + 1}站`, nowMs: t, stopped: true, fused: null, pivot: hop + 1 });
+      t += STEP_MS;
+    }
+    out.push({ label: `停靠末站`, nowMs: t, stopped: true, fused: null, pivot: hopCount });
+    return out;
+  };
+
+  /** 修好后的客户端载荷 */
+  const payloadOf = (card: RecommendCard, f: SimFrame): Parameters<typeof recomputeRemaining>[1] => ({
+    card,
+    legIndex: 0,
+    segRemainSec: segRemainSecOf(f.stopped, f.fused),
+    nextIdx: f.pivot,
+    nowMs: f.nowMs,
+  });
+
+  const mdMin = MD_SEC / 60;
+  /** 逐帧跑一遍，返回 remainingMin / arriveAt / 停靠前最后一帧的 segRemainSec */
+  const run = (card: RecommendCard, frames: SimFrame[], useHeadway: boolean) => {
+    const useCtx = useHeadway ? ctx : ctxNoHeadway;
+    return frames.map((f) => {
+      const r = recomputeRemaining(useCtx, payloadOf(card, f));
+      return { f, r, retimed: r.retimedWaits[0]?.waitMin ?? null };
+    });
+  };
+
+  /* ── 单段卡（无下游候车 ⇒ 噪声最小，用于**到达锚上界**）── */
+  const oneCard = mkOneLegCard(BASE_MS);
+  const oneFrames = framesOf(3, BASE_MS); // B1 A1→A4 = 3 跳
+  const oneRun = run(oneCard, oneFrames, false);
+
+  /* ── 多段卡（用于单调性 / 切换瞬间三判据）── */
+  const twoCard = mkTwoLegCard(BASE_MS);
+  const twoFrames = framesOf(2, BASE_MS); // B1 A1→A3 = 2 跳
+  const twoRun = run(twoCard, twoFrames, true);
+
+  /* ① 单调性：相邻两次 remainingMin 之差 ≤ 0.25 分（现状：切换瞬间 +3.x ⇒ 必红） */
+  {
+    let worst = Number.NEGATIVE_INFINITY;
+    let worstAt = "";
+    let checked = 0;
+    for (let i = 0; i + 1 < twoRun.length; i++) {
+      const d = twoRun[i + 1]!.r.remainingMin - twoRun[i]!.r.remainingMin;
+      checked++;
+      if (d > worst) {
+        worst = d;
+        worstAt = `${twoRun[i]!.f.label} → ${twoRun[i + 1]!.f.label}`;
+      }
+    }
+    ok(
+      worst <= 0.25,
+      "★ 单调性：相邻两次 remainingMin 之差 ≤ 0.25 分",
+      `比对 ${checked} 对 / 最大 +${round1(worst)} 分（${worstAt}）`,
+    );
+  }
+
+  /* ② 恒等式：arriveAt 必须恰等于 nowMs + remainingMin×60000（残差 0，不是"小于阈值"）*/
+  {
+    let nonzero = 0;
+    let checked = 0;
+    for (const x of [...oneRun, ...twoRun]) {
+      checked++;
+      if (x.r.arriveAtMs - (x.f.nowMs + x.r.remainingMin * 60_000) !== 0) nonzero++;
+    }
+    ok(nonzero === 0, "★ 恒等式：arriveAt − (nowMs + remainingMin×60000) 残差恰好 0", `比对 ${checked} 帧 / 非零 ${nonzero}`);
+  }
+
+  /* ③ B-1 方向：切换瞬间不得整段上涨（≤ +0.1）*/
+  {
+    let checked = 0;
+    let bad = 0;
+    let worst = Number.NEGATIVE_INFINITY;
+    let worstAt = "";
+    for (let i = 0; i + 1 < twoRun.length; i++) {
+      const a = twoRun[i]!;
+      const b = twoRun[i + 1]!;
+      if (a.f.stopped === b.f.stopped) continue;
+      checked++;
+      const d = b.r.remainingMin - a.r.remainingMin;
+      if (d > 0.1) bad++;
+      if (d > worst) {
+        worst = d;
+        worstAt = `${a.f.label} → ${b.f.label}`;
+      }
+    }
+    ok(
+      bad === 0,
+      "★ B-1 方向：切换瞬间 remaining[i+1] − remaining[i] ≤ +0.1",
+      `比对 ${checked} 处切换 / 超限 ${bad} / 最大 ${round1(worst)} 分（${worstAt}）`,
+    );
+  }
+
+  /* ④ B-2 幅度（精确）：**进站**那一步前后基准站同为站 i ⇒ Δ 必须恰等于 −segRemainSec/60 */
+  {
+    let checked = 0;
+    let bad = 0;
+    const detail: string[] = [];
+    for (let i = 0; i + 1 < twoRun.length; i++) {
+      const a = twoRun[i]!;
+      const b = twoRun[i + 1]!;
+      if (a.f.stopped || !b.f.stopped) continue; // 只看「行驶 → 停靠」
+      checked++;
+      // 首跳剩余（分）= 停靠前最后一帧**实际上报**的 segRemainSec
+      const segMin = (payloadOf(twoCard, a.f).segRemainSec ?? 0) / 60;
+      const d = b.r.remainingMin - a.r.remainingMin;
+      detail.push(`Δ=${round1(d)} 期望≈${round1(-segMin)}`);
+      if (Math.abs(d) > Math.abs(segMin) + 0.1) bad++;
+    }
+    ok(
+      bad === 0,
+      "★ B-2 幅度：进站一步 |Δremaining| ≤ |segRemainSec/60| + 0.1",
+      `比对 ${checked} 处进站 / 超限 ${bad} / ${detail.join(" · ")}`,
+    );
+  }
+
+  /* ⑤ B-3 幅度（兜底）：任何一步的 |Δ| 不得超过该跳中位时长 */
+  {
+    let checked = 0;
+    let bad = 0;
+    let worst = 0;
+    for (let i = 0; i + 1 < twoRun.length; i++) {
+      checked++;
+      const d = Math.abs(twoRun[i + 1]!.r.remainingMin - twoRun[i]!.r.remainingMin);
+      if (d > worst) worst = d;
+      if (d > mdMin + 0.1) bad++;
+    }
+    ok(
+      bad === 0,
+      `★ B-3 幅度（兜底）：任何一步 |Δremaining| ≤ md/60 + 0.1（= ${round1(mdMin)} + 0.1）`,
+      `比对 ${checked} 步 / 超限 ${bad} / 最大 ${round1(worst)} 分`,
+    );
+  }
+
+  /* ⑥ 到达锚上界：单段卡相邻两次 |ΔarriveAt| ≤ 15000 ms
+   *   ⚠️ 只判**同一状态内**的相邻对。跨「行驶 ↔ 停靠」的那几步另有 B-1/B-2/B-3 单独判，
+   *      且它的量级由**位置模型 h 曲线末端**决定（`h[1] = 0.25·md`：最后 5% 路程按 25% 时长估），
+   *      合成帧用的是匀速车（最后 12s 真就是 12s），与 h 曲线的减速假设不一致 ⇒
+   *      那几步的位移是**合成假设差异**，不是口径缺陷，故单列诊断、不重复判定。 */
+  {
+    let checked = 0;
+    let bad = 0;
+    let worst = 0;
+    let worstAt = "";
+    let switchWorst = 0;
+    let switchAt = "";
+    for (let i = 0; i + 1 < oneRun.length; i++) {
+      const d = Math.abs(oneRun[i + 1]!.r.arriveAtMs - oneRun[i]!.r.arriveAtMs);
+      if (oneRun[i]!.f.stopped !== oneRun[i + 1]!.f.stopped) {
+        if (d > switchWorst) {
+          switchWorst = d;
+          switchAt = `${oneRun[i]!.f.label} → ${oneRun[i + 1]!.f.label}`;
+        }
+        continue;
+      }
+      checked++;
+      if (d > worst) {
+        worst = d;
+        worstAt = `${oneRun[i]!.f.label} → ${oneRun[i + 1]!.f.label}`;
+      }
+      if (d > 15_000) bad++;
+    }
+    ok(
+      bad === 0,
+      "★ 到达锚上界：单段卡同状态内相邻两次 |ΔarriveAt| ≤ 15000 ms",
+      `比对 ${checked} 对 / 超限 ${bad} / 实测最大 ${worst}ms（${worstAt}）`,
+    );
+    console.log(`  诊断（不判定）：跨状态那几步的 |ΔarriveAt| 最大 ${switchWorst}ms（${switchAt}）—— 由 h 曲线末端减速假设与匀速合成帧的差异造成`);
+  }
+
+  /* ⑦ 多段卡上界（先剔除「候车跨桶」与「状态切换」样本对）+ 跨桶跳变分布 */
+  {
+    let checked = 0;
+    let skipped = 0;
+    let switchPairs = 0;
+    let bad = 0;
+    let worst = 0;
+    const jumps: string[] = [];
+    for (let i = 0; i + 1 < twoRun.length; i++) {
+      const a = twoRun[i]!;
+      const b = twoRun[i + 1]!;
+      if (a.retimed !== b.retimed) {
+        // 候车取值变了 ⇒ 到达换乘站的时刻跨了时段桶，整段跳变属**时段表固有分段**，本批不修
+        skipped++;
+        jumps.push(`${round1((b.retimed ?? 0) - (a.retimed ?? 0))}`);
+        continue;
+      }
+      if (a.f.stopped !== b.f.stopped) {
+        switchPairs++;
+        continue;
+      }
+      checked++;
+      const d = Math.abs(b.r.arriveAtMs - a.r.arriveAtMs);
+      if (d > worst) worst = d;
+      if (d > 15_000) bad++;
+    }
+    ok(
+      bad === 0,
+      "★ 多段卡上界（剔除候车跨桶 + 状态切换样本后）：|ΔarriveAt| ≤ 15000 ms",
+      `判定 ${checked} 对 / 剔除跨桶 ${skipped} 对 / 剔除切换 ${switchPairs} 对 / 超限 ${bad} / 实测最大 ${worst}ms`,
+    );
+    console.log(`  跨桶跳变分布（本批不修，仅记录）：${jumps.length ? jumps.join(",") + " 分" : "0 处（合成班距为单行全天时段，无桶边界）"}`);
+  }
+
+  /* ⑧ 抵达终点：本段跑完 ⇒ 剩余只剩末段步行（单段卡，无下游段可混） */
+  {
+    const last = oneRun[oneRun.length - 1]!;
+    ok(
+      last.r.remainingMin === 2,
+      "到达下车站 ⇒ 剩余恰为末段步行 2 分（首跳剩余 0 + 无下游跳 + 2）",
+      `实际 ${last.r.remainingMin}`,
+    );
+  }
+
+  /* ⑨ 诊断（**不参与判定**）：旧客户端载荷在新服务端下的表现
+   *   旧载荷 = 停靠不发 0（`null`）+ `nextIdx = 所停站 + 1`（即 `prog.nextIdx` 原样上行）。
+   *   ⇒ 这一行是「前端不接 `remainFromIdxOf` 就会退回原缺陷」的证据（不是断言）。 */
+  {
+    let worst = Number.NEGATIVE_INFINITY;
+    let worstAt = "";
+    for (let i = 0; i + 1 < twoRun.length; i++) {
+      const a = twoFrames[i]!;
+      const b = twoFrames[i + 1]!;
+      const legacy = (f: SimFrame) =>
+        recomputeRemaining(ctx, {
+          card: twoCard,
+          legIndex: 0,
+          segRemainSec: f.stopped ? null : f.fused,
+          nextIdx: f.stopped ? f.pivot + 1 : f.pivot,
+          nowMs: f.nowMs,
+        });
+      const d = legacy(b).remainingMin - legacy(a).remainingMin;
+      if (d > worst) {
+        worst = d;
+        worstAt = `${a.label} → ${b.label}`;
+      }
+    }
+    console.log(
+      `  诊断（不判定）：旧客户端载荷（停靠发 null + nextIdx=所停站+1）下最大单步上涨 +${round1(worst)} 分（${worstAt}）` +
+        " ⇒ 前端必须接 remainFromIdxOf，否则缺陷依旧",
+    );
+  }
+}
+
+/* ══════════════════════ ⑯ 真实索引联调（库不可达则跳过）══════════════════════
  * 与 `scripts/test-route-overview.ts` 用例 9 同款：连库只读。
  * ⚠️ **try/catch 只包「连库」这一步** —— 断言阶段的异常必须冒泡成真失败。
  *    （曾踩过：把断言也包进 try，一个 `ReferenceError` 被当成「库不可达」SKIP 掉，
@@ -578,9 +972,31 @@ function realIndexCheck(st: RecStatic): void {
   };
 
   const realCtx: RemainingCtx = { routeIdx: st.routeIdx, segIdx: st.segIdx, nowBucket: "all", headway: null };
-  const r = recomputeRemaining(realCtx, { card, legIndex: 0, segRemainSec: 150, nowMs });
+  // nextIdx = 2 = 下车站本身（基准站=下车点）⇒ 基准站之后 0 跳 ⇒ 剩余 = 150s/60
+  const r = recomputeRemaining(realCtx, { card, legIndex: 0, segRemainSec: 150, nextIdx: 2, nowMs });
   ok(near(r.remainingMin, 4.5), `真实线 ${route}：remainingMin = 2.5 + 2 = 4.5`, `实际 ${r.remainingMin}`);
   ok(r.patchedCard.rides[0]!.minutes === 2.5, "patchedCard 本段 minutes = 150s/60 = 2.5");
+
+  // ★ 基准站 = 中间站（1）⇒ 必须再叠加「中间站 → 下车站」那一跳（U3 的核心口径）
+  {
+    const r1 = recomputeRemaining(realCtx, { card, legIndex: 0, segRemainSec: 150, nextIdx: 1, nowMs });
+    const hop2 = round1(rideOfHops(st.segIdx, route, hops.slice(1), "all").minutes);
+    ok(
+      near(r1.remainingMin, round1(2.5 + hop2 + 2), 0.06),
+      `真实线 ${route}：nextIdx=1 ⇒ 剩余 = 2.5 + 第二跳 ${hop2} + 2（不是只算 2.5 + 2）`,
+      `实际 ${r1.remainingMin}`,
+    );
+  }
+  // ★ 停靠态（segRemainSec=0 + 基准站=所停站）⇒ 剩余 = 从所停站到下车点的逐跳（含「所停站 → 下一站」）
+  {
+    const r1 = recomputeRemaining(realCtx, { card, legIndex: 0, segRemainSec: 0, nextIdx: 1, nowMs });
+    const hop2 = round1(rideOfHops(st.segIdx, route, hops.slice(1), "all").minutes);
+    ok(
+      near(r1.remainingMin, round1(hop2 + 2), 0.06),
+      `真实线 ${route}：停靠在中间站 ⇒ 剩余 = ${hop2} + 2（不得整跳漏掉「所停站 → 下一站」）`,
+      `实际 ${r1.remainingMin}`,
+    );
+  }
 
   const stripCtx = { routeIdx: st.routeIdx, segIdx: st.segIdx, nameOf: st.routeIdx.nameOf, nowBucket: "all" };
   const strips = buildStrips(r.patchedCard, stripCtx);
@@ -595,7 +1011,7 @@ function realIndexCheck(st: RecStatic): void {
 }
 
 (async () => {
-  console.log("\n⑭ 真实索引联调（库不可达则跳过，不判失败）");
+  console.log("\n⑯ 真实索引联调（库不可达则跳过，不判失败）");
   const st = await loadRealStatics();
   if (st) realIndexCheck(st);
   if (realConn.pool) await realConn.pool.end().catch(() => undefined);
