@@ -22,7 +22,7 @@
  *   | `station`  | false | **false** | 车到了、人在跑 ⇒ 标签**保留**、信息行仍是上车前 |
  *   | `station`  | true  | true        | 人随车移动，位置证据已成立 ⇒ 可以隐藏 |
  *   | `position` | —     | true        | 进入判据本身就是位置证据（r2 / 跟车斜率） |
- *   | `manual`   | —     | true        | 用户本人点「我已上车」，视同证据充分 |
+ *   | `manual`   | —     | true        | 人工声明，由 `enteredVia === "manual"` 短路，不是位置证据 |
  *   | `null`     | —     | true        | **防御**：`riding` 却没有进入方式属不一致态，退回旧行为（隐藏） |
  *   | 非 riding  | —     | false       | — |
  *
@@ -66,7 +66,20 @@ export function ridingRealOf(input: RidingRealInput): boolean {
    *   **不要为了"更准确"改成返回 false**（那会把漏写变成无人能发现的滞留）。
    */
   if (input.entry === null || input.entry === undefined) return true;
-  /** 只有「车到站即切」这一种进入方式**没有**位置证据；其余两种进入时证据已成立 */
+  /**
+   * ★ B 语义（2026-11-05 team-lead 裁决）：`posEvidence`（= `boardedByPosition`）
+   *   **只表示「位置证据」**，不含人工声明。三种进入方式与它的真实关系：
+   *     · `station`  — 进门 `false`，之后可能由 riding 期间位置判据翻真 ⇒ **必须读**
+   *       `posEvidence`（本函数唯一读它的分支，即下一行）。
+   *     · `position` — 进门 `true`（r2 / 跟车斜率判据本身就是位置证据）⇒ 无需读，返回 true。
+   *     · `manual`   — 进门 `false`（**人工声明，不是位置证据**）⇒ **同样不读**，
+   *       由 `enteredVia === "manual"` 短路返回 true（即下面这行 `return true`）。
+   *   ⚠️ 「返回 true」有两种不同的理由：`position` 是证据已成立，`manual` 是用户明确确认；
+   *     判「人确实在车上」的完整式子是 `enteredVia === "manual" || boardedByPosition`
+   *     （见 `useRideTracking` 的 `BoardEntry` 注释）。旧注释把两种非 station 进入一律
+   *     说成「进门时证据已成立」，会让 `manual` 被误读成有位置证据 —— 本函数**不读**
+   *     `posEvidence` 正是这个人工声明短路的结果。
+   */
   if (input.entry === "station") return input.posEvidence === true;
   return true;
 }
