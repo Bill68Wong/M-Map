@@ -7720,29 +7720,60 @@ body[data-nav-phase]:not([data-nav-phase="off"]) .nav-brandbar__acts { display: 
   --map-walk-done: #8c93a0; /* 已走 = 与 --map-line-passed 同值（视觉同族） */
   --map-walk-ahead: #0b6e4f; /* 未走 / 当前 = --brand-green 同值（项目绿） */
 
-  /* 线宽 / 不透明度（三通道区分，不只靠颜色）。
-     ★ v3.8.1：`--map-walk-w-ahead` 5→6（与巴士段 strokeWeight:6 一致）；
-       `--map-walk-dash` 变量随虚线一起删除（JS 的 dasharray 本是硬编码，变量从未被引用）。 */
+  /* ── ★ U1（2026-11-04）：未走段**单一语义组** ───────────────────────────
+     缺陷：`now`（当前步剩余，op 1.00 / w 7）与 `ahead`（后续步，op 0.55 / w 5）
+     同属「未走」却各持一套独立参数，而两者在地图上**首尾相接** ⇒
+     一条连续路径中途突变，人眼读作「渲染错误」（题 C）。
+     修法：外观三参数收成**一组**，now/ahead 在 nav-map-walk.ts 里**共享同一对象引用**，
+     唯一允许的差异只剩 zIndex（73/70）与 showDir（true/false）。
+
+     为什么 op 从 0.55 提到 0.75（不是审美，是无障碍下限）：
+       #0b6e4f 以 α 混到 --bg #f2f4f0 上，实测对比度
+         α=0.55 → 2.39:1  ✗ 低于图形元素 3:1 下限（WCAG 1.4.11）
+         α=0.75 → 3.44:1  ✓
+       （α=1 → 5.65:1；已走的 0.85 灰 → 4.21:1，保持不动。）
+     为什么 w 取 6：与巴士段 strokeWeight 6 对齐（v3.8.1 口径），now 不再单独加粗。 */
+  --map-walk-unwalked-color: var(--map-walk-ahead); /* 复用既有色相，**不新增颜色** */
+  --map-walk-w-unwalked: 6;
+  --map-walk-op-unwalked: 0.75;
+
+  /* 线宽 / 不透明度（三通道区分，不只靠颜色）。已走段保持原值。 */
   --map-walk-w-done: 5;
-  --map-walk-w-ahead: 6;
-  --map-walk-w-now: 7;
   --map-walk-op-done: 0.85;
-  --map-walk-op-ahead: 0.55;
-  --map-walk-op-now: 1;
+
+  /* ⚠️ 以下 4 条是 **U1 已弃用的分叉变量**：
+     ① 定义保留（回滚安全：改回别名指向即可复原，不必翻 git）；
+     ② 值改为指向单一语义组的**别名**（即便有人误引用也不会再产生第二种绿）；
+     ③ `src/` 内引用已归零 —— 断言命令：
+        git grep -n "map-walk-\(w\|op\)-\(now\|ahead\)" -- src/  ⇒ 只在本段定义行命中。
+     新代码禁止引用本节；确需未走段参数请用 --map-walk-(w|op)-unwalked。 */
+  --map-walk-w-ahead: var(--map-walk-w-unwalked);
+  --map-walk-w-now: var(--map-walk-w-unwalked);
+  --map-walk-op-ahead: var(--map-walk-op-unwalked);
+  --map-walk-op-now: var(--map-walk-op-unwalked);
 
   /* 层级（插进既有 z 表：★ v3.8.1 实线化后 ghost 68 仍最低 < 步行三态 69/70/73 < 灰实 74 < 站点 90） */
   --map-z-walk-done: 69;
   --map-z-walk-ahead: 70;
   --map-z-walk-now: 73;
 
-  /* ★ T1：**走廊 ghost**（非当前段的完整步行走廊，全程常驻地图）
-     —— 比「正在跟随」那三态更细更淡：它是"预告/已过"，不该抢当前步的注意力。
+  /* ★ T1：**走廊 ghost**（非当前段的完整步行走廊，全程常驻地图）—— 独立语义组。
+     ⚠️ 走廊是**另一段路的预告**，不承载当前唯一可执行指引 ⇒
+        **不得与未走段同值**（4/0.6 vs 6/0.75）；它比当前步更细更淡，不抢注意力。
      层级 68 = 全部步行线之下（不压乘车彩段 72，与乘车段共线时线路色仍在上）。
-     ★ v3.8.1：ghost 也随 `common()` 实线化（细一档淡一档的区分保留）。 */
-  --map-walk-w-ghost: 4;
-  --map-walk-op-ghost: 0.4;
-  --map-walk-op-ghost-done: 0.5;
+     ★ v3.8.1：ghost 也随 `common()` 实线化（细一档淡一档的区分保留）。
+     ★ U1：op 0.4 → 0.6（0.4 在白瓦片上几乎与底图路名混作一片），done 档 0.5 → 0.75。
+       注：0.6 混色后 2.61:1 低于 3:1 —— 这是**刻意例外**：走廊不是可执行指引，
+       只承担"下车后还有一段"的存在感；真正要跟着走的线是未走段（3.44:1，达标）。 */
+  --map-walk-w-corridor: 4;
+  --map-walk-op-corridor: 0.6;
+  --map-walk-op-corridor-done: 0.75;
   --map-z-walk-ghost: 68;
+
+  /* ⚠️ 同样为 U1 弃用别名（3 条）：指向 corridor 组。src/ 内引用已归零。 */
+  --map-walk-w-ghost: var(--map-walk-w-corridor);
+  --map-walk-op-ghost: var(--map-walk-op-corridor);
+  --map-walk-op-ghost-done: var(--map-walk-op-corridor-done);
 
   /* 相机跟随的视野呼吸边距 —— 注意：**必须是可 parseFloat 的纯 px**。
      AMap 相机只吃数字，前端按 parseFloat(readToken("--map-fit-gap")) 直取。
