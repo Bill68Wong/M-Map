@@ -1,6 +1,30 @@
 /**
- * scripts/test-boarding-latency.ts —— 「车起步 → 切 riding + 锁牌」**延迟预算**对拍
- * （2026-11-04 新增 · P0 延迟 15~25s → ≤10s）
+ * scripts/test-boarding-latency.ts —— 「上车 → 切 riding + 锁牌」**延迟预算**对拍
+ * （2026-11-04 新增 · P0 延迟 15~25s → ≤10s；2026-11-05 补停站判据路径）
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * ⭐ **先读这段，否则会把数字读反**（2026-11-05 判据格局变了）
+ *
+ *   本文件测的是**两条判据路径**，它们的延迟差一个数量级：
+ *
+ *   | 路径 | 触发条件 | 实测延迟 | 覆盖场景 | 断言组 |
+ *   |---|---|---|---|---|
+ *   | **停站判据** `atBoardStopOf` | 车 `atStation` == 上车站 | **中位 6.0s / 平均 5.5s / 最差 11.0s** | 约 90%+ （dwell ≥ 12s） | ㉚ |
+ *   | 位置判据 r2 / 跟车斜率 | 用户随线路移动 | 中位 19.5~20.0s / 最差 29~31.5s | 漏停站帧的少数场景 | ㉑~㉘ |
+ *
+ *   ⇒ **用户实际等待 ≈ 6s，不是 20s。** 只引 ㉑~㉘ 的 20s 会严重高估。
+ *     停站判据是 2026-11-05 负责人裁决新增（「车到上车站 ⇒ 立刻切 riding」），
+ *     它把「等车走够 35m（12.2s 物理下界）」这道门整条绕过了。
+ *
+ *   ⚠️ 本文件 ㉑~㉘ 的夹具显式传 `walkActive: true`（由 be-plate 在 `f009c9a` 加，
+ *     fe-latency 已复核：仅此一行 + 注释，断言数 26 处/28 条改前改后一致）。
+ *     目的是**隔离出位置判据**，不代表「用户在走路」。停站判据本身在 ㉚ 与
+ *     `test-boarding-detect.ts` ㉒ 组覆盖。
+ *
+ *   ⚠️ 停站判据的已接受代价（㉚ 末两条断言钉住行为，防被当 bug 修掉）：
+ *     · 用户留守站台、车停靠本站 ⇒ 也会判上（裁决「车到了就会上车」）；
+ *     · `walkActive=true`（仍在步行段）时该判据被门挡住 —— 这道门是必需的。
+ * ══════════════════════════════════════════════════════════════════════
  *
  * ── 为什么必须有这份 ────────────────────────────────────────────────────
  *   `test-boarding-detect.ts` 只锁「判据对不对」，锁不住「判得多快」。
@@ -11,15 +35,17 @@
  *   ⇒ 只能跑**真代码**（`autoBoardOf` 全链路）量。
  *
  * ── 场景模型（每一处都对应生产参数，改生产参数请同步改这里）─────────────
- *   · t=0 = 公交车**关门起步**；t<0 = 站台停靠（人车同在 m=0）。
+ *   · 位置判据（`run()`）：t=0 = 公交车**关门起步**；t<0 = 站台停靠（人车同在 m=0）。
+ *   · 停站判据（`runStation()`）：`arriveS` = 车到站；`dwellS` = 停靠时长（生产中位 40s）。
  *   · 车：静止 → 以 `A_MPS2` 匀加速到 `V_CRUISE_MPS` → 匀速（澳门市区常态 12 km/h）。
  *   · 定位帧：`GPS_GAP_MS = 1.5s`（`NavShell.tsx` 的 `gpsIntervalMs` 候车期）。
  *   · 车辆帧：`VEH_GAP_MS = 12s`（`useRideTracking.ts` 的 `POLL_MS`），相位 `vehPhaseS`。
- *   · 停靠期车辆帧 `status=stopping / atStation=T100`（不构成 L-a，与生产同）。
  *
- * ⚠️ 本文件的秒数是**模型推算值**，不是真机实测：加速度 / 巡航速度 / DSAT 采集延迟
- *   三项需真机标定（见文件末 `未标定项`）。断言只钉「结构性结论」（哪道门在卡、
- *   排序关系、下界），不钉「绝对秒数」以免真机标定后被迫改断言。
+ * ⚠️ 本文件的秒数是**模型推算值**，不是真机实测：加速度 / 巡航速度 / DSAT 采集延迟 /
+ *   dwell 分布四项需真机标定。断言只钉「结构性结论」（哪道门在卡、排序关系、上界），
+ *   不钉「绝对秒数」以免真机标定后被迫改断言。
+ * ⚠️ 量化误差（偏向高估，可接受）：本文件只在**定位帧**上调用 `autoBoardOf`，而生产
+ *   `tryAuto` 在车辆帧到达后也会调用 ⇒ 停站判据的实测延迟最多比真机多 1.5s。
  *
  * 跑法：node node_modules/tsx/dist/cli.mjs scripts/test-boarding-latency.ts
  */
@@ -274,8 +300,13 @@ console.log("\n[㉒ 停靠期不得稀释车速门]");
   );
 }
 
-/* ══════════ ㉓ 端到端延迟：四个车辆帧相位 ══════════ */
-console.log("\n[㉓ 端到端延迟（4 个车辆帧相位）]");
+/* ══════════ ㉓ 端到端延迟：四个车辆帧相位（**位置判据路径**）══════════ */
+/**
+ * ⚠️ 本组测的是**位置判据**（r2 / 跟车斜率）的端到端延迟，`walkActive: true` 隔离开了
+ *   停站判据。它对应生产的**少数场景**（漏停站帧，约 5~10%）。
+ *   **主路径的延迟见 ㉚（中位 6.0s）** —— 别只引本组的 20s，那会高估用户实际等待 3 倍。
+ */
+console.log("\n[㉓ 端到端延迟（位置判据路径 · 4 个车辆帧相位）]");
 {
   const rows: { phase: number; tHit: number | null; evidence: string | null; plate: string | null }[] = [];
   for (const phase of [0, 3, 6, 9]) {
@@ -312,11 +343,17 @@ console.log("\n[㉓ 端到端延迟（4 个车辆帧相位）]");
 }
 
 /* ══════════ ㉔ 反例不得因本次改动被放行 ══════════ */
-console.log("\n[㉔ 反例回归]");
+/**
+ * ⚠️ **适用范围（2026-11-05 补）**：本组全部走**位置判据**路径（`walkActive: true` 隔离开停站判据）。
+ *   生产里若用户已到站（`walkActive=false`），「车停靠上车站」会先被**停站判据**判上——
+ *   那是 2026-11-05 负责人裁决接受的代价（见 ㉚ 末两条），**不是本组失效**。
+ *   本组守住的是：**位置判据这一路**不得被"站台等车 / 步行"骗过。
+ */
+console.log("\n[㉔ 反例回归（位置判据路径）]");
 {
   /** ① 站在站台不动，车开走并在下一站（60m 外）停住 ⇒ d 先涨后平，必须仍拒绝 */
   const waiter = run({ onBoard: false, stopAgainAtS: tAtM(60), tEndS: 60 });
-  ok(waiter.tHit == null, "站台人等车开走（车在 60m 外停住，d 先涨后平）⇒ 不判上", `tHit=${waiter.tHit}`);
+  ok(waiter.tHit == null, "站台人等车开走（车在 60m 外停住，d 先涨后平）⇒ 位置判据不判上", `tHit=${waiter.tHit}`);
 
   /** ② 用户沿线路步行（1.4 m/s）+ 巴士停驶（停在前方 60m 的下一站，仍是锁牌候选）⇒ 必须仍拒绝 */
   const walker = run({ onBoard: false, walkMps: 1.4, busParked: true, tEndS: 60 });
@@ -516,6 +553,10 @@ console.log("\n[㉗ 取消 alongM 门的代价]");
  * 人的 35m 与车的 35m 是**同一个 35m**。巴士从静止走 35m 需要 12.2s（12 km/h、1 m/s²），
  * 这个时间由**巴士运动学**决定，与量 u 还是量 v 无关。
  * ⇒ 本组把这条写成断言：`tAtM(35)` 必须 > 10s，且「任何 ≤10s 的方案都必须放宽 35m 门」。
+ *
+ * ⚠️ **适用范围（2026-11-05 补）**：本组只对**位置判据**成立。停站判据不走 35m 位移，
+ *   它的延迟由「车到站 → 下一个车辆帧」决定（㉚ 实测中位 6.0s），因此**不受本条约束**。
+ *   换言之：负责人要的「≤10s」是靠**换判据**（停站）达成的，不是靠放宽 35m 门。
  */
 console.log("\n[㉘ 物理下界不随量的对象改变]");
 {
@@ -610,6 +651,185 @@ console.log("\n[㉘ 物理下界不随量的对象改变]");
  *
  * 影响面提醒：锁错车比延迟严重一个量级 —— 进度、报站、下车提醒会**全部跟着错车走**。
  */
+
+/* ══════════ ㉚ 停站判据（2026-11-05 负责人裁决）的真实延迟 ══════════ */
+/**
+ * ── 为什么必须单独测这一组（be-plate 改了本文件 `walkActive: true` 之后）─────────
+ *   新裁决「车**停靠上车站**的停站期 = 用户已上车 ⇒ 立即切 riding」上线后，
+ *   本文件 ㉑~㉘ 测的那条路径（r2 / 跟车斜率）**不再是主路径**：
+ *   它只在「漏掉停站帧」时才被用到。⇒ 若只报「位置判据 20s」，会严重高估用户实际等待。
+ *   本组量的是新主路径：**车到站 → 判上**。
+ *
+ * ── 场景模型（与 `run()` 不同，别混用）──────────────────────────────────
+ *   车：`t < arriveS` 在路上（`atStation=null`）→ `[arriveS, arriveS+dwellS)` 停靠上车站
+ *       （`atStation=T100`）→ 之后离站继续走。
+ *   用户：`userBoards=true` 时从 `arriveS` 起跟着车走；`false` 时全程留在站台。
+ *   `walkActive=false` ⇒ 停站判据启用（生产：已到站、不在步行段）。
+ *
+ * ⚠️ 量化误差：本夹具只在**定位帧（1.5s）**上调用 `autoBoardOf`，而生产 `tryAuto`
+ *   在**车辆帧到达后也会调用**（`useRideTracking.ts` 的调用点注释）。⇒ 本组测得的延迟
+ *   最多比真机多 1.5s（一个定位帧）。宁可高估。
+ */
+interface StationOpts {
+  /** 车到站时刻（秒，可为 0） */
+  arriveS: number;
+  /** 停靠时长（秒）—— 生产 dwell 中位 40s、p10 15s */
+  dwellS: number;
+  /** `false` = 不在步行段 ⇒ 停站判据启用（生产常态） */
+  walkActive: boolean;
+  /** 车离站后用户是否跟着走（`false` = 留守站台，用于量误判代价） */
+  userBoards: boolean;
+  vehPhaseS?: number;
+  accNoiseM?: number;
+  seed?: number;
+  tEndS?: number;
+}
+
+function runStation(o: StationOpts): { tHit: number | null; evidence: string | null; plate: string | null } {
+  const gauss = gaussOf(o.seed ?? 424242);
+  const ph = o.vehPhaseS ?? 0;
+  const tEnd = o.tEndS ?? o.arriveS + o.dwellS + 60;
+  const leaveS = o.arriveS + o.dwellS;
+
+  /** 车的位置 + 状态（停站期 `atStation` 指上车站） */
+  const vehAt = (t: number): { m: number; atStation: { code: string } | null; moving: boolean } => {
+    if (t < o.arriveS) return { m: 0, atStation: null, moving: true }; // 在路上（已在本段，未到站）
+    if (t < leaveS) return { m: 0, atStation: { code: "T100" }, moving: false }; // 停靠上车站
+    return { m: busM(t - leaveS), atStation: null, moving: true }; // 已离站
+  };
+  const userPos = (t: number): number => {
+    if (!o.userBoards) return 0;
+    return t < leaveS ? 0 : busM(t - leaveS); // 只在车离站后才随车走
+  };
+
+  const fixes: FixLite[] = [];
+  for (let t = -36; t <= tEnd; t += GPS_GAP_MS / 1000) {
+    const p = atM(userPos(t) + (o.accNoiseM ? gauss() * o.accNoiseM : 0));
+    fixes.push({ lng: p.lng, lat: p.lat, accuracy: 10, ts: T0_MS + t * 1000 });
+  }
+  const vehFrames: VehFrame[] = [];
+  for (let k = -4; k <= Math.ceil(tEnd / (VEH_GAP_MS / 1000)) + 1; k++) {
+    const t = ph + k * (VEH_GAP_MS / 1000);
+    const st = vehAt(t);
+    const p = atM(st.m);
+    const v: TrackVehicle = {
+      plate: PLATE,
+      lat: p.lat,
+      lng: p.lng,
+      status: st.moving ? "moving" : "stopping",
+      interval: st.moving && t >= leaveS ? { from: { code: "T100" }, to: { code: "T101" } } : null,
+      atStation: st.atStation,
+    };
+    vehFrames.push({ ts: T0_MS + t * 1000, vehicles: [v] });
+  }
+
+  let streak = 0;
+  for (const fx of fixes) {
+    const now = fx.ts;
+    const win = fixes.filter((f) => f.ts <= now && now - f.ts <= 90_000);
+    const vh = vehFrames.filter((f) => f.ts <= now).slice(-8);
+    const lastVeh = vh[vh.length - 1];
+    const r = autoBoardOf({
+      legKind: "bus",
+      legDegraded: false,
+      colored: PATH,
+      boardMain: "T100",
+      boardPos: atM(0),
+      stopMains: STOP_MAINS,
+      vehicles: lastVeh ? lastVeh.vehicles : [],
+      vehFrames: vh,
+      fixes: win,
+      lastSwitchTs: 0,
+      nowMs: now,
+      autoLeft: AUTO_TRIES_PER_LEG,
+      streak,
+      walkActive: o.walkActive,
+    });
+    streak = r.streak;
+    if (r.hit && r.streak >= r.need) {
+      return { tHit: (now - T0_MS) / 1000, evidence: r.evidence, plate: r.plate };
+    }
+  }
+  return { tHit: null, evidence: null, plate: null };
+}
+
+console.log("\n[㉚ 停站判据延迟（新主路径）]");
+{
+  /** 扫「车到站落在轮询周期的哪一段」：这是新判据延迟的唯一主导变量 */
+  const delays: number[] = [];
+  let allAtStop = true;
+  for (const phase of [0, 3, 6, 9]) {
+    for (const arrive of [0, 2, 4, 6, 8, 10]) {
+      const r = runStation({ arriveS: arrive, dwellS: 40, walkActive: false, userBoards: true, vehPhaseS: phase });
+      if (r.tHit == null || r.evidence !== "atstop") allAtStop = false;
+      if (r.tHit != null) delays.push(r.tHit - arrive);
+    }
+  }
+  delays.sort((a, b) => a - b);
+  const mean = delays.reduce((a, b) => a + b, 0) / delays.length;
+  console.log(
+    `  dwell=40s（中位）· 24 组合：延迟 min ${delays[0]?.toFixed(1)} / 中位 ${delays[Math.floor(delays.length / 2)]?.toFixed(
+      1,
+    )} / mean ${mean.toFixed(1)} / max ${delays[delays.length - 1]?.toFixed(1)}s`,
+  );
+  ok(
+    allAtStop && delays.length === 24,
+    "★ dwell=40s 时 24 组合全部由**停站判据**判上（evidence=atstop），无一走位置判据",
+    `命中=${delays.length}/24`,
+  );
+  ok(
+    delays[delays.length - 1] <= VEH_GAP_MS / 1000 + GPS_GAP_MS / 1000,
+    "★ 停站判据延迟 ≤ 一个轮询周期 + 一个定位帧（= 12 + 1.5s）—— 由 `atStation` 事件决定，与车速/位移无关",
+    `max=${delays[delays.length - 1]?.toFixed(1)}s`,
+  );
+  ok(
+    mean <= 7.5,
+    "★ 停站判据平均延迟 ≤ 7.5s（理论均值 = 半个轮询周期 6s + 定位帧量化）",
+    `mean=${mean.toFixed(1)}s`,
+  );
+
+  /** 与位置判据对照：㉓ 的 20s 现在只适用于「漏停站帧」的少数场景 */
+  const posDelay = 19.5; // ㉓/㉔ 实测中位（walkActive=true 路径）
+  ok(
+    mean <= posDelay - 8,
+    "★ 新主路径比位置判据快 ≥ 8s ⇒ 报「延迟 20s」会严重高估用户实际等待",
+    `停站 mean=${mean.toFixed(1)}s vs 位置 ${posDelay}s`,
+  );
+
+  /** 短停（dwell < 一个轮询周期）+ 不利相位 ⇒ 必然漏掉停站帧，退回位置判据 */
+  let missed = 0;
+  for (const phase of [0, 3, 6, 9]) {
+    for (const arrive of [0, 2, 4, 6, 8, 10]) {
+      const r = runStation({ arriveS: arrive, dwellS: 8, walkActive: false, userBoards: true, vehPhaseS: phase, tEndS: 120 });
+      if (r.evidence !== "atstop") missed++;
+    }
+  }
+  ok(
+    missed > 0,
+    "★ dwell=8s（短于一个轮询周期）时存在漏帧组合 ⇒ 退回位置判据（与「~5% 场景走旧路径」的预期一致，非缺陷）",
+    `漏停站帧=${missed}/24`,
+  );
+
+  /**
+   * ⚠️ **这是裁决接受的代价，不是缺陷** —— 本断言只把行为钉住，防止有人当 bug 改掉：
+   *   用户留守站台、车到站停靠 ⇒ 停站判据同样命中 ⇒ 进 riding（而用户其实没上车）。
+   *   负责人裁决原文「车到了用户就会上车」，本组把它量出来备查。
+   */
+  const stayed = runStation({ arriveS: 4, dwellS: 40, walkActive: false, userBoards: false, vehPhaseS: 0 });
+  ok(
+    stayed.tHit != null && stayed.evidence === "atstop",
+    "★ 已知代价：用户留守站台、车停靠本站 ⇒ 也会判上（裁决「车到了就会上车」接受的误判，勿当 bug 修）",
+    `tHit=${stayed.tHit?.toFixed(1)} evidence=${stayed.evidence}`,
+  );
+
+  /** `walkActive=true`（仍在步行段）⇒ 停站判据必须被门挡住（防「车到站、人还在 300m 外」） */
+  const walking = runStation({ arriveS: 4, dwellS: 40, walkActive: true, userBoards: false, vehPhaseS: 0, tEndS: 60 });
+  ok(
+    walking.evidence !== "atstop",
+    "★ walkActive=true 时停站判据不触发（该门是必需的：`phase` 在步行段期间已是 boarding）",
+    `evidence=${walking.evidence ?? "none"}`,
+  );
+}
 
 /* ══════════ 汇总 ══════════ */
 const total = pass + fail;
