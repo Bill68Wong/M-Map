@@ -69,6 +69,7 @@ export async function GET(req: NextRequest) {
         missed: r.missed,
         // ★ 2026-11-04（U8）：因「不在运营窗口 ∧ 无车」被隐藏的线路（诊断位，与上两位并列）
         skipped_by_schedule: r.skipped_by_schedule,
+        holiday_fallback: r.holiday_fallback,
         stats: r.stats,
       },
       // 结果本身有 10s 缓存，但**响应必须不缓存**（刷新语义由 force 控制）

@@ -20,7 +20,12 @@
  */
 import { macauNowParts } from "../src/lib/lrt/day-type";
 import type { FreqRow, HeadwayIndex } from "../src/lib/recommend/headway";
-import { hideBySchedule, serviceStateAt, type ServiceState } from "../src/lib/recommend/schedule";
+import {
+  hideBySchedule,
+  holidayFallbackOf,
+  serviceStateAt,
+  type ServiceState,
+} from "../src/lib/recommend/schedule";
 
 let pass = 0;
 let fail = 0;
@@ -112,6 +117,10 @@ console.log("③ 假期表不可用（退化分支）");
   assert(at.holidayFallback === true, "假期表不可用 ⇒ 诊断 holiday_fallback = true");
   const ok = serviceStateAt(idx, "N3", macau(WED, "07:00"));
   assert(ok.holidayFallback === false, "假期表可用 ⇒ holiday_fallback = false");
+  // 诊断位（结果顶层 `holiday_fallback`）的唯一取值来源
+  assertEq(holidayFallbackOf(idxNoHoliday), true, "holidayFallbackOf：假期表空 ⇒ true（诊断位）");
+  assertEq(holidayFallbackOf(idx), false, "holidayFallbackOf：假期表可用 ⇒ false");
+  assertEq(holidayFallbackOf(undefined), false, "holidayFallbackOf：无班距表 ⇒ false（未做时间判定，不误报）");
 }
 
 // ── ④ 十二格判定表（边界逐格）──

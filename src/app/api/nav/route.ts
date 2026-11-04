@@ -113,6 +113,7 @@ export async function GET(req: NextRequest) {
         excluded: r.excluded,
         missed: r.missed,
         skipped_by_schedule: r.skipped_by_schedule,
+        holiday_fallback: r.holiday_fallback,
         provenance: r.provenance,
         stats: r.stats,
       },

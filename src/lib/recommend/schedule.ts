@@ -135,6 +135,17 @@ export function serviceStateAt(
   return { ...base, state: beforeFirst ? "before_first" : "closed", span: null };
 }
 
+/**
+ * ★ 2026-11-04（U8）：**假期表是否不可用**（诊断位 `holiday_fallback` 的唯一取值来源）。
+ *
+ * 该结论是**全局**的（`lrt_holidays` 有没有行），不是逐线的 ⇒ 由两条链路各自算一次、
+ * 挂在结果顶层；`serviceStateAt` 内部也用它（不可用 ⇒ 判 `no_data`，永不因时间隐藏）。
+ * 传 `undefined`（没有班距表）⇒ `false`：此时根本没做时间判定，报「假期回退」会误导。
+ */
+export function holidayFallbackOf(idx: HeadwayIndex | undefined): boolean {
+  return idx ? idx.holidays.size === 0 : false;
+}
+
 /** 隐藏依据（诊断位 `skipped_by_schedule` 的取值域） */
 export type ScheduleHideReason = "closed_none" | "closed_unknown";
 
