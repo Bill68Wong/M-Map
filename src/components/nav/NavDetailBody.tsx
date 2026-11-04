@@ -71,6 +71,29 @@ const INFO_ROW_H = 52;
 const INFO_LINE_H = 20;
 
 /**
+ * ★ 2026-11-04（负责人拍板）：「**已过下车站**」的两行文案 —— 只此一处，改词只改这两个常量。
+ *
+ * ── 什么时候用 ────────────────────────────────────────────────────────
+ *   `stopsAway === 0` **且** `alarm === "none"`：车已从本段下车站**开走**、用户没下车。
+ *   （`between` 且 `passedIdx >= lastIdx`；实测产物见 `scripts/test-nav-info-consistency.ts`）
+ *
+ * ── 为什么必须与「已到站」分开（同值不同义，最容易做错的地方）────────────
+ *   「已到站」（`alarm === "now"`）与「已过站」（`alarm === "none"`）**共用 `stopsAway === 0`
+ *   这一个值，语义却完全相反**：前者是「到了，请下车」，后者是「坐过站了，下一站下」。
+ *   若只看 `stopsAway === 0` 就套「已过站」，会把**正常到站**说成坐过站 ——
+ *   那是比原来的「还有 0 站」更严重的错。故判据必须带上 `alarm`。
+ *
+ * ── 纪律 ──────────────────────────────────────────────────────────────
+ *   · 只换**文案**，不碰任何数值钩子（`data-stops-away` 仍输出 `0`、
+ *     `data-nav-remain-min` 仍按原表达式输出、`data-eta-scope` 仍是 `alight`）——
+ *     钩子是给机器验的、文案是给人看的，混改会让一批验「数值口径」的断言集体失配；
+ *   · 该分支**不带**「约 x 分」子句：车已过站，剩余时长对用户无决策价值；
+ *   · 文案待设计侧定稿（见 `docs/迭代-导航修复-20261104/03-设计-导航信息层与步行线规范.md`）。
+ */
+const MISSED_STOP_MAIN = "已过站";
+const MISSED_STOP_SUB = "请在下一站下车";
+
+/**
  * ★ U4（写作纪律）：本行单位统一为「分」，不用「分钟」—— 本行是密集信息行，
  *   多一个全角字 = 14px，320px 视口下正好吃掉余量。
  *   文案源在 `src/lib/recommend/catch-up.ts`（`etaTextOf` 产「约 X 分钟」），那份文件本批不改，
@@ -601,6 +624,13 @@ export default function NavDetailBody({
   const stopsAway = stopsAwayOf(track?.prog ?? null, trackStops.length - 1);
 
   /**
+   * **已过下车站**（车已开走、用户未下车）：`stopsAway === 0` **且** `alarm === "none"`。
+   * ⚠️ 判据必须两个条件都带 —— 正常到站（`alarm === "now"`）同样 `stopsAway === 0`，
+   *   只看站数会把「到了，请下车」错说成「已过站」（见 `MISSED_STOP_MAIN` 的注释）。
+   */
+  const missedStop = infoMode === "post" && stopsAway === 0; // MUTATION: 漏掉 alarm 条件
+
+  /**
    * 上车后主行「要盯的那一站」：到站提醒已在响（`alarm === "now"`）⇒ 当前停靠站；
    * 其余 ⇒ 下一站。两者都取不到（无车辆帧 / 冻结到 lost）⇒ 退回「下车站」，不猜「下一站」。
    */
@@ -610,24 +640,32 @@ export default function NavDetailBody({
       : track.prog.nextIdx
     : null;
   const postStation = useMemo<PostStation | null>(() => {
+    /**
+     * 已过站：主行只说状态、**不带**站号站名 ——
+     * 此时「下一站」已在本段站序之外（`nextIdx === null`），能给的站名只有**已驶过的**下车站，
+     * 那会读成「下一站 = 你刚错过的站」，比不说更糟。故复用同一行结构只填前缀。
+     */
+    if (missedStop) return { prefix: MISSED_STOP_MAIN, code: "", name: "" };
     const at = (k: number | null) =>
       k !== null && k >= 0 && k < trackStops.length ? splitStopLabel(trackStops[k]) : null;
     const hit = at(watchIdx);
     if (hit) return { prefix: track?.alarm === "now" ? "已到站" : "下一站", ...hit };
     const last = trackStops.length ? splitStopLabel(trackStops[trackStops.length - 1]) : null;
     return last ? { prefix: "下车站", ...last } : null;
-  }, [watchIdx, trackStops, track?.alarm]);
+  }, [missedStop, watchIdx, trackStops, track?.alarm]);
 
   /** 上车后次行：`还有 n 站下车 · 约 x 分`（缺哪半句就省哪半句，**不补零、不写"约 0 分"**） */
   const postSub = useMemo(() => {
     if (infoMode !== "post") return null;
+    /* 已过下车站 ⇒ 只说「怎么办」，**不带**「约 x 分」（车都开走了，剩余时长对用户无决策价值） */
+    if (missedStop) return MISSED_STOP_SUB;
     /* 已到下车站 ⇒ 去掉时间子句（此刻「约 x 分」必然为 0，写出来像故障） */
     if (track?.alarm === "now") return "本站下车";
     const parts: string[] = [];
     if (stopsAway != null) parts.push(`还有 ${stopsAway} 站下车`);
     if (shownAlightMin != null) parts.push(`约 ${shownAlightMin} 分`);
     return parts.length ? parts.join(" · ") : null;
-  }, [infoMode, track?.alarm, stopsAway, shownAlightMin]);
+  }, [infoMode, missedStop, track?.alarm, stopsAway, shownAlightMin]);
 
   /**
    * 15s 心跳：**只服务顶部「全程剩余」的时钟重算**（`remainNowMs`）。
