@@ -78,7 +78,15 @@ const runVeh = (from: string, to: string) =>
  *   `pivotIdx`  ← `remainFromIdxOf(prog)`
  *   `min`       ← `legRemainMinOf({ segRemainSec, pivotIdx, minToNext, legMinutes })`
  *   `shown`     ← 地板 `Math.max(1, round(min))`（写「约 0 分」会与到站提醒抢语义）
- *   `alarm`     ← 引擎内联式（§5 用源码字符串锁住复刻）
+ *   `alarm`     ← 引擎内联式（§6 用源码字符串锁住复刻）
+ *   `missed` / `sub` ← 次行文案分支（见下）
+ *
+ * ── 「已过站」与「已到站」：**同值不同义**，这是本文件守住的最重要一对 ──
+ *   两者都 `stopsAway === 0`，但 `alarm` 相反（`none` vs `now`），文案必须相反：
+ *     · `now`  ⇒「本站下车」（到了）
+ *     · `none` ⇒「已过站 / 请在下一站下车」（坐过站了）
+ *   若判据漏掉 `alarm`，会把**正常到站**说成坐过站 —— 比原来的「还有 0 站」更严重的错。
+ *   §5 的变异断言专门证明这条能检出。
  *
  * @param rawSegSec 组件**实际看到的** `track.segProgress?.segRemainSec`：
  *   停靠帧必为 `null`（车辆无 `progress` ⇒ `useRideTracking` 置 `segProgress=null`），
@@ -101,7 +109,32 @@ const deriveRow = (p: TrackProgress | null, rawSegSec: number | null) => {
       : p.nextIdx === LAST
         ? "soon"
         : "none";
-  return { stopsAway, pivotIdx, min, shown, alarm, kind: p?.kind ?? null, passedIdx: p?.passedIdx ?? -1 };
+  /**
+   * 次行文案分支（复刻 `NavDetailBody.postSub` 的分支顺序，**顺序本身就是契约**）：
+   *   missed → 已过站 → 已到站(now) → 「还有 n 站下车 · 约 x 分」
+   */
+  const missed = stopsAway === 0 && alarm === "none";
+  const sub = missed
+    ? "请在下一站下车"
+    : alarm === "now"
+      ? "本站下车"
+      : [
+          stopsAway != null ? `还有 ${stopsAway} 站下车` : "",
+          shown != null ? `约 ${shown} 分` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ") || null;
+  return {
+    stopsAway,
+    pivotIdx,
+    min,
+    shown,
+    alarm,
+    missed,
+    sub,
+    kind: p?.kind ?? null,
+    passedIdx: p?.passedIdx ?? -1,
+  };
 };
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -305,9 +338,66 @@ console.log("── ④ 停靠态口径（U3）：分钟从「所停站」起算
 }
 
 /* ══════════════════════════════════════════════════════════════════════
-   ⑤ 变异自检：证明 §3 的不变量真能检出「统一 pivot」这个诱惑
+   ④b 「已过站」文案与「已到站」必须分开（同值不同义）
+   ──────────────────────────────────────────────────────────────────────
+   两态都 `stopsAway === 0`，`alarm` 相反 ⇒ 文案相反。这是本文件最要紧的一对：
+   漏掉 `alarm` 条件 ⇒ 把「到了，请下车」错说成「已过站」，比原来的「还有 0 站」更严重。
+   ⚠️ 同时守一条硬约束：**只换文案，不换数值** ——
+     `data-stops-away` 仍为 `0`、`data-nav-remain-min` 仍按原表达式有值。
+     钩子是给机器验的、文案是给人看的；混改会让一批验「数值口径」的断言集体失配。
    ══════════════════════════════════════════════════════════════════════ */
-console.log("── ⑤ 变异自检（不变量必须能检出造错）──");
+console.log("── ④b 「已过站」文案（只换文案，数值钩子不动）──");
+{
+  const missed = deriveRow(P_RUN_PAST, null); // 车已从下车站开走
+  const arrived = deriveRow(P_AT_ALIGHT, null); // 正常到站
+  const midRide = deriveRow(P_AT_MID2, null); // 正常「还有 1 站」
+
+  ok(
+    missed.stopsAway === 0 && missed.alarm === "none",
+    "前置：错过站态 = 站数 0 且 alarm=none",
+    `away=${String(missed.stopsAway)} alarm=${missed.alarm}`,
+  );
+
+  ok(missed.missed === true, "错过站 ⇒ 已过站分支被选中（不是「还有 0 站」句式）");
+  ok(
+    missed.sub === "请在下一站下车",
+    "错过站次行 = 「请在下一站下车」",
+    String(missed.sub),
+  );
+  ok(
+    !/还有\s*\d+\s*站/.test(String(missed.sub)) && !/\d+\s*分/.test(String(missed.sub)),
+    "错过站次行**不含**「还有 n 站」句式、**不含**分钟子句",
+    String(missed.sub),
+  );
+
+  /** 正常到站：文案必须是「本站下车」，不能被「已过站」抢走 */
+  ok(
+    arrived.missed === false && arrived.sub === "本站下车",
+    "正常到站（alarm=now）⇒ 仍走「本站下车」，**不得**被已过站抢走",
+    String(arrived.sub),
+  );
+  /** 正常行驶：仍保留站数与分钟两个子句 */
+  ok(
+    midRide.missed === false && /还有 1 站下车/.test(String(midRide.sub)) && /约 5 分/.test(String(midRide.sub)),
+    "正常行驶（还有 1 站）⇒ 文案仍为「还有 1 站下车 · 约 5 分」",
+    String(midRide.sub),
+  );
+
+  /**
+   * 硬约束：改文案**不得**顺手改数值 —— 三个钩子的取值来源必须与改前逐字节一致。
+   * 错过站态：`data-stops-away` 仍是 `0`（不是 null/负数/新值）、`data-nav-remain-min` 仍有值。
+   */
+  ok(
+    missed.stopsAway === 0 && missed.shown != null && missed.shown === Math.max(1, Math.round(missed.min)),
+    "错过站态：data-stops-away 仍为 0、data-nav-remain-min 仍按原表达式有值（文案改动没改坏数值）",
+    `away=${missed.stopsAway} remain=${String(missed.shown)}`,
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   ⑤ 变异自检：证明上面的不变量真能检出造错
+   ══════════════════════════════════════════════════════════════════════ */
+console.log("── ⑤ 变异自检（不变量与文案判据必须能检出造错）──");
 {
   /** 错误实现：站数复用「分钟」的基准站（`remainFromIdxOf`） */
   const unified = (p: TrackProgress) => LAST - (remainFromIdxOf(p) ?? 0);
@@ -340,6 +430,29 @@ console.log("── ⑤ 变异自检（不变量必须能检出造错）──")
     lostAway === 0 && deriveRow(P_LOST, null).alarm === "none" && P_LOST.passedIdx < LAST,
     "[变异] 把「不知道」写成 0（`?? 0`）⇒ 造出「0 站 + alarm=none + 未过站」⇒ 不变量 1b 可检出",
     `错值 ${lostAway}`,
+  );
+
+  /**
+   * 变异 3（本轮新增，最重要）：把「已过站」判据里的 `alarm === "none"` 漏掉
+   * ⇒ **正常到站也会被说成坐过站**。
+   *
+   * 为什么这条必须存在：`已到站`（`alarm="now"`）与 `已过站`（`alarm="none"`）
+   * 共用 `stopsAway === 0` 这**一个值**，语义却完全相反。只看站数就套「已过站」，
+   * 会把「到了，请下车」错说成「你坐过站了」——比原来的「还有 0 站」更严重的错，
+   * 且用户会据此不下车。这类"同值不同义"是本项目反复踩的坑，故用变异钉死。
+   */
+  const missedWithoutAlarm = (away: number | null) => away === 0;
+  ok(
+    missedWithoutAlarm(deriveRow(P_AT_ALIGHT, null).stopsAway) === true &&
+      deriveRow(P_AT_ALIGHT, null).alarm === "now",
+    "[变异] 漏掉 `alarm === \"none\"` ⇒ 正常到站(alarm=now)也会被判成已过站 ⇒ 文案断言可检出",
+    `正常到站 away=${String(deriveRow(P_AT_ALIGHT, null).stopsAway)} alarm=${deriveRow(P_AT_ALIGHT, null).alarm}`,
+  );
+  ok(
+    deriveRow(P_AT_ALIGHT, null).missed === false &&
+      deriveRow(P_AT_ALIGHT, null).sub === "本站下车" &&
+      deriveRow(P_RUN_PAST, null).missed === true,
+    "[变异] 正确判据下两态分开：到站 → missed=false（本站下车）/ 过站 → missed=true",
   );
 }
 
@@ -392,6 +505,31 @@ console.log("── ⑥ 接线与复刻锁定（源码字符串）──");
   ok(
     rideEngine.includes('prog.atIdx === alightIdx ? "now" : prog.nextIdx === alightIdx ? "soon" : "none"'),
     "复刻锁定：alarm 判据与引擎内联表达式逐字一致（改了那里必须同步本脚本）",
+  );
+
+  /**
+   * 「已过站」文案的接线锁定（2026-11-04 负责人拍板）：
+   *   ① 文案抽成常量（设计侧改词只改一处，不在 JSX 里散写）；
+   *   ② 判据**必须**同时含 `stopsAway === 0` 与 `alarm === "none"`（漏后者会把到站说过站）；
+   *   ③ `alarm === "now"` 的「本站下车」分支必须仍在（否则正常到站失去文案）。
+   */
+  ok(
+    navDetail.includes('const MISSED_STOP_MAIN = "已过站"') &&
+      navDetail.includes('const MISSED_STOP_SUB = "请在下一站下车"'),
+    "接线：已过站文案抽成常量（设计侧改词只改一处）",
+  );
+  ok(
+    /const missedStop = infoMode === "post" && stopsAway === 0 && track\?\.alarm === "none";/.test(navDetail),
+    "接线：已过站判据 = post 且 stopsAway===0 且 alarm===\"none\"（三个条件缺一不可）",
+  );
+  ok(
+    navDetail.includes('if (missedStop) return MISSED_STOP_SUB;') &&
+      navDetail.includes('if (track?.alarm === "now") return "本站下车";'),
+    "接线：次行分支顺序 = 已过站 → 已到站（顺序即契约，到站不得被过站抢占）",
+  );
+  ok(
+    navDetail.includes("if (missedStop) return { prefix: MISSED_STOP_MAIN, code: \"\", name: \"\" };"),
+    "接线：已过站主行只说状态、不带站号站名（避免读成「下一站 = 你刚错过的站」）",
   );
 }
 
