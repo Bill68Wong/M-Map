@@ -62,10 +62,24 @@ const PRESSABLE = [
 const DEFERRED = ".route-sheet__peek";
 
 /**
- * 地图容器内**一律不写属性**（T8）。
- * 高德自己监听 touch 做平移/缩放，且站点 pin 是容器内的 DOM（`data-code` 元素），
- * 拖动地图时 pointerdown 必然先落在 pin 或容器上 ⇒ 若在此写属性，
- * 每次拖动都会闪一下 press 态。故整棵容器排除，宁可地图 pin 无按压反馈。
+ * ★ 地图容器整棵排除（T8）—— **这是刻意不覆盖，不是漏做**。
+ *
+ * ── 为什么不能给地图内的元素写 press 态 ──────────────────────────────────
+ *   高德 JS API 自己在 `.amap-container` 上监听 touch/pointer 做**平移与缩放**；
+ *   而我们的站点 pin 是**容器内的 DOM**（`<div class="nav-map__station" data-code=…>`，
+ *   由 `NavMap.tsx` 作为 `AMap.Marker` 的 `content` 注入）。因此拖动地图时，
+ *   `pointerdown` **必然先落在 pin 或容器上** ⇒ 只要在这里写 `data-pressed`，
+ *   用户每次拖地图都会先闪过一次 pin 高亮，比没有反馈更糟。
+ *
+ * ── 代价与已知取舍 ──────────────────────────────────────────────────────
+ *   代价：地图 pin 目前**没有任何按压反馈**（连外扩描边环也没有）。
+ *   `globals.css` 里已备好 T8 的描边环规则（`.nav-map__station[data-pressed="true"]`），
+ *   但它默认永远不会被点亮 —— 保留是为了将来改用 marker 事件时可直接复用。
+ *
+ * ── 将来要给 pin 反馈的正确做法（下一批，需改 NavMap.tsx）───────────────
+ *   不要放宽这里的选择器；应当走**高德自己的事件**：
+ *   `marker.on("touchstart" / "mousedown", …)` 里加/删 `data-pressed`，
+ *   并在 `marker.on("touchmove")` 位移超限时撤销。这样与地图手势天然解耦。
  */
 const MAP_SURFACE = ".amap-container, [data-map-surface]";
 
