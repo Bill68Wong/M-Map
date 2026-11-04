@@ -404,11 +404,20 @@ export default function NavShell({
 
   /**
    * ★ T1：**当前步行段**（null = 不在步行段）。
-   *   声明位置**必须早于** `useRideTracking` —— 乘车引擎要拿 `walkActive` 做互斥门控
-   *   （步行中禁止自动上车），否则两个引擎会同时跑（旧版注释声称互斥，实际没有入参）。
+   *   声明位置**必须早于** `useRideTracking` —— 引擎要拿 `walkActive` 决定**拉车辆帧的间隔**
+   *   （步行段放慢到 `POLL_MS × 5`）。
+   *
+   * ⚠️⚠️ **`walkActive` 不是「自动上车」的互斥门**（2026-11-05 核实，此前多处注释写反了）：
+   *   本文件历来的说法是「步行中禁止自动上车 / 真互斥」，但 `tryAuto` 的守卫只有
+   *   `phase !== "boarding" || !active` 与 `!leg` —— **从来没有 `walkActive` 早退**。
+   *   它真正的两个作用点只有：
+   *     ① 本文件渲染层：`track: walkActive ? null : trackView`（步行段不渲染车相关 UI）；
+   *     ② `useRideTracking`：`schedule(walkActive ? POLL_MS * 5 : 0)`（放慢拉帧）。
+   *   ⇒ 别再把「互斥」当既成事实往下传：**「车到站即切 riding」这类新判据如果不看用户位移，
+   *     必须自己带门**（否则「人在去站台路上」会被判成已上车）。这条由该判据的实现方负责。
    */
   const [walkSeg, setWalkSeg] = useState<"out" | "in" | null>(null);
-  /** 步行段活跃（与乘车互斥；下传 `useRideTracking` 做真实门控） */
+  /** 步行段活跃（**不做上车判定互斥**，只决定「不渲染 track」与「放慢拉车辆帧」；见上方注释） */
   const walkActive = walkSeg !== null;
   /**
    * ★ 步行重算的观测标记（`auto|manual` + 序号）。
@@ -426,7 +435,11 @@ export default function NavShell({
     anchors: ov.body?.legs ?? null,
     strips: ov.body?.strips ?? null,
     active: navActive,
-    /** ★ T1：步行活跃 ⇒ 引擎内 `tryAuto` 早退（真互斥，不是靠调用方不渲染） */
+    /**
+     * ⚠️ **不是**「引擎内 `tryAuto` 早退」——`tryAuto` 没有 `walkActive` 判断（2026-11-05 核实）。
+     *   本参数唯一作用是让引擎把拉车辆帧的间隔放慢到 `POLL_MS × 5`（`schedule(walkActive ? …)`）。
+     *   ⇒ `walkActive` 决定**拉帧节拍**，不决定**能不能自动上车**。
+     */
     walkActive,
     userFix: userFixR.fix,
     onRequestGps: userFixR.start,
@@ -525,11 +538,16 @@ export default function NavShell({
 
      推进规则（全自动，用户不再需要点「开始步行」）：
        ① 「开始导航」/「开始步行(首段)」⇒ 冻结起点 + 乘车引擎进 boarding + 进入步行出发段；
-       ② 走到上车站（`walkFollow.phase==="arrived"`）⇒ 交出步行段 ⇒ 乘车引擎放开自动上车；
+       ② 走到上车站（`walkFollow.phase==="arrived"`）⇒ 交出步行段 ⇒ 乘车 UI 恢复
+          （`track` 恢复渲染、拉车辆帧回到 12s 档）。**不是**「放开自动上车」——它从未被挡（见下）；
        ③ 最后一程下车（`ride.phase==="done"`）⇒ 自动进入步行到达段；
        ④ 到达目的地 ⇒ 横幅转「已到达」，由「结束导航」收尾。
-     **互斥落地**：`walkActive` 下传 `useRideTracking`（引擎内 `tryAuto` 早退），
-       不再只靠注释说"步行中禁止自动上车"。
+     **互斥（如实说明）**：`walkActive` **不构成上车判定的互斥门** —— `tryAuto` 的守卫只有
+       `phase !== "boarding" || !active` 与 `!leg`，从来没有 `walkActive` 早退（此前注释写反了，
+       2026-11-05 核实）。它的真实作用只有「步行段不渲染 track」与「放慢拉车辆帧」两处。
+       真正的互斥来自**写入侧清场**：`ride.phase === "riding"` 时本文件有 effect 主动 `endWalk()`，
+       把出发段步行收掉（见下方「进入 riding 后必须清掉出发段步行」）。
+       ⇒ 「车到站即切 riding」这类不看用户位移的新判据，**必须自己带门**。
      **AC-08a 预算（新口径）**：预取 2 次（首/末各 1）+ 重算 2 次（自动 1 / 手动 1）
        ⇒ 单次导航 `/api/walk-route` 上限 **4** 次（旧注释写 ≤2 已过时）。
      ══════════════════════════════════════════════════════════════════════ */
@@ -866,7 +884,11 @@ export default function NavShell({
     document.body.setAttribute("data-walk-recalc", `${recalcKind}:${used}`);
   }, [walkActive, recalcKind, recalcSeq, walkSeg, reloadLeftFn]);
 
-  /** ① 走到上车站 ⇒ 交出步行段（互斥解除 ⇒ 自动上车立刻恢复） */
+  /**
+   * ① 走到上车站 ⇒ 交出步行段。
+   *   目的：把步行的**显示态**与**拉帧节拍**交还给乘车侧（`track` 恢复渲染、12s 轮询恢复）。
+   *   ⚠️ **不是**「互斥解除 ⇒ 自动上车恢复」—— `walkActive` 从来不挡自动上车（见上方核实）。
+   */
   useEffect(() => {
     if (walkSeg !== "out") return;
     if (walkFollow.phase !== "arrived") return;
@@ -887,7 +909,9 @@ export default function NavShell({
 
   /**
    * ③ 步行路线取不到（或 OD 不存在）⇒ **必须放弃该步行段**：
-   *   否则 `walkActive` 恒 true，`tryAuto` 永久早退 ⇒ 用户既看不到横幅也不能自动上车（死锁）。
+   *   否则 `walkActive` 恒 true ⇒ 步行横幅一直挂着、`track` 恒为 `null`（车相关 UI 全不出）
+   *   ⇒ 用户既看不到横幅也看不到车（卡在中间态）。
+   *   ⚠️ 不是「`tryAuto` 永久早退」造成的死锁 —— `tryAuto` 不含 `walkActive` 判断（见上方核实）。
    */
   useEffect(() => {
     if (walkSeg === "out" && (!hasWalkOut || walkRoute.out.phase === "failed")) endWalk();
@@ -1013,10 +1037,11 @@ export default function NavShell({
       ? "recommend"
       : /**
          * ★ `walk` 必须让位给 `riding`（`walkActive && ride.phase !== "riding"`）：
-         *   写入侧已做互斥（`walkActive` 下 `tryAuto` 早退 + 步行段 `track` 传 `null`），
-         *   但**自动上车是异步触发**，仍存在「riding 已开始、walkSeg 尚未清」的帧窗口 ——
+         *   写入侧**没有**「互斥门」（`walkActive` 不参与 `tryAuto`，见上方核实），只有
+         *   「进入 riding 后 `endWalk()`」的清场 effect —— 而**自动上车是异步触发**，
+         *   必然存在「riding 已开始、`walkSeg` 尚未清」的帧窗口。
          *   那一帧若判 `walk`，整页会按步行态渲染（底导隐藏、横幅压住），表现就是
-         *   「车都开了还让我走去车站」。这道显示层门是写入侧互斥**替代不了**的。
+         *   「车都开了还让我走去车站」。⇒ 这道**显示层**门是清场 effect 替代不了的。
          * ⚠️ `walk` 这个**取值本身必须保留**（`globals.css` 的
          *   `body[data-nav-phase="walk"] .bottom-nav` 与 e2e 都依赖它）。
          */
@@ -1117,7 +1142,9 @@ export default function NavShell({
     freezeOrigin(); // ★ T2：进导航同样冻结（从推荐列表点卡片也算"开始这次行程"）
     /**
      * ★ T1：换方案 ⇒ 旧的步行段几何作废，必须先收（含「换乘站台切过去」这条路径）。
-     *   不收的话 `walkActive` 会带进新卡的乘车引擎 ⇒ 自动上车被判互斥永久挡住。
+     *   不收的话旧步行段会带进新卡：横幅还挂着上一条路线的走向、`track` 恒 `null`
+     *   （车相关 UI 全不出），且拉帧节拍停在步行档（60s）。
+     *   ⚠️ 不是「自动上车被判互斥永久挡住」—— `walkActive` 不参与 `tryAuto`（见上方核实）。
      */
     endWalk();
     /**
