@@ -38,7 +38,6 @@ import {
   remainTotalMinOf,
 } from "@/lib/nav/remaining-view";
 import { remainFromIdxOf, stopsAwayOf } from "@/lib/nav/track";
-import { candViewOf, type CandState } from "./cand-view";
 import type { RideTrackView } from "./useRideTracking";
 /* ★ v3.6.0 S5：步行预览（展开键 + 静态步骤列表） */
 import WalkSegToggle from "@/components/walk/WalkSegToggle";
@@ -113,14 +112,6 @@ const MISSED_STOP_PREFIX = "已过站";
 const MISSED_STOP_SUB_TRANSFER = "请在下一站下车";
 /** 次行·本段是最后一程（下车站即本行程终点） */
 const MISSED_STOP_SUB_ARRIVE = "请下车";
-
-/* ══════════════════════════════════════════════════════════════════════
-   ★ 2026-11-04（设计 §2.10）：「停站期候选车牌」的展示判定
-   ─────────────────────────────────────────────────────────────────────
-   纯逻辑在 `./cand-view.ts`（**可被单测直接 import，断言的就是线上那一份**）。
-   为什么不写在本文件：`.tsx` 会拖进 React / 图标库 / 全部子组件，测试只能读源码字符串
-   或复刻实现 —— 本项目刚因"复刻"栽过一次（组件判据被改坏，复刻仍全绿）。
-   ══════════════════════════════════════════════════════════════════════ */
 
 /**
  * ★ U4（写作纪律）：本行单位统一为「分」，不用「分钟」—— 本行是密集信息行，
@@ -227,13 +218,6 @@ interface NavInfoRowProps {
    *   所以判定必须带 `alarm`；漏掉它会把「到了，请下车」错说成「你坐过站了」。
    */
   missed: boolean;
-  /**
-   * ★ 2026-11-04（设计 §2.10）：停站期候选车牌 —— **已由 `candViewOf` 判完**
-   * （`candState` 是最终六值，`candPlate` 只有 `unique`/`strong` 时才非空）。
-   * 本组件只负责"给了就画、没给就不画"，**不再重复判相位/新鲜度**（两处判必漂）。
-   */
-  candState: CandState;
-  candPlate: string | null;
 }
 
 /**
@@ -256,8 +240,6 @@ function NavInfoRow({
   remainMin,
   stopsAway,
   missed,
-  candState,
-  candPlate,
 }: NavInfoRowProps) {
   const rowRef = useRef<HTMLDivElement | null>(null);
   const vw = useViewportW() || 390;
@@ -306,17 +288,6 @@ function NavInfoRow({
       data-stops-away={stopsAway == null ? undefined : stopsAway}
       /* 「已过站」的唯一机器可验口径：`"1"` ⟺ stopsAway===0 且 alarm==="none"；其余不输出 */
       data-nav-missed={missed ? "1" : undefined}
-      /**
-       * ★ 2026-11-04（设计 §2.10）：候选车牌的两个钩子。
-       *   · `data-cand-state`：**候车期始终输出**（六值：`unique|strong|ambiguous|stale|none|off`）。
-       *     QA 靠它断言「歧义时必须不显示」，不必真造"两车同停"的现场。
-       *     `post` 态不输出 —— 那个形态里根本没有"来车"这个概念。
-       *   · `data-cand-plate`：**只在真的显示时**输出（`unique`/`strong` 且有牌）。
-       *   ⛔ **不要**复用 `data-plate` / `data-plate-state` / `data-match-pending`：
-       *     那三个在乘车态的语义是「已锁定」，QA 会误读成"已经上车了"。
-       */
-      data-cand-state={mode === "pre" ? candState : undefined}
-      data-cand-plate={mode === "pre" && candPlate ? candPlate : undefined}
       style={{
         /**
          * 定高 52（`INFO_ROW_H`）—— 两态共用 ⇒ 状态切换零跳动。
@@ -327,20 +298,12 @@ function NavInfoRow({
          *     硬钉 52 会**裁掉**邻班区或让它压到下方纵条上。
          *     ⇒ 让位优先于定高（不截断、不重叠）。实测值照旧写进 `data-nav-info-h`，
          *       断言「两态恒 52」请用**巴士卡**，轻轨卡是已知例外。
-         *   · ★ 2026-11-04：`pre` 出现候选车牌时**也定高 52**（两行：5+20+2+20+5）。
-         *     它只可能是巴士段（轻轨 `candState === "off"`），所以不与上面那条例外冲突。
          */
         minHeight: INFO_ROW_H,
-        height: mode === "post" || (mode === "pre" && !!candPlate) ? INFO_ROW_H : undefined,
+        height: mode === "post" ? INFO_ROW_H : undefined,
         boxSizing: "border-box",
-        /**
-         * 单行态垂直居中（上下各 16px 留白）；双行态贴顶，块高 42 = 20 + 2 + 20。
-         * ★ 2026-11-04：`pre` 出现候选车牌时也必须 `flex-start`，否则图标会垂直居中到
-         *   两行之间（既不贴主行也不贴次行，读起来像"这两行都不属于它"）。
-         *   代价是主行从 16px 上移到 5px（−11px 真实位移），设计已接受：同样的位移
-         *   今天在 `pre → post` 已经发生，本设计没引入新类型。
-         */
-        alignItems: mode === "pre" && !candPlate ? "center" : "flex-start",
+        /* 单行态垂直居中（上下各 16px 留白）；双行态贴顶，块高 42 = 20 + 2 + 20 */
+        alignItems: mode === "pre" ? "center" : "flex-start",
       }}
     >
       {/* 引导图标只换形状不换色（两者同为 `--muted`）—— 避免"颜色承担状态" */}
@@ -367,81 +330,30 @@ function NavInfoRow({
           }}
         >
           {mode === "pre" ? (
-            /**
-             * ★ 2026-11-04（设计 §2.10）：`pre` 可能是 1 行（无候选车牌）或 2 行（有）。
-             *   外层列容器负责"主行 + 可选次行"，高度由根节点的 `height/minHeight` 兜住
-             *   （有两行时定高 52，无两行时 minHeight 52 + 居中），**不写高度过渡**。
-             */
             <div
               style={{
                 display: "flex",
-                flexDirection: "column",
-                gap: 2,
-                /* 两行时块高 42（20 + 2 + 20）；单行时不撑高，交给根节点居中 */
-                height: candPlate ? INFO_LINE_H * 2 + 2 : undefined,
+                alignItems: "center",
+                gap: 5,
+                /* `minHeight` 而非 `height`：轻轨左槽是列布局（主行 + 方向·时刻 + 邻班区），
+                   钉死 20px 会让它溢出到块外。巴士卡内容就是 20px，行为与定高一致。 */
+                minHeight: INFO_LINE_H,
+                whiteSpace: "nowrap",
               }}
             >
-              <div
+              <span
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 5,
-                  /* `minHeight` 而非 `height`：轻轨左槽是列布局（主行 + 方向·时刻 + 邻班区），
-                     钉死 20px 会让它溢出到块外。巴士卡内容就是 20px，行为与定高一致。 */
-                  minHeight: INFO_LINE_H,
-                  whiteSpace: "nowrap",
+                  /* `flex: 1` 把右槽（赶车标签）挤到行末 —— 与旧 `.rc-text`（flex:1）同一种对齐 */
+                  flex: 1,
+                  minWidth: 0,
+                  fontSize: vw >= 360 ? 14 : 13,
+                  lineHeight: `${INFO_LINE_H}px`,
+                  color: "var(--fg-2)",
                 }}
               >
-                <span
-                  style={{
-                    /* `flex: 1` 把右槽（赶车标签）挤到行末 —— 与旧 `.rc-text`（flex:1）同一种对齐 */
-                    flex: 1,
-                    minWidth: 0,
-                    fontSize: vw >= 360 ? 14 : 13,
-                    lineHeight: `${INFO_LINE_H}px`,
-                    color: "var(--fg-2)",
-                  }}
-                >
-                  {preMain}
-                </span>
-                {preAside}
-              </div>
-              {/*
-                ★ 次行「来车 <车牌>」（设计 §2.10 定稿）。
-                · 左缘与主行文字对齐：本容器的原点是 `.rc-dot` 之后的 flex 起点（= 29px），
-                  所以**不需要再补 padding** —— 补了反而会跑偏到 58px；
-                · ⛔ 不用 `.plate` / `plate--sm`：黑底黄字是「已确认上车」的语言（乘车态底栏在用），
-                  在这里会读成"已经上车了"；
-                · ⛔ 图标保持 `busStop`，**不换 `bus`**（换图标 = 状态跃迁的暗示，此处没有跃迁，
-                  `data-nav-info` 仍是 `pre`）；
-                · 车牌数字用 `tabular-nums`：12s 轮询换车时宽度不抖。
-              */}
-              {candPlate && (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "baseline",
-                    gap: 4,
-                    height: INFO_LINE_H,
-                    lineHeight: `${INFO_LINE_H}px`,
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  <span style={{ flex: "none", fontSize: 13, color: "var(--muted)" }}>来车</span>
-                  <span
-                    style={{
-                      flex: "none",
-                      fontSize: 13,
-                      fontWeight: 600,
-                      color: "var(--fg)",
-                      fontVariantNumeric: "tabular-nums",
-                      letterSpacing: "0.02em",
-                    }}
-                  >
-                    {candPlate}
-                  </span>
-                </div>
-              )}
+                {preMain}
+              </span>
+              {preAside}
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 2, height: INFO_LINE_H * 2 + 2 }}>
@@ -863,39 +775,6 @@ export default function NavDetailBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [etaTick, clockOffsetMs],
   );
-  /**
-   * **本地**时间轴上的"现在"（★ 2026-11-04：候选车牌的新鲜度判定用）。
-   *
-   * 为什么不复用 `remainNowMs`：那个带 `clockOffsetMs`（映射到**服务端**时间轴），
-   * 而 `lastVehicleTs` 是**客户端** `Date.now()` 写的。两者相减会混进时钟偏移
-   * （正常几十毫秒无感，但偏移异常时会误判 stale/fresh）。
-   * 同样只在 `useMemo` 里读 `Date.now()`、只由既有 15s `etaTick` 驱动，不新增定时器。
-   */
-  const localNowMs = useMemo(
-    () => Date.now(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [etaTick],
-  );
-
-  /**
-   * ★ 2026-11-04（设计 §2.10）：停站期候选车牌 —— 展示判定的**唯一出口**。
-   *   判定层只给几何（`track.candAtStop`），相位 / 锁存 / 段类型 / 帧新鲜度由 `candViewOf` 补齐。
-   *   ⚠️ `legKind` 取**当前腿**（`legIdx`）而不是 `card.rides[0]`：换乘到第二程时
-   *     第一程可能是巴士、第二程是轻轨（或反之），取错腿会把"轻轨段"当成巴士段。
-   *   ⚠️ 位置必须在 `localNowMs` 之后（它读它）；`switch` 到前面会 TDZ 报错。
-   */
-  const candView = useMemo(
-    () =>
-      candViewOf({
-        cand: track?.candAtStop ?? null,
-        boarding: track?.phase === "boarding",
-        latched: hasEnteredRiding,
-        legKind: card.rides[legIdx]?.kind ?? null,
-        lastVehicleTs: track?.lastVehicleTs ?? 0,
-        nowMs: localNowMs,
-      }),
-    [track?.candAtStop, track?.phase, track?.lastVehicleTs, hasEnteredRiding, card.rides, legIdx, localNowMs],
-  );
   const remain = useMemo(
     () =>
       liveRemain
@@ -1156,9 +1035,6 @@ export default function NavDetailBody({
             remainMin={null}
             stopsAway={null}
             missed={false}
-            /* ★ 2026-11-04：候选车牌只出现在 `pre`（`candViewOf` 已判完相位/新鲜度） */
-            candState={candView.state}
-            candPlate={candView.plate}
           />
         )}
         {infoMode === "post" && (
@@ -1172,9 +1048,6 @@ export default function NavDetailBody({
             remainMin={shownAlightMin}
             stopsAway={stopsAway}
             missed={missedStop}
-            /* `post` 形态没有「来车」概念：钩子不输出、次行也不画（见 NavInfoRow 根节点注释） */
-            candState="off"
-            candPlate={null}
           />
         )}
       </div>
