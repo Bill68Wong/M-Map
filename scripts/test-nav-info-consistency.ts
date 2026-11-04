@@ -58,6 +58,13 @@ const LAST = MAINS.length - 1; // 3
 const HOP = [3, 4, 5, 0]; // 末站无 minToNext
 const LEG_MIN = HOP[0] + HOP[1] + HOP[2]; // 12
 
+/**
+ * 站条节点（`StripStop` 的两列：`code` + `label`）。
+ * `label` 刻意写成「站号 + 空格 + 站名」——这正是服务端 `buildStrips` 给巴士段的形状
+ * （`types.ts` 里 `label` 注释：`C653 金峰南岸/金譽峰`），`splitStopLabel()` 就是按它拆的。
+ */
+const STOPS = MAINS.map((code, k) => ({ code, name: `測試站${k + 1}` }));
+
 /** 按真实 `TrackVehicle` 形状造帧（再由**真实** `progressOf` 产出进度） */
 const veh = (patch: Partial<TrackVehicle>): TrackVehicle => ({
   plate: "MZ-00-00",
@@ -92,7 +99,7 @@ const runVeh = (from: string, to: string) =>
  *   停靠帧必为 `null`（车辆无 `progress` ⇒ `useRideTracking` 置 `segProgress=null`），
  *   行驶帧取决于有没有位置模型 —— 这正是"前端两档 / 服务端一档"的分叉点。
  */
-const deriveRow = (p: TrackProgress | null, rawSegSec: number | null) => {
+const deriveRow = (p: TrackProgress | null, rawSegSec: number | null, legIdx = 0, rideCount = 2) => {
   const stopsAway = stopsAwayOf(p, LAST);
   const pivotIdx = remainFromIdxOf(p);
   const min = legRemainMinOf({
@@ -112,10 +119,14 @@ const deriveRow = (p: TrackProgress | null, rawSegSec: number | null) => {
   /**
    * 次行文案分支（复刻 `NavDetailBody.postSub` 的分支顺序，**顺序本身就是契约**）：
    *   missed → 已过站 → 已到站(now) → 「还有 n 站下车 · 约 x 分」
+   * 次行两档按「本行程是否还有后续程」分：`legIdx < rides.length - 1` ⇒ 要换乘。
    */
   const missed = stopsAway === 0 && alarm === "none";
+  const hasNextLeg = legIdx < rideCount - 1;
   const sub = missed
-    ? "请在下一站下车"
+    ? hasNextLeg
+      ? "请在下一站下车"
+      : "请下车"
     : alarm === "now"
       ? "本站下车"
       : [
@@ -124,6 +135,14 @@ const deriveRow = (p: TrackProgress | null, rawSegSec: number | null) => {
         ]
           .filter(Boolean)
           .join(" · ") || null;
+  /**
+   * 主行（`NavDetailBody.postStation`）：已过站时**前缀翻转、站号站名仍是被错过的那一站**。
+   * 设计定稿要求「过站前后同一组站号站名逐字不变」⇒ 这里用下车站（`lastIdx`），
+   * 而非 `watchIdx`（过站时 `nextIdx === null`，取不到）。
+   */
+  const main = missed
+    ? { prefix: "已过站", code: STOPS[LAST].code, name: STOPS[LAST].name, prefixTone: "fg2" as const }
+    : null;
   return {
     stopsAway,
     pivotIdx,
@@ -132,6 +151,9 @@ const deriveRow = (p: TrackProgress | null, rawSegSec: number | null) => {
     alarm,
     missed,
     sub,
+    main,
+    /** `data-nav-missed` 的实际输出（`"1"` 或 `undefined`＝属性不输出） */
+    missedAttr: missed ? ("1" as const) : undefined,
     kind: p?.kind ?? null,
     passedIdx: p?.passedIdx ?? -1,
   };
@@ -338,19 +360,27 @@ console.log("── ④ 停靠态口径（U3）：分钟从「所停站」起算
 }
 
 /* ══════════════════════════════════════════════════════════════════════
-   ④b 「已过站」文案与「已到站」必须分开（同值不同义）
+   ④b 「已过站」文案与三义真相表（`stopsAway===0` 的三种语义）
    ──────────────────────────────────────────────────────────────────────
-   两态都 `stopsAway === 0`，`alarm` 相反 ⇒ 文案相反。这是本文件最要紧的一对：
+   三行**共用 `stopsAway === 0` 这一个值**，语义完全不同：
+     | stops-away | alarm | nav-missed | 语义 |
+     |---|---|---|---|
+     | 0 | now  | 不存在 | 已到站（车停在下车站） |
+     | 0 | soon | 不存在 | 即将到站（正开往下车站区间内） |
+     | 0 | none | `"1"`  | 已过站（坐过站了） |
    漏掉 `alarm` 条件 ⇒ 把「到了，请下车」错说成「已过站」，比原来的「还有 0 站」更严重。
    ⚠️ 同时守一条硬约束：**只换文案，不换数值** ——
      `data-stops-away` 仍为 `0`、`data-nav-remain-min` 仍按原表达式有值。
      钩子是给机器验的、文案是给人看的；混改会让一批验「数值口径」的断言集体失配。
+   ⚠️ 另守一条设计定稿理由：四种前缀**等宽（3 全角）** ⇒ 过站前后零水平重排。
    ══════════════════════════════════════════════════════════════════════ */
-console.log("── ④b 「已过站」文案（只换文案，数值钩子不动）──");
+console.log("── ④b 「已过站」文案 + 三义真相表（只换文案，数值钩子不动）──");
 {
-  const missed = deriveRow(P_RUN_PAST, null); // 车已从下车站开走
-  const arrived = deriveRow(P_AT_ALIGHT, null); // 正常到站
-  const midRide = deriveRow(P_AT_MID2, null); // 正常「还有 1 站」
+  const missed = deriveRow(P_RUN_PAST, null); // 车已从下车站开走（本段非最后一程 ⇒ 要换乘）
+  const missedLast = deriveRow(P_RUN_PAST, null, 1, 2); // 同上，但本段是最后一程
+  const arrived = deriveRow(P_AT_ALIGHT, null); // 正常到站（车停在下车站）
+  const soonRow = deriveRow(P_AT_MID2, null); // 即将到达（还有 1 站，下车站=下一站）
+  const midRide = deriveRow(P_AT_MID2, null); // 同上，文案断言复用
 
   ok(
     missed.stopsAway === 0 && missed.alarm === "none",
@@ -358,15 +388,65 @@ console.log("── ④b 「已过站」文案（只换文案，数值钩子不�
     `away=${String(missed.stopsAway)} alarm=${missed.alarm}`,
   );
 
-  ok(missed.missed === true, "错过站 ⇒ 已过站分支被选中（不是「还有 0 站」句式）");
+  /* ── 三义真相表：`data-nav-missed` 只在第三行出现 ── */
   ok(
-    missed.sub === "请在下一站下车",
-    "错过站次行 = 「请在下一站下车」",
+    arrived.alarm === "now" && arrived.stopsAway === 0 && arrived.missedAttr === undefined,
+    "三义表·已到站：stops-away=0 + alarm=now ⇒ **无** data-nav-missed",
+    String(arrived.missedAttr),
+  );
+  ok(
+    soonRow.alarm === "soon" && soonRow.stopsAway === 1 && soonRow.missedAttr === undefined,
+    "三义表·即将到达（还有 1 站）⇒ 站数 1、**无** data-nav-missed",
+    `away=${String(soonRow.stopsAway)} attr=${String(soonRow.missedAttr)}`,
+  );
+  ok(
+    missed.missedAttr === "1",
+    "三义表·已过站：stops-away=0 + alarm=none ⇒ data-nav-missed=\"1\"",
+    String(missed.missedAttr),
+  );
+  ok(
+    new Set([arrived, missed]).size === 2 &&
+      [arrived, missed].every((r) => r.stopsAway === 0) &&
+      arrived.missedAttr !== missed.missedAttr,
+    "三义表·**同值不同义**：两态 stops-away 都是 0，但 data-nav-missed 必须一个是 undefined、一个是 \"1\"",
+  );
+
+  /* ── 主行：前缀翻转，站号站名逐字不变 ── */
+  ok(
+    missed.main?.prefix === "已过站" &&
+      missed.main?.code === STOPS[LAST].code &&
+      missed.main?.name === STOPS[LAST].name,
+    "主行 = 「已过站 + 下车站站号 + 下车站站名」（取 lastIdx，不取 nextIdx —— 过站时 nextIdx 为 null）",
+    `${String(missed.main?.prefix)} ${String(missed.main?.code)} ${String(missed.main?.name)}`,
+  );
+  ok(missed.main?.prefixTone === "fg2", "主行前缀色提一档（--muted → --fg-2）");
+  /**
+   * 设计定稿的核心理由：四种前缀等宽 ⇒ 前缀槽宽度恒定 ⇒ 站名零水平重排。
+   * 这条是**可机验**的（字数），且一旦有人把「已过站」改成「已过站了」就会红 —— 值得守。
+   */
+  {
+    const prefixes = ["已过站", "下一站", "已到站", "下车站"];
+    ok(
+      prefixes.every((s) => [...s].length === 3),
+      "设计定稿：四种前缀同为 3 全角 ⇒ 前缀槽等宽、过站前后站名零水平重排",
+      prefixes.map((s) => `${s}(${[...s].length})`).join(" "),
+    );
+  }
+
+  /* ── 次行两档：还有后续程 / 本段即最后一程 ── */
+  ok(
+    missed.missed === true && missed.sub === "请在下一站下车",
+    "错过站·还有后续程 ⇒ 次行「请在下一站下车」",
     String(missed.sub),
   );
   ok(
+    missedLast.sub === "请下车",
+    "错过站·本段是最后一程（下车站即终点）⇒ 次行「请下车」（不写「请在下一站下车」以免让人以为还要再坐一段）",
+    String(missedLast.sub),
+  );
+  ok(
     !/还有\s*\d+\s*站/.test(String(missed.sub)) && !/\d+\s*分/.test(String(missed.sub)),
-    "错过站次行**不含**「还有 n 站」句式、**不含**分钟子句",
+    "错过站次行**不含**「还有 n 站」句式、**不含**分钟子句（是不渲染，不是隐藏）",
     String(missed.sub),
   );
 
@@ -508,28 +588,39 @@ console.log("── ⑥ 接线与复刻锁定（源码字符串）──");
   );
 
   /**
-   * 「已过站」文案的接线锁定（2026-11-04 负责人拍板）：
+   * 「已过站」文案的接线锁定（2026-11-04 设计定稿）：
    *   ① 文案抽成常量（设计侧改词只改一处，不在 JSX 里散写）；
    *   ② 判据**必须**同时含 `stopsAway === 0` 与 `alarm === "none"`（漏后者会把到站说过站）；
-   *   ③ `alarm === "now"` 的「本站下车」分支必须仍在（否则正常到站失去文案）。
+   *   ③ `alarm === "now"` 的「本站下车」分支必须仍在（否则正常到站失去文案）；
+   *   ④ 主行**必须带**下车站的站号站名（设计定稿：过站前后站号站名逐字不变、只有前缀翻转）。
    */
   ok(
-    navDetail.includes('const MISSED_STOP_MAIN = "已过站"') &&
-      navDetail.includes('const MISSED_STOP_SUB = "请在下一站下车"'),
-    "接线：已过站文案抽成常量（设计侧改词只改一处）",
+    navDetail.includes('const MISSED_STOP_PREFIX = "已过站"') &&
+      navDetail.includes('const MISSED_STOP_SUB_TRANSFER = "请在下一站下车"') &&
+      navDetail.includes('const MISSED_STOP_SUB_ARRIVE = "请下车"'),
+    "接线：已过站三段文案抽成常量（设计侧改词只改一处）",
   );
   ok(
     /const missedStop = infoMode === "post" && stopsAway === 0 && track\?\.alarm === "none";/.test(navDetail),
     "接线：已过站判据 = post 且 stopsAway===0 且 alarm===\"none\"（三个条件缺一不可）",
   );
   ok(
-    navDetail.includes('if (missedStop) return MISSED_STOP_SUB;') &&
-      navDetail.includes('if (track?.alarm === "now") return "本站下车";'),
-    "接线：次行分支顺序 = 已过站 → 已到站（顺序即契约，到站不得被过站抢占）",
+    navDetail.includes("if (missedStop) {") &&
+      navDetail.indexOf("if (missedStop) {") < navDetail.indexOf('if (track?.alarm === "now") return "本站下车";'),
+    "接线：次行分支顺序 = 已过站 在 已到站 之前（顺序即契约，到站不得被过站抢占）",
   );
   ok(
-    navDetail.includes("if (missedStop) return { prefix: MISSED_STOP_MAIN, code: \"\", name: \"\" };"),
-    "接线：已过站主行只说状态、不带站号站名（避免读成「下一站 = 你刚错过的站」）",
+    navDetail.includes("const alight = trackStops.length ? splitStopLabel(trackStops[trackStops.length - 1]) : null;") &&
+      navDetail.includes("{ prefix: MISSED_STOP_PREFIX, ...alight, prefixTone: \"fg2\" }"),
+    "接线：已过站主行带下车站站号站名 + 前缀色提一档（取 lastIdx，非 nextIdx）",
+  );
+  ok(
+    navDetail.includes("data-nav-missed={missed ? \"1\" : undefined}"),
+    "接线：data-nav-missed 仅在已过站输出 \"1\"，其余不输出（undefined，不是 \"\" 也不是 \"0\"）",
+  );
+  ok(
+    /legIdx < card\.rides\.length - 1 \? MISSED_STOP_SUB_TRANSFER : MISSED_STOP_SUB_ARRIVE/.test(navDetail),
+    "接线：次行两档 = 还有后续程 ⇒ 请在下一站下车 / 最后一程 ⇒ 请下车",
   );
 }
 
