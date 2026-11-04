@@ -201,6 +201,18 @@ function run(o: RunOpts = {}): RunOut {
       lastSwitchTs: 0,
       nowMs: now,
       autoLeft: AUTO_TRIES_PER_LEG,
+      /**
+       * ⚠️ 2026-11-05（be-plate 加，fe-latency 请复核）：**只为隔离判据路径，不代表"用户在走路"**。
+       *
+       * 本套件测的是「**位置判据**（r2 / 跟车斜率）的延迟」，而 `walkActive` 是停站判据
+       * （`atBoardStopOf`，2026-11-05 负责人裁决）唯一的开关。本文件的夹具在 t<0 让车
+       * `atStation=T100`（停靠上车站）—— 按新裁决那**就是已上车** ⇒ 停站判据会在 t=0 立即
+       * 命中（`evidence="atstop"`、`need=1`），于是「位置判据延迟」测不到任何东西。
+       * ⇒ 传 `true` 把停站判据关掉，让本套件继续只测位置判据。
+       *   停站判据本身由 `test-boarding-detect.ts` ㉒ 组覆盖（含"总站上车"/"walkActive 门"/"多车歧义"）。
+       * ⚠️ 若将来删掉 `walkActive` 门，这群用例会立刻变红 —— 那是**信号**，不是误报。
+       */
+      walkActive: true,
       streak,
     });
     streak = r.streak;
