@@ -649,34 +649,46 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
       "接线：已到站时次行提前返回「本站下车」，不会落到「还有 0 站」分支",
     );
     /**
-     * ★ 已知缺口登记（**待产品裁决，不是漏做**）：`postSub` 只有「已到站」一个提前返回，
-     *   **没有**「已过站」分支 ⇒ 车驶离下车站后（`alarm="none"`、站数 0）仍会渲染
-     *   「还有 0 站下车 · 约 1 分」。这条断言把缺口**钉成可见事实**：
-     *   谁去补这个分支，这里会先红，逼他同步改文案口径与「不变量 1b」的措辞。
+     * ★ 「已过站」这一对的**代码形状**守卫（与文案场景互补，不重复）。
      *
-     * ⚠️ 判据是「`postSub` 的可执行代码里有没有 `stopsAway === 0`」——
-     *   **不能**用 `includes("已过站")`：组件注释里本来就有「按已过站数算」这句话
-     *   （说明另一种错误公式），按字面匹配会**假红**。先剥注释再匹配，避免注释干扰。
-     * ⚠️ **不要**为了让它变绿去放宽它 —— 那等于把这个缺口重新藏起来。
+     * ── 为什么要在这里锁（而不是只靠 `scripts/test-nav-info-consistency.ts`）───
+     *   那个文件覆盖的是**行为场景**（错过站 / 到站 / 各态文案），但它对
+     *   `postSub` 的实现方式是**复刻**（组件里的表达式没有导出成函数）⇒
+     *   组件侧的 `missedStop` 定义被改坏（例如漏掉 `alarm` 条件）时，它**看不见**。
+     *   ⇒ 这里只锁两条**组件源码里的形状**，两条合起来才是「同值不同义」的完整护栏。
+     *
+     * ⚠️ 判据一律**先剥注释再匹配**：组件注释里本来就有「按已过站数算」「stopsAway === 0」这类
+     *   **说明性文字**（解释另一种错误公式），按字面匹配会假红/假绿。
      */
+    const codeOnly = (s: string): string =>
+      s.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
     const subStart = navDetail.indexOf("const postSub = useMemo(");
     const subEnd = subStart >= 0 ? navDetail.indexOf("}, [infoMode", subStart) : -1;
-    const subCode =
-      subStart >= 0 && subEnd > subStart
-        ? navDetail
-            .slice(subStart, subEnd)
-            .replace(/\/\*[\s\S]*?\*\//g, " ")
-            .replace(/\/\/[^\n]*/g, " ")
-        : "";
+    const subCode = subStart >= 0 && subEnd > subStart ? codeOnly(navDetail.slice(subStart, subEnd)) : "";
+    const hasMissedEarly = subCode !== "" && /if\s*\(\s*missedStop\s*\)\s*return/.test(subCode);
     ok(
-      subCode !== "" && !/stopsAway\s*===\s*0/.test(subCode),
-      "已知缺口（待裁决）：postSub 尚无「已过站」分支 ⇒ 车驶离下车站会显示「还有 0 站下车」",
+      hasMissedEarly,
+      "接线：postSub 对「已过站」有提前返回（车驶离下车站不落到「还有 0 站」句式）",
       subCode === ""
         ? "✗ 未能定位 postSub 函数体（函数被改名/重构？本断言因此无法判定）"
-        : /stopsAway\s*===\s*0/.test(subCode)
-          ? "已补上分支 ⇒ 请同步更新本断言与 §已知缺口 说明"
-          : "缺口仍在（按现状登记）",
+        : hasMissedEarly
+          ? "已确认 missedStop 提前返回"
+          : "未见 missedStop 提前返回 ⇒ 车驶离下车站会渲染「还有 0 站下车」",
     );
+    /**
+     * ★ 最要紧的一条：`missedStop` 的判据必须**同时**含两个条件。
+     *   正常到站（`alarm="now"`）与已过站**共用 `stopsAway === 0` 这一个值，语义相反**；
+     *   只看站数就会把「到了，请下车」说成「已过站」—— 比原来的「还有 0 站」更严重的错。
+     */
+    {
+      const mStart = navDetail.indexOf("const missedStop =");
+      const mLine = mStart >= 0 ? codeOnly(navDetail.slice(mStart, navDetail.indexOf("\n", mStart))) : "";
+      ok(
+        /stopsAway\s*===\s*0/.test(mLine) && /alarm\s*===\s*"none"/.test(mLine),
+        "接线：missedStop 判据同时含「站数 0」与「alarm=none」（防把到站说成坐过站）",
+        mLine.trim() || "✗ 未找到 const missedStop 定义",
+      );
+    }
     ok(
       rideEngine.includes('prog.atIdx === alightIdx ? "now" : prog.nextIdx === alightIdx ? "soon" : "none"'),
       "复刻锁定：alarm 判据与引擎内联表达式逐字一致（改了这里必须同步本脚本）",
