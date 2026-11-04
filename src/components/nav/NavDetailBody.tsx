@@ -71,27 +71,47 @@ const INFO_ROW_H = 52;
 const INFO_LINE_H = 20;
 
 /**
- * ★ 2026-11-04（负责人拍板）：「**已过下车站**」的两行文案 —— 只此一处，改词只改这两个常量。
+ * ★ 2026-11-04（设计侧定稿，负责人拍板）：「**已过下车站**」的文案 —— 只此一处，改词只改这几个常量。
  *
  * ── 什么时候用 ────────────────────────────────────────────────────────
  *   `stopsAway === 0` **且** `alarm === "none"`：车已从本段下车站**开走**、用户没下车。
  *   （`between` 且 `passedIdx >= lastIdx`；实测产物见 `scripts/test-nav-info-consistency.ts`）
  *
+ * ── 为什么前缀必须与其它三态等宽（设计定稿的核心理由）────────────────────
+ *   `已过站` 与 `下一站` / `已到站` / `下车站` 同为 **3 个全角** ⇒ 前缀槽宽度恒定
+ *   ⇒ 过站前后**站号与站名逐字不变、只有前缀翻转** ⇒ 用户一眼看出「我盯的那一站已经过去了」，
+ *   且**零水平重排**（站名不会因为换前缀而左右跳动）。
+ *   若前缀字数不同，同一个站名会在过站瞬间横向位移，用户会误以为"换了一站"。
+ *
  * ── 为什么必须与「已到站」分开（同值不同义，最容易做错的地方）────────────
  *   「已到站」（`alarm === "now"`）与「已过站」（`alarm === "none"`）**共用 `stopsAway === 0`
  *   这一个值，语义却完全相反**：前者是「到了，请下车」，后者是「坐过站了，下一站下」。
  *   若只看 `stopsAway === 0` 就套「已过站」，会把**正常到站**说成坐过站 ——
- *   那是比原来的「还有 0 站」更严重的错。故判据必须带上 `alarm`。
+ *   那是比原来的「还有 0 站」更严重的错。
+ *
+ * ── 次行两种（按「本行程是否还有后续程」分）──────────────────────────────
+ *   · 还有后续程（要换乘）⇒ `请在下一站下车`：用户得在下一站下车才能换乘；
+ *   · 本段是**最后一程**（下车站 = 本行程终点）⇒ `请下车`：没有"下一站要换乘"这回事，
+ *     写「请在下一站下车」会让用户以为还要再坐一段。
+ *   ⚠️ 判据只能用「`legIndex` 是否为本行程最后一程」（`card.rides.length - 1`）——
+ *     本段站序**无法**表达"这辆车是否还继续往前开"（站序末站就是下车站）。
+ *     若该线路下车站之后仍继续运营，我们并不知道，也不该猜（不谎报）。
+ *   ⛔ 不要写「终点站已过」之类：那会让人以为要坐回头车。
  *
  * ── 纪律 ──────────────────────────────────────────────────────────────
  *   · 只换**文案**，不碰任何数值钩子（`data-stops-away` 仍输出 `0`、
- *     `data-nav-remain-min` 仍按原表达式输出、`data-eta-scope` 仍是 `alight`）——
- *     钩子是给机器验的、文案是给人看的，混改会让一批验「数值口径」的断言集体失配；
- *   · 该分支**不带**「约 x 分」子句：车已过站，剩余时长对用户无决策价值；
- *   · 文案待设计侧定稿（见 `docs/迭代-导航修复-20261104/03-设计-导航信息层与步行线规范.md`）。
+ *     `data-nav-remain-min` / `data-eta-base` / `data-eta-remain` 仍按原表达式输出、
+ *     `data-eta-scope` 仍是 `alight`）—— 钩子是给机器验的、文案是给人看的，
+ *     混改会让一批验「数值口径」的断言集体失配；
+ *   · 该分支**不渲染**「约 x 分」子句（是**不渲染**，不是 `display:none` ——
+ *     视觉隐藏会让屏幕阅读器仍读到「约 1 分」，那正是要修的误读）；
+ *   · 「到了 / 过了」的机器可验口径 = **`data-nav-missed="1"`**（见 `NavInfoRow` 的注释）。
  */
-const MISSED_STOP_MAIN = "已过站";
-const MISSED_STOP_SUB = "请在下一站下车";
+const MISSED_STOP_PREFIX = "已过站";
+/** 次行·还有后续程（要换乘） */
+const MISSED_STOP_SUB_TRANSFER = "请在下一站下车";
+/** 次行·本段是最后一程（下车站即本行程终点） */
+const MISSED_STOP_SUB_ARRIVE = "请下车";
 
 /**
  * ★ U4（写作纪律）：本行单位统一为「分」，不用「分钟」—— 本行是密集信息行，
@@ -144,11 +164,18 @@ function useViewportW(): number {
   return w;
 }
 
-/** 上车后主行：「前缀 + 站号 + 站名」（`prefix` 由相位决定：下一站 / 已到站 / 下车站） */
+/**
+ * 上车后主行：「前缀 + 站号 + 站名」（`prefix` 由相位决定：下一站 / 已到站 / 已过站 / 下车站）。
+ *
+ * `prefixTone` 只影响前缀颜色（`--muted` = 常态；`--fg-2` = 已过站时提一档）。
+ * 为什么用一档而不是加红/加粗：**颜色不承担"这是错误"**，只做"这一行更该被看见"的轻微提权，
+ * 与全站「中性灰阶不抢语义色」的纪律一致。
+ */
 interface PostStation {
   prefix: string;
   code: string;
   name: string;
+  prefixTone?: "muted" | "fg2";
 }
 
 interface NavInfoRowProps {
@@ -168,6 +195,29 @@ interface NavInfoRowProps {
   remainMin: number | null;
   /** 观测钩子：到下车还有几站（未知 ⇒ 属性不输出） */
   stopsAway: number | null;
+  /**
+   * 观测钩子 `data-nav-missed`：**「已过下车站」的唯一机器可验口径**。
+   *
+   * 判定式（唯一，不接受第二种解释）：
+   *   `data-nav-missed = "1"`  ⟺  `stopsAway === 0` **且** `alarm === "none"`
+   * 其余情况**属性不输出**（不是 `""`、不是 `"0"`）—— 与 `data-nav-remain-min` 同一规则。
+   *
+   * ── 为什么必须新增这个属性（设计侧纠正了一条会造假绿的表述）──────────────
+   *   `data-eta-scope` 在 `post` 下**恒为 `"alight"`** —— 它只区分「上车前 / 上车后」，
+   *   **不区分「到了」与「过了」**。拿它写过站断言 ⇒ 永远为真，是典型的假绿。
+   *   而 `alarm` 本身**不在 DOM 上**（引擎内联表达式，无导出、无属性），QA 读不到。
+   *   ⇒ `data-nav-missed` 是这一维度**唯一**能被外部断言的信号。
+   *
+   * ── 三义真相表（`stopsAway` × `alarm` → `data-nav-missed`）────────────────
+   *   | stops-away | alarm | nav-missed | 语义 |
+   *   |---|---|---|---|
+   *   | 0 | now  | 不存在 | 已到站（车停在下车站） |
+   *   | 0 | soon | 不存在 | 即将到站（正开往下车站的区间内） |
+   *   | 0 | none | `"1"`  | **已过站**（坐过站了） |
+   *   前两行与第三行**共用 `stopsAway === 0` 这一个值**，语义完全相反 ——
+   *   所以判定必须带 `alarm`；漏掉它会把「到了，请下车」错说成「你坐过站了」。
+   */
+  missed: boolean;
 }
 
 /**
@@ -189,6 +239,7 @@ function NavInfoRow({
   nextStationOn,
   remainMin,
   stopsAway,
+  missed,
 }: NavInfoRowProps) {
   const rowRef = useRef<HTMLDivElement | null>(null);
   const vw = useViewportW() || 390;
@@ -235,6 +286,8 @@ function NavInfoRow({
       data-eta-base={remainMin == null ? undefined : remainMin}
       data-eta-remain={remainMin == null ? undefined : remainMin}
       data-stops-away={stopsAway == null ? undefined : stopsAway}
+      /* 「已过站」的唯一机器可验口径：`"1"` ⟺ stopsAway===0 且 alarm==="none"；其余不输出 */
+      data-nav-missed={missed ? "1" : undefined}
       style={{
         /**
          * 定高 52（`INFO_ROW_H`）—— 两态共用 ⇒ 状态切换零跳动。
@@ -315,7 +368,15 @@ function NavInfoRow({
                 }}
               >
                 {postStation && (!narrow || postStation.prefix !== "下一站") && (
-                  <span style={{ flex: "none", fontSize: 13, color: "var(--muted)" }}>{postStation.prefix}</span>
+                  <span
+                    style={{
+                      flex: "none",
+                      fontSize: 13,
+                      color: postStation.prefixTone === "fg2" ? "var(--fg-2)" : "var(--muted)",
+                    }}
+                  >
+                    {postStation.prefix}
+                  </span>
                 )}
                 {postStation?.code && (
                   /* 站号：11px / `--meta` / 等宽数字 / **不加括号**（括号占 30px 且不携带信息） */
@@ -628,7 +689,7 @@ export default function NavDetailBody({
    * ⚠️ 判据必须两个条件都带 —— 正常到站（`alarm === "now"`）同样 `stopsAway === 0`，
    *   只看站数会把「到了，请下车」错说成「已过站」（见 `MISSED_STOP_MAIN` 的注释）。
    */
-  const missedStop = infoMode === "post" && stopsAway === 0; // MUTATION: 漏掉 alarm 条件
+  const missedStop = infoMode === "post" && stopsAway === 0 && track?.alarm === "none";
 
   /**
    * 上车后主行「要盯的那一站」：到站提醒已在响（`alarm === "now"`）⇒ 当前停靠站；
@@ -641,11 +702,17 @@ export default function NavDetailBody({
     : null;
   const postStation = useMemo<PostStation | null>(() => {
     /**
-     * 已过站：主行只说状态、**不带**站号站名 ——
-     * 此时「下一站」已在本段站序之外（`nextIdx === null`），能给的站名只有**已驶过的**下车站，
-     * 那会读成「下一站 = 你刚错过的站」，比不说更糟。故复用同一行结构只填前缀。
+     * 已过站：前缀翻转成「已过站」，**站号与站名仍然是被错过的那一站**（本段下车站）。
+     * 这正是设计要求的效果 —— 过站前后同一组「站号 + 站名」逐字不变，只有前缀换，
+     * 用户一眼看出「我盯的那一站已经过去了」。
+     * ⚠️ 不能用 `watchIdx`（此时 `nextIdx === null`，取不到）；必须显式取下车站 `lastIdx`。
      */
-    if (missedStop) return { prefix: MISSED_STOP_MAIN, code: "", name: "" };
+    if (missedStop) {
+      const alight = trackStops.length ? splitStopLabel(trackStops[trackStops.length - 1]) : null;
+      return alight
+        ? { prefix: MISSED_STOP_PREFIX, ...alight, prefixTone: "fg2" }
+        : { prefix: MISSED_STOP_PREFIX, code: "", name: "", prefixTone: "fg2" };
+    }
     const at = (k: number | null) =>
       k !== null && k >= 0 && k < trackStops.length ? splitStopLabel(trackStops[k]) : null;
     const hit = at(watchIdx);
@@ -657,15 +724,20 @@ export default function NavDetailBody({
   /** 上车后次行：`还有 n 站下车 · 约 x 分`（缺哪半句就省哪半句，**不补零、不写"约 0 分"**） */
   const postSub = useMemo(() => {
     if (infoMode !== "post") return null;
-    /* 已过下车站 ⇒ 只说「怎么办」，**不带**「约 x 分」（车都开走了，剩余时长对用户无决策价值） */
-    if (missedStop) return MISSED_STOP_SUB;
+    /**
+     * 已过下车站 ⇒ 只说「怎么办」，**不渲染**「约 x 分」子句。
+     * 两档按「本行程是否还有后续程」分（判据与局限见 `MISSED_STOP_SUB_*` 的注释）。
+     */
+    if (missedStop) {
+      return legIdx < card.rides.length - 1 ? MISSED_STOP_SUB_TRANSFER : MISSED_STOP_SUB_ARRIVE;
+    }
     /* 已到下车站 ⇒ 去掉时间子句（此刻「约 x 分」必然为 0，写出来像故障） */
     if (track?.alarm === "now") return "本站下车";
     const parts: string[] = [];
     if (stopsAway != null) parts.push(`还有 ${stopsAway} 站下车`);
     if (shownAlightMin != null) parts.push(`约 ${shownAlightMin} 分`);
     return parts.length ? parts.join(" · ") : null;
-  }, [infoMode, missedStop, track?.alarm, stopsAway, shownAlightMin]);
+  }, [infoMode, missedStop, legIdx, card.rides.length, track?.alarm, stopsAway, shownAlightMin]);
 
   /**
    * 15s 心跳：**只服务顶部「全程剩余」的时钟重算**（`remainNowMs`）。
@@ -962,6 +1034,7 @@ export default function NavDetailBody({
             nextStationOn={false}
             remainMin={null}
             stopsAway={null}
+            missed={false}
           />
         )}
         {infoMode === "post" && (
@@ -974,6 +1047,7 @@ export default function NavDetailBody({
             nextStationOn
             remainMin={shownAlightMin}
             stopsAway={stopsAway}
+            missed={missedStop}
           />
         )}
       </div>
