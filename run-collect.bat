@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-title MUST Dengxiao - Data Collector
+title M Map - Data Collector
 
 rem ---- Locate Node.js ----
 set "NODE_BIN="
@@ -21,7 +21,7 @@ if "%ARGS%"=="" set "ARGS=--minutes=30"
 
 cls
 echo ============================================================
-echo    MUST Dengxiao - DSAT Data Collector
+echo    M Map - DSAT Data Collector
 echo ------------------------------------------------------------
 echo    Args    : %ARGS%
 echo    Output  : data\tracking\
