@@ -19,8 +19,12 @@
 import type { Pool } from "pg";
 import { nowBucketOfHolidayAware } from "@/lib/rebuild/holidays";
 import { etaTextOf } from "./catch-up";
+import { loadHeadway, type HeadwayIndex } from "./headway";
+import { RECOMMEND_LIMIT_DEFAULT } from "./limits";
 import { modelOption } from "./model";
 import { optionsFor, contextFor, loadStatics, type RecStatic } from "./query";
+import { hideBySchedule, serviceStateAt } from "./schedule";
+import { otherAlightsOf } from "./converge";
 import { lookupHop } from "./segment-lookup";
 import { recommend } from "./service";
 import { destCodesFor, reachableFrom, kindOfRoute } from "./station-routes";
@@ -29,6 +33,7 @@ import { queryLrtDepartures } from "@/lib/lrt/next-departures";
 import { buildCardHref } from "./card-link";
 import { boardRouteOf, stripDirLabelOf } from "@/lib/nav/strips";
 import type {
+  AlightOption,
   CardDetailPayload,
   CatchTier,
   ReachReport,
@@ -72,9 +77,13 @@ export async function cardDetail(
   pool: Pool,
   input: CardDetailInput,
 ): Promise<{ ok: true; data: CardDetailPayload } | { ok: false; error: string }> {
-  const limit = Math.max(1, Math.min(20, input.limit ?? 5));
+  // ★ 2026-11-04（U10）：默认张数从 `limits.ts` 取（禁止字面量 —— 漏改一处就会出现
+  //   「首屏 6 张、详情页按 5 张算」⇒ 第 6 张卡点进去报 `route_changed`）
+  const limit = Math.max(1, Math.min(20, input.limit ?? RECOMMEND_LIMIT_DEFAULT));
 
   // ① 复用同一份 service 与它的 10s 缓存（不另开缓存层）
+  // ★ 2026-11-04（U9）：带上 `pin` —— 详情页可能指向**非代表下车点**（已被同线收敛/名额裁掉），
+  //   光靠 `rec.cards.find()` 必然拿不到 ⇒ 误报 `route_changed`。
   const rec = await recommend(pool, {
     fromSlug: input.fromSlug,
     toSlug: input.toSlug,
@@ -82,14 +91,18 @@ export async function cardDetail(
     limit,
     force: input.force,
     nowMs: input.nowMs,
+    pin: { planId: input.planId, route: input.route, board: input.board, alight: input.alight },
   });
   const thresholdMin = rec.cards.length ? rec.cards[rec.cards.length - 1]!.totalMin : Number.POSITIVE_INFINITY;
 
-  // ② 命中卡（planId 不唯一 → 必须四元组）
-  const card: RecommendCard | undefined = rec.cards.find((c) => {
-    const r0 = c.rides[0];
-    return c.planId === input.planId && r0?.route === input.route && r0.board === input.board && r0.alight === input.alight;
-  });
+  // ② 命中卡（planId 不唯一 → 必须四元组）；榜单里没有则回落到 `pin`（收敛前的同一对象引用）
+  const card: RecommendCard | undefined =
+    rec.cards.find((c) => {
+      const r0 = c.rides[0];
+      return c.planId === input.planId && r0?.route === input.route && r0.board === input.board && r0.alight === input.alight;
+    }) ??
+    rec.pinned ??
+    undefined;
   if (!card) return { ok: false, error: "route_changed" };
 
   // ③ 静态层（Data Cache 命中，几乎零成本）
@@ -97,6 +110,19 @@ export async function cardDetail(
   const nowMs = input.nowMs ?? Date.now();
   // ★ v3.4.0：查询上下文由「星期」升级为「时段桶」（bucketOfRoute 五桶）——见 segment-lookup 头注
   const nowBucket = await nowBucketOfHolidayAware(pool, nowMs);
+  // ★ 2026-11-04（U8）：运营状态判定需要班距表（10 分钟进程内缓存，不额外打库）
+  const headway = await loadHeadway(pool);
+
+  /**
+   * ★ 2026-11-04（U9）：**本方案实际用的下车点**优先。
+   *
+   * 折叠栏要按「这条线在这个站台实际会下哪一站」取实时数据。收敛之后
+   * 「候选列表首项」与「本方案实际用的下车点」可能不一致 ⇒ 对**本卡自己的线路**
+   * 必须用 `input.alight`（否则折叠栏算的是另一站，与卡面/站条对不上）；
+   * 其他线路仍用它们各自的首选项。
+   */
+  const alightOfRoute = (r: { route: string; alights: string[] }): string =>
+    r.route === input.route && input.alight ? input.alight : r.alights[0]!;
 
   // ④ 站条：每段载具一条。逐跳站点取 **seed 自己的 hops**（见文件头事实 1）
   const seeds = optionsFor(st, input.fromSlug, input.toSlug);
@@ -154,7 +180,7 @@ export async function cardDetail(
   // 每条线在自己的下车站上取值（不同线的 alight 不同 → 必须各自建 job）
   const busJobs = reachable
     .filter((r) => r.kind === "bus")
-    .map((r) => ({ station: input.board, dest: r.alights[0]!, routes: [r.route] }));
+    .map((r) => ({ station: input.board, dest: alightOfRoute(r), routes: [r.route] }));
 
   let reports: ReachReport[] = [];
   let liveDegraded = false;
@@ -164,11 +190,27 @@ export async function cardDetail(
       REPORT_DEADLINE_MS,
       "report",
     );
-    reports = await buildReports(pool, st, input, card, reachable, liveMap, seeds, nowMs, nowBucket, thresholdMin);
+    reports = await buildReports(
+      pool,
+      st,
+      input,
+      card,
+      reachable,
+      liveMap,
+      seeds,
+      nowMs,
+      nowBucket,
+      thresholdMin,
+      headway,
+      alightOfRoute,
+    );
   } catch {
     liveDegraded = true;
     reports = [];
   }
+
+  // ⑥ ★ 2026-11-04（U9）：**备选下车点**（同线同站、不同下车点）—— 只在详情页出现，不进卡片列表
+  const alightOthers = buildAlightOthers(st, input, seeds, headway, nowMs);
 
   return {
     ok: true,
@@ -180,11 +222,49 @@ export async function cardDetail(
       colors: rec.colors,
       strips,
       reports,
+      alightOthers,
       thresholdMin,
       generatedAt: rec.generatedAt,
       liveDegraded,
     },
   };
+}
+
+/**
+ * ★ 2026-11-04（U9）：**另有 N 个下车点** —— 同一条线、同一上车站，但下车站不同。
+ *
+ * 候选集由纯函数 `converge.ts#otherAlightsOf` 给出（可单测、不碰 IO）；本函数只做两件事：
+ *   ① 过 **U8 的同一谓词**；② 用 `buildCardHref` 拼详情地址（与卡片链接**同一份 URL 契约**
+ *   ⇒ 点选即「换 alight 重进详情」，不需要任何新状态机）。
+ *
+ * ⚠️ 谓词这里取 `hasCar = true`：本函数的调用前提是「这张卡已经出出来了」⇒ 该线此刻确有车。
+ *   作用不是过滤（这一格在判定表里恒显示），而是**单一来源**：将来若收紧
+ *   `closed + 有车` 那一格，备选列表会自动跟随，不会留下「点开备选却是不可乘」的死角。
+ */
+function buildAlightOthers(
+  st: RecStatic,
+  input: CardDetailInput,
+  seeds: ReturnType<typeof optionsFor>,
+  headway: HeadwayIndex,
+  nowMs: number,
+): AlightOption[] {
+  const state = serviceStateAt(headway, input.route, nowMs).state;
+  if (hideBySchedule(state, true).hide) return [];
+  return otherAlightsOf(input.route, input.board, input.alight, seeds, st.routeIdx.nameOf).map((a) => ({
+    code: a.code,
+    label: a.label,
+    // 与卡片链接同一份契约（`buildCardHref`）⇒ 不需要新状态机，点选即「换 alight 重进详情」
+    href: buildCardHref({
+      from: input.fromSlug,
+      to: input.toSlug,
+      zone: input.zone,
+      plan: a.planId,
+      route: input.route,
+      board: a.board,
+      alight: a.code,
+      limit: input.limit,
+    }),
+  }));
 }
 
 /** 组装折叠栏的行：每线取「第一辆可赶车 + 优于阈值的后车」，并用 `modelOption` 复算总时长 */
@@ -199,14 +279,28 @@ async function buildReports(
   nowMs: number,
   nowBucket: string,
   thresholdMin: number,
+  headway: HeadwayIndex,
+  alightOfRoute: (r: { route: string; alights: string[] }) => string,
 ): Promise<ReachReport[]> {
   const out: ReachReport[] = [];
   const ctx = contextFor(st, nowMs, input.zone, liveMap as Map<string, never>, nowBucket);
 
   for (const r of reachable) {
-    const alight = r.alights[0]!;
+    // ★ U9：本卡自己的线路取「本方案实际用的下车点」（`input.alight`），其余线路取各自首选项
+    const alight = alightOfRoute(r);
     const alightLabel = `${alight} ${st.routeIdx.nameOf.get(alight) ?? ""}`.trim();
     const boardLabel = `${input.board} ${st.routeIdx.nameOf.get(input.board) ?? ""}`.trim();
+
+    /**
+     * ★ 2026-11-04（U8）：折叠栏同样受「运营时间 ∧ 实时车」谓词约束 —— 否则会出现
+     * 「卡片列表已经不含 N3，但详情页折叠栏里仍列着 N3（暂无实时报站）」的半修状态。
+     * 有车证据取自本线在**本站台**的实时记录（`liveMap`）；没有记录 = 未知，
+     * 未知在 `open` / `no_data` 下仍显示、在 `closed` 下隐藏（十二格表见 schedule.ts）。
+     */
+    const stat = serviceStateAt(headway, r.route, nowMs).state;
+    const lvProbe = r.kind === "bus" ? liveMap.get(`${r.route}@${input.board}`) : null;
+    const hasCar: boolean | null = lvProbe ? !lvProbe.empty : null;
+    if (hideBySchedule(stat, hasCar).hide) continue;
 
     // 找该线的 seed（同线路 + 同方向的上车站）→ 用 modelOption 复算门到门总时长
     const seed = seeds.find((s) => {

@@ -20,11 +20,14 @@
  */
 import type { Pool } from "pg";
 import { nowBucketOfHolidayAware } from "@/lib/rebuild/holidays";
+import { convergeByAlight } from "./converge";
 import { fetchLive, type LiveBatch } from "./live";
 import { loadHeadway } from "./headway";
+import { ALT_BUSES_MAX, RECOMMEND_LIMIT_DEFAULT } from "./limits";
 import { modelOption, sortCards, type ModeledOption } from "./model";
 import { contextFor, loadStatics, optionsFor, type RecStatic } from "./query";
 import { PREF_DEFAULTS, type Prefs } from "./score";
+import type { ScheduleHideReason } from "./schedule";
 import type { RecommendCard, SchoolZone } from "./types";
 
 const CACHE_TTL_MS = 10_000;
@@ -68,6 +71,21 @@ export interface RecommendResult {
    * UI 文案要能分辨，诊断也要能分辨。
    */
   missed: string[];
+  /**
+   * ★ 2026-11-04（U8）：因「不在运营窗口 **且** 无车」被隐藏的线路（与上面两位**并列**）。
+   * 记录 `{route, boardMain, reason}` —— `boardMain` 已归一（`C690/3 → C690`）。
+   * 没有这一位，「因运营时间隐藏」就不可观测（属静默变更）。
+   */
+  skipped_by_schedule: { route: string; boardMain: string; reason: ScheduleHideReason }[];
+  /**
+   * ★ 2026-11-04（U9）：`pin` 指定的那张卡（详情页「另有 N 个下车点」回查用）。
+   *
+   * 为什么不能在 `cards` 里找：同线收敛（`convergeByAlight`）之后，**非代表下车点**的卡
+   * 已不在榜单里；再叠加 `slice(limit)` ⇒ 直接 `find` 必然拿不到 ⇒ 详情页报 `route_changed`。
+   * 这里在**收敛之前**按四元组取同一个对象引用（收敛不复制卡对象）⇒ 不需要第二套状态机。
+   * 未指定 `pin` 或该四元组本轮无卡 ⇒ `null`。
+   */
+  pinned: RecommendCard | null;
   stats: RecommendStats;
   /** 结果生成时刻（ms） */
   generatedAt: number;
@@ -95,6 +113,12 @@ export interface RecommendInput {
    *   不影响 `totalMin` 数值；并已纳入 10s 缓存键（不同偏好不互相污染）。
    */
   prefs?: Prefs;
+  /**
+   * ★ 2026-11-04（U9）：把**指定四元组**（planId + route + board + alight）的那张卡一并带出
+   * （`RecommendResult.pinned`）。详情页回查「非代表下车点」时用 —— 那些卡已被同线收敛/
+   * 名额裁掉，光靠 `cards[].find()` 拿不到。**不传 ⇒ 零副作用**。
+   */
+  pin?: { planId: number; route: string; board: string; alight: string };
 }
 
 /**
@@ -106,10 +130,15 @@ export async function recommend(
   input: RecommendInput,
 ): Promise<RecommendResult> {
   const zone = input.zone ?? null;
-  const limit = Math.max(1, Math.min(20, input.limit ?? 5));
+  // ★ 2026-11-04（U10）：默认张数 5 → 6（`RECOMMEND_LIMIT_DEFAULT`，**禁止**再写字面量）
+  const limit = Math.max(1, Math.min(20, input.limit ?? RECOMMEND_LIMIT_DEFAULT));
   // ★ B4（需求 8）：偏好在**缓存键内**（不同档排序不同 ⇒ 不可共用同一条缓存）
   const prefs = input.prefs ?? PREF_DEFAULTS.balanced;
-  const key = `${input.fromSlug}|${input.toSlug}|${zone ?? ""}|${limit}|${prefs.mode}`;
+  /** ★ U9：pin 必须进缓存键 —— 否则不同 `pin` 会共用同一条缓存而拿到错的 `pinned` */
+  const pinKey = input.pin
+    ? `pin:${input.pin.planId}|${input.pin.route}|${input.pin.board}|${input.pin.alight}`
+    : "";
+  const key = `${input.fromSlug}|${input.toSlug}|${zone ?? ""}|${limit}|${prefs.mode}|${pinKey}`;
   const cached = g.__recCache!.get(key);
   if (!input.force && cached && Date.now() - cached.ts < CACHE_TTL_MS) {
     return { ...cached.data, cached: true };
@@ -148,7 +177,30 @@ export async function recommend(
     if (m) modeled.push(m);
   }
   // ⑤ 排序取前 N
-  const top = sortCards(modeled.map((m) => m.card), prefs).slice(0, limit);
+  // ★ 2026-11-04（U9）：**同线同上下车站（按主码）收敛** —— 位置必须在 `slice(limit)` 之前，
+  //   否则被收敛掉的卡已经占掉名额，收敛等于白做。
+  //   顺序：枚举 → R1 站内互斥（enumerate）→ **R5（IMP6）站台归一（enumerate）**
+  //        → **IMP7 同线收敛（此步，必须在 slice 之前）** → sortCards → slice(limit)
+  const converged = convergeByAlight(modeled.map((m) => m.card), prefs.mode);
+  const top = sortCards(converged, prefs).slice(0, limit);
+
+  /**
+   * ★ 2026-11-04（U9）：`pin` 指定的卡 —— 在**收敛之前**按四元组取同一个对象引用。
+   * 收敛/排序只搬数组、不复制卡对象 ⇒ 取到的就是详情页要的那一张。
+   */
+  const pinned: RecommendCard | null = input.pin
+    ? (modeled.find((m) => {
+        const r0 = m.card.rides[0];
+        const p = input.pin!;
+        return (
+          !!r0 &&
+          m.card.planId === p.planId &&
+          r0.route === p.route &&
+          r0.board === p.board &&
+          r0.alight === p.alight
+        );
+      })?.card ?? null)
+    : null;
 
   // ★ v1.1.5：回填「本班之外的后续班次」——阈值是**第 N 张卡的总时长**，
   //   所以必须在排完序取完前 N 之后才能算（`modelOption` 无法预知阈值）。
@@ -158,7 +210,8 @@ export async function recommend(
     const topSet = new Set(top);
     for (const m of modeled) {
       if (!topSet.has(m.card)) continue;
-      const keep = m.alts.filter((a) => a.totalMin <= threshold + 1e-9);
+      // ★ U9：单卡「后续班车」最多 `ALT_BUSES_MAX` 行（口径见 limits.ts）
+      const keep = m.alts.filter((a) => a.totalMin <= threshold + 1e-9).slice(0, ALT_BUSES_MAX);
       if (keep.length) m.card.altBuses = keep;
     }
   }
@@ -172,6 +225,8 @@ export async function recommend(
     colors: st.routeColors,
     excluded: [...new Set(ctx.excluded)],
     missed: [...new Set(ctx.missed)],
+    skipped_by_schedule: ctx.skippedBySchedule ?? [],
+    pinned,
     stats: {
       candidates: seeds.length,
       staticMs,

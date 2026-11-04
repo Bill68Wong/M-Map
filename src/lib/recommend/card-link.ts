@@ -6,7 +6,10 @@
  * 为什么四元组缺一不可：`planId` **不唯一** —— 同一 plan 的「首段线路 × 下车站」
  * 各出一个 seed（`enumerate.ts`），所以单靠 `planId` 定位不到唯一一条路线。
  * `route + board + alight` 正是 `POST /api/timer` 需要的同一组字段，两处共用一份契约。
+ * why 带 limit：详情页要按**同一批**卡片回查（`thresholdMin` = 第 N 张卡的总时长），
+ *   所以列表页取几张、详情页就必须按几张算 —— 否则「第 6 张卡点进去报 `route_changed`」。
  */
+import { RECOMMEND_LIMIT_DEFAULT } from "./limits";
 import type { SchoolZone } from "./types";
 
 export interface CardLinkParams {
@@ -20,7 +23,7 @@ export interface CardLinkParams {
   alight: string;
   /** 名次（1 起，仅展示用） */
   rank?: number;
-  /** 列表页取几张卡（决定 thresholdMin，默认 5） */
+  /** 列表页取几张卡（决定 thresholdMin，默认 `RECOMMEND_LIMIT_DEFAULT`） */
   limit?: number;
 }
 
@@ -36,7 +39,7 @@ export function buildCardHref(p: CardLinkParams): string {
   });
   if (p.zone) q.set("zone", p.zone);
   if (p.rank) q.set("rank", String(p.rank));
-  q.set("limit", String(p.limit ?? 5));
+  q.set("limit", String(p.limit ?? RECOMMEND_LIMIT_DEFAULT));
   return `/card?${q.toString()}`;
 }
 
@@ -62,7 +65,7 @@ export function parseCardQuery(sp: Record<string, string | string[] | undefined>
   const rankRaw = one("rank");
   const rank = rankRaw && Number.isFinite(Number(rankRaw)) ? Number(rankRaw) : undefined;
   const limitRaw = one("limit");
-  const limit = limitRaw && Number.isFinite(Number(limitRaw)) ? Number(limitRaw) : 5;
+  const limit = limitRaw && Number.isFinite(Number(limitRaw)) ? Number(limitRaw) : RECOMMEND_LIMIT_DEFAULT;
 
   return { from, to, zone, plan, route, board, alight, rank, limit };
 }

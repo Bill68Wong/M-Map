@@ -25,6 +25,18 @@ import type { RankedItem } from "@/lib/nav/rank";
 export const LRT_PRIORITY_SLACK_MIN = 15;
 
 /**
+ * ★ 2026-11-04（U10 连带护栏）：**最多置顶 2 条**。
+ *
+ * 为什么需要护栏：`baseline` = 前 `limit` 张里最慢的 `totalMin`，而 `limit` 从 5 抬到 6
+ *   ⇒ baseline 只会**变松**（取到更慢的一张）⇒ 命中集合会变大 ⇒ 原先「2 条」的场景可能变成 3 条。
+ *
+ * 为什么上限是 2（而不是跟着 limit 走）：置顶是**稳定前插**，不是排序 ——
+ *   3 条置顶会把「本来最快的方案」压出首屏可视区（用户第一眼看不到最优解）。
+ *   置顶的产品语义是「让轻轨方案能被看见」，2 条已足够，无需占满首屏。
+ */
+export const LRT_PRIORITY_MAX_PROMOTE = 2;
+
+/**
  * 轻轨优先重排。
  * @param items   已按 `rankItems` 排好序的候选（**不修改入参**，返回新数组）
  * @param limit   展示张数（用于取 baseline）
@@ -50,8 +62,11 @@ export function applyLrtPriority(items: RankedItem[], limit: number, enabled: bo
 
   // 命中者按 totalMin 升序稳定置顶（`Array#sort` 稳定 ⇒ 同值保持原相对序）
   const orderedHits = [...hits].sort((a, b) => a.card.totalMin - b.card.totalMin);
-  for (const h of orderedHits) h.card.lrtPromoted = true; // 命中者确实被置顶 ⇒ 回写角标
-  const hitSet = new Set(hits);
-  const rest = items.filter((i) => !hitSet.has(i));
-  return [...orderedHits, ...rest];
+  // ★ 2026-11-04：**最多置顶 LRT_PRIORITY_MAX_PROMOTE 条**（超出的命中者不置顶、不打角标，
+  //   但仍在 `rest` 里保持**原有相对序** ⇒ 它们只是「没被前插」，没有被删掉或重排到后面）。
+  const promoted = orderedHits.slice(0, LRT_PRIORITY_MAX_PROMOTE);
+  for (const h of promoted) h.card.lrtPromoted = true; // 确实被置顶 ⇒ 回写角标
+  const promotedSet = new Set(promoted);
+  const rest = items.filter((i) => !promotedSet.has(i));
+  return [...promoted, ...rest];
 }

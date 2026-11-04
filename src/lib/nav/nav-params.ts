@@ -4,7 +4,7 @@
  * 契约（与 T03 的 `/api/nav` 一致）：**坐标一律 GCJ-02**。
  *   `fromLng fromLat toLng toLat`（必填）· `fromLabel toLabel`（选填展示名）
  *   `fromKind toKind`（gps|poi|station|place）· `fromCode toCode`（place slug 等）
- *   `zone`（B/C|N/O|R）· `limit`（默认 5）· `plan`（详情页用：定位某张卡）
+ *   `zone`（B/C|N/O|R）· `limit`（默认 `NAV_LIMIT_DEFAULT`）· `plan`（详情页用：定位某张卡）
  *
  * ★ v2.3.0：追加**可选** `chain` / `walk` / `tiers`（编码 `encodeURIComponent(JSON.stringify(...))`）
  *   —— 承载用户自定义站链与步行参数；此处置于**宽松解析**（非法即视为缺省）。
@@ -12,6 +12,7 @@
  *
  * 纯函数（无 pg / 无 next 依赖）—— 服务端组件与任何地方都能用。
  */
+import { NAV_LIMIT_DEFAULT } from "@/lib/recommend/limits";
 import { SCHOOL_ZONES, type SchoolZone } from "@/lib/recommend/types";
 import { decodeChain, decodeTiers, decodeWalk, type ChainStep, type TierOverride, type WalkOverride } from "./combo-params";
 import type { NavPoint, NavPointKind } from "./types";
@@ -70,8 +71,10 @@ export function parseNavParams(sp: SP): NavUrlParams | null {
   const zoneRaw = (first(sp.zone) ?? "").trim();
   const zone: SchoolZone | null = ZONE_VALUES.includes(zoneRaw) ? (zoneRaw as SchoolZone) : null;
 
+  // ★ 2026-11-04（U10）：默认张数与 `/api/nav` 同源（`limits.ts`）——
+  //   否则「页面按 5 张请求、接口按 6 张出卡」会在这里悄悄把张数压回 5。
   const limitRaw = num(sp, "limit");
-  const limit = limitRaw !== null && limitRaw > 0 ? Math.min(20, Math.trunc(limitRaw)) : 5;
+  const limit = limitRaw !== null && limitRaw > 0 ? Math.min(20, Math.trunc(limitRaw)) : NAV_LIMIT_DEFAULT;
 
   const spOut = new URLSearchParams({
     fromLng: String(origin.lng),
@@ -86,7 +89,8 @@ export function parseNavParams(sp: SP): NavUrlParams | null {
   if (origin.code) spOut.set("fromCode", origin.code);
   if (dest.code) spOut.set("toCode", dest.code);
   if (zone) spOut.set("zone", zone);
-  if (limit !== 5) spOut.set("limit", String(limit));
+  // 只在**偏离默认值**时才写进查询串（与上面同一个常量 ⇒ 改默认值不会漏改这里）
+  if (limit !== NAV_LIMIT_DEFAULT) spOut.set("limit", String(limit));
 
   const planRaw = num(sp, "plan");
   const planId = planRaw !== null ? Math.trunc(planRaw) : undefined;

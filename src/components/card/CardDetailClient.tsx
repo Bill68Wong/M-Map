@@ -51,6 +51,8 @@ export default function CardDetailClient({
    */
   const [err, setErr] = useState<string | null>(error ? errorTextOf(error) : null);
   const [openFold, setOpenFold] = useState(false);
+  /** ★ 2026-11-04（U9）：备选下车点是否展开（默认收起 —— 绝大多数线路只有一个下车点） */
+  const [openAlight, setOpenAlight] = useState(false);
   const [busy, setBusy] = useState(false);
 
   /** 座区兜底：URL 缺 zone 时用本地记忆补上并重载（服务端读不到 localStorage） */
@@ -200,6 +202,47 @@ export default function CardDetailClient({
             </>
           }
         />
+
+        {/**
+         * ★ 2026-11-04（U9）：**另有 N 个下车点** —— 同一条线、同一上车站、不同下车站。
+         *
+         * 卡片列表口径是「一卡一个下车点」（`converge.ts`）：同一条线不会再用多个名额说同一件事。
+         * 落地方式（用户已拍板）：备选**只在详情页**给可展开入口，点选后走同一份 URL 契约
+         * （`buildCardHref` 改 `alight`）重新进详情 ⇒ **不需要任何新状态机**。
+         * ⚠️ 备选下车点已逐个过「运营时间 ∧ 实时车」谓词（见 `card.ts#buildAlightOthers`），
+         *   不会出现「点开却是不可乘的备选」。
+         */}
+        {data.alightOthers.length > 0 && (
+          <>
+            <button
+              className="rc-fold__head"
+              onClick={() => setOpenAlight((v) => !v)}
+              aria-expanded={openAlight}
+            >
+              <span>
+                另有 {data.alightOthers.length} 個下車點
+                <span className="rc-sub">（同一條線 · 點擊展開）</span>
+              </span>
+              <span className="rc-strip__caret">
+                <Icon name={openAlight ? "caretUp" : "caretDown"} size={16} />
+              </span>
+            </button>
+            {openAlight && (
+              <div className="rc-fold__body">
+                {data.alightOthers.map((a) => (
+                  <div className="rc-report" key={a.code}>
+                    <span className="rc-report__live">{a.label}</span>
+                    <span className="rc-report__right">
+                      <Link className="rc-report__link" href={a.href} aria-label={`改在 ${a.label} 下車`}>
+                        <Icon name="forward" size={20} />
+                      </Link>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
       </section>
 
       {/* ③ 折叠栏 */}

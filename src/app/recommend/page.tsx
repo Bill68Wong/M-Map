@@ -2,10 +2,13 @@
  * /recommend —— 自动选线页（src/app/recommend/page.tsx，v1.0.0）
  *
  * 用户从首页方向卡进来（`?from=home&to=school&zone=N/O`），这里按「现在出发」算出
- * 最快的 5 条门到门路线，SSR 直接出全卡。
+ * 最快的 `RECOMMEND_LIMIT_DEFAULT` 条门到门路线，SSR 直接出全卡。
+ *
+ * ⚠️ 张数**只能**从 `@/lib/recommend/limits` 取：SSR 与刷新接口（`RecommendClient`）
+ *   必须同值，否则会出现「首屏 N 张、刷新掉回 M 张」。
  *
  * 流式：页壳立刻可见，卡片区用 `<Suspense>` 包住 —— 骨架先出，`recommend()` 算完即填
- *   （DSAT 实时 + 轻轨时刻表要 ~0.3s）。所以「点首页卡 → 看到 5 张卡」的首屏感知 = 骨架即刻。
+ *   （DSAT 实时 + 轻轨时刻表要 ~0.3s）。所以「点首页卡 → 看到整批卡」的首屏感知 = 骨架即刻。
  *
  * ⚠️ 函数区域由项目级 `vercel.json: "regions": ["hkg1"]`（v3.7.0 · ADR C1）决定。
  * ⚠️ `force-dynamic`：绝不能静态化/缓存 —— 结果含「现在」的实时班次。
@@ -17,6 +20,7 @@ import BrandRouteLoader from "@/components/brand/BrandRouteLoader";
 import Icon from "@/components/ui/Icon";
 import { getPool } from "@/lib/db";
 import { PLACE_SHORT } from "@/lib/home-plans-shared";
+import { RECOMMEND_LIMIT_DEFAULT } from "@/lib/recommend/limits";
 import { recommend } from "@/lib/recommend/service";
 import { DEFAULT_ZONE, SCHOOL_ZONES, type SchoolZone } from "@/lib/recommend/types";
 
@@ -49,7 +53,7 @@ export default async function Page({
 
 /** 数据区（server）：算完立即渲染整块 —— 外面 Suspense 的 fallback 是其骨架 */
 async function CardsSection({ from, to, zone }: { from: string; to: string; zone: SchoolZone }) {
-  const r = await recommend(getPool(), { fromSlug: from, toSlug: to, zone, limit: 5 });
+  const r = await recommend(getPool(), { fromSlug: from, toSlug: to, zone, limit: RECOMMEND_LIMIT_DEFAULT });
 
   return (
     <RecommendClient

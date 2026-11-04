@@ -11,7 +11,7 @@
  *   `fromLng` `fromLat` `toLng` `toLat`（必填，GCJ-02）
  *   `fromLabel` `toLabel`（选填，展示名）· `fromKind` `toKind`（gps|poi|station|place）
  *   `fromCode` `toCode`（选填，如 place slug：home/school/hengqin/gate）
- *   `zone`（B/C|N/O|R）· `limit`（默认 5）· `nocache=1`（绕过 `transit_cache`）
+ *   `zone`（B/C|N/O|R）· `limit`（默认 `NAV_LIMIT_DEFAULT`）· `nocache=1`（绕过 `transit_cache`）
  *   `prefs`（可选：`balanced` 默认 | `fewer_transfers` | `less_walk`；**非法值回落 `balanced`**）
  *   `lrtFirst`（可选：`1`/`true` ⇒ **轻轨优先**置顶；**非法值回落 false**，不 400 —— v3.3.0 · AC-105）
  *
@@ -27,6 +27,7 @@ import { getPool } from "@/lib/db";
 import { planNav } from "@/lib/nav/nav-service";
 import { decodeChain, decodeTiers, decodeWalk, type ChainStep, type TierOverride, type WalkOverride } from "@/lib/nav/combo-params";
 import { pointOf } from "@/lib/nav/query-params";
+import { NAV_LIMIT_DEFAULT } from "@/lib/recommend/limits";
 import { parsePrefs } from "@/lib/recommend/score";
 import { SCHOOL_ZONES, type SchoolZone } from "@/lib/recommend/types";
 import { API_ERROR, errorResponse } from "@/lib/http/errors";
@@ -61,7 +62,7 @@ export async function GET(req: NextRequest) {
     : null;
 
   const limitRaw = Number(sp.get("limit"));
-  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(20, Math.trunc(limitRaw)) : 5;
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(20, Math.trunc(limitRaw)) : NAV_LIMIT_DEFAULT;
   const noCache = sp.get("nocache") === "1" || sp.get("nocache") === "true";
 
   // ★ v2.3.0：可选参数 `chain` / `walk` / `tiers`——存在但非法 → 400（不静默降级）
@@ -111,6 +112,7 @@ export async function GET(req: NextRequest) {
         colors: r.colors,
         excluded: r.excluded,
         missed: r.missed,
+        skipped_by_schedule: r.skipped_by_schedule,
         provenance: r.provenance,
         stats: r.stats,
       },

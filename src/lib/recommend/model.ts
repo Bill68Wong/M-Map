@@ -61,6 +61,7 @@ import { hhmmOf } from "@/lib/lrt/eta";
 import type { AmapPlanSeed, WalkResolver } from "@/lib/nav/types";
 import { etaTextOf, pickCatchTier, tierHintOf, tierTextOf, waitRangeText, type TierSpeedOverride } from "./catch-up";
 import { conservativeWaitMin, headwayAt, headwayMedian, SLACK_NO_DATA, type HeadwayIndex } from "./headway";
+import { scheduleGate, type ScheduleHideReason } from "./schedule";
 import { cmpByPref, PREF_DEFAULTS, type Prefs } from "./score";
 import { mainCodeOf, rideOfHops, type SegmentIndex } from "./segment-lookup";
 import { busTransferSlackMin, slackTierSink } from "./transfer-slack";
@@ -265,6 +266,16 @@ export interface ModelContext {
    * 合成一个数组会让文案与诊断都失真。
    */
   missed: string[];
+  /**
+   * ★ 2026-11-04（U8）：「因运营时间且无车」被隐藏的线路 —— 与 `excluded` / `missed` **并列**记账。
+   *
+   * 为什么必须单独一位：`excluded` 是「无在途车 / 已收车 / 站序缺失」的粗粒度计数器，
+   *   把本类剔除混进去就**不可观测**了（属静默变更，违反「可观测变更」约定）。
+   *   记录 `{route, boardMain, reason}`：`boardMain` 归一（`C690/3 → C690`）便于按站聚合。
+   *
+   * ⚠️ 可选字段：`contextFor()` 统一提供数组；个别诊断脚本手写 `ModelContext` 时不强制。
+   */
+  skippedBySchedule?: { route: string; boardMain: string; reason: ScheduleHideReason }[];
   /** ★ v3.4.0：查询时段桶（bucketOfRoute 五桶之一）——替代旧 todayWeekday（星期维度已废弃） */
   nowBucket: string;
   /**
@@ -422,6 +433,43 @@ export function modelOption(seed: OptionSeed, ctx: ModelContext): ModeledOption 
   const nowMs = ctx.nowMs;
   const segs = seed.segments;
   const first = segs[0];
+
+  /**
+   * ★ 2026-11-04（U8）**运营时间 × 实时车 双证据闸门** —— 落点就在这里（两条链路唯一汇合点）。
+   *
+   * 为什么不在 `enumerate.ts` 拦：`optionsFor` 在 `fetchLive` **之前**调用
+   *   （`service.ts:127` vs `:134`），那一刻没有任何实时上下文，**物理上判不了可乘性**。
+   * `modelOption` 是本地枚举链路（`/recommend`）与高德链路（`/api/nav`，含 sibling 建模）
+   *   的共同入口 ⇒ 改这一处，下游 3 个渲染器 + 站条 + 收藏快照自动一致。
+   *
+   * 判定口径与十二格边界表见 `./schedule.ts`：隐藏需要「不在运营窗口」**且**「无车」两份证据。
+   * 这里只拦**首段**（整条方案能否成立由首段决定）；段内并行标签另由 `keepParallel()` 过滤。
+   */
+  if (first.kind === "bus") {
+    const gate = scheduleGate(ctx.headway, ctx.live, first.route, nowMs);
+    if (gate.hide) {
+      // 同时记 `excluded`：本类剔除在语义上就是「已收车」⇒ 空状态文案（`no_live`）不能失真
+      ctx.excluded.push(first.route);
+      ctx.skippedBySchedule?.push({
+        route: first.route,
+        boardMain: mainCodeOf(first.board),
+        reason: gate.reason ?? "closed_none",
+      });
+      return null;
+    }
+  }
+
+  /**
+   * ★ 2026-11-04（U8）：段内并行线用**同一谓词**过滤。
+   *
+   * 原始 bug 的可观测形态就在这一层：凌晨 N3 已收车、卡片列表里也早被「无实车且无估算」挡住，
+   *   但 `parallelRoutes` 是 `enumerate.ts` 静态算出来的（**不读运营时间、不读实时车**）
+   *   ⇒ 早上 07:00 的卡片标签里仍会出现 N3 这个不可能存在的选项。
+   */
+  const keepParallel = (list: string[] | undefined): string[] | undefined => {
+    if (!list?.length) return list;
+    return list.filter((r) => !scheduleGate(ctx.headway, ctx.live, r, nowMs).hide);
+  };
 
   // ── 步行到上车站 ──
   const wOut = walkView(ctx, seed.fromSlug, first.board, "out");
@@ -607,7 +655,8 @@ export function modelOption(seed: OptionSeed, ctx: ModelContext): ModeledOption 
       minutes: seg.kind === "lrt" ? ride.minutes : Math.round(ride.minutes * 10) / 10,
       rideSecText,
       // ★ B2：段内并行线（渲染白斜杠）
-      parallelRoutes: seg.parallelRoutes,
+      // ★ U8：过「运营窗口 ∧ 实时车」谓词 —— 标签里不得出现已收班且无车的线
+      parallelRoutes: keepParallel(seg.parallelRoutes),
       hops: seg.hops.length,
       levels: ride.levels,
       waitMin: Math.round(waitMin * 10) / 10,

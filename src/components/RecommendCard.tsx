@@ -41,6 +41,7 @@ import { LrtEtaInline } from "./LrtEta";
 import RouteStack from "./RouteStack";
 import { catchHintOf, directionNameOf, EtaText, macauClock, Row, TierBadge } from "./RoutePieces";
 import { buildCardHref } from "@/lib/recommend/card-link";
+import { RECOMMEND_LIMIT_DEFAULT } from "@/lib/recommend/limits";
 import { TRANSFER_SAFETY_MIN } from "@/lib/recommend/score";
 import { usePressGuard } from "@/lib/use-press-guard";
 import type { RecommendCard as CardData, SchoolZone } from "@/lib/recommend/types";
@@ -87,6 +88,7 @@ export default function RecommendCard({
   hrefOverride,
   cardAction,
   onCardOpen,
+  limit = RECOMMEND_LIMIT_DEFAULT,
 }: {
   card: CardData;
   /** 线路码 → 主题色（服务端下发） */
@@ -112,6 +114,14 @@ export default function RecommendCard({
    *   （消除页面加载卡顿，也避免「跨链路 planId 匹配错卡」）。
    */
   onCardOpen?: () => void;
+  /**
+   * ★ 2026-11-04（U10）**P0**：本列表取了前几张卡（详情页要按同一批回查）。
+   *
+   * 修复的缺陷：原先点击进详情**不传 limit** ⇒ `buildCardHref` 用默认值 ⇒ 详情页
+   *   `cardDetail` 只按更少的张数建模 ⇒ **第 N 张卡必然 `route_changed`（点了没反应）**。
+   * 缺省即 `RECOMMEND_LIMIT_DEFAULT`（与 SSR / 刷新接口同源），正常路径下三处恒同值。
+   */
+  limit?: number;
 }) {
   const router = useRouter();
   /** ★ v1.1.8：整卡可点 + 列表要滚动 → 位移 >8px 或长按 >700ms 判为滚动，不触发跳转 */
@@ -165,6 +175,8 @@ export default function RecommendCard({
         board: first.board,
         alight: first.alight,
         rank,
+        // ★ P0：必须带上本列表的实际张数（不带 ⇒ 第 N 张卡点进去 `route_changed`）
+        limit,
       }),
     );
   }

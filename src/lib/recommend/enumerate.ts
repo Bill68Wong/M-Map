@@ -10,6 +10,10 @@
  * 站序解析（`segmentsOf` / `idxsOf`）从 `scripts/seg-coverage.ts` 移植为纯函数版 ——
  * 采集脚本与推荐引擎共用同一套「逐跳展开」口径，避免两处漂移。
  *
+ * ★ 2026-11-04（需求 U9）：上下车候选出参前先做**站台归一（R5 · IMP6）** ——
+ *   `[...new Set(...)]` 是字符串全等去重，不做站台归一 ⇒ `C690/3`/`C690`/`C690/1` 各占一个名额。
+ *   ⚠️ 归一**只用于去重键**；展示值保留原始站台码（`C690/2` 不得变成 `C690`）。
+ *
  * ★ v1.1.3：上下车候选出参前先过**优先级互斥组**（`STOP_PRIORITY`）——
  *   把「一条线路配了多个上下车点」收敛成**确定的一个**（用户口径，见常量注释）。
  *   ⚠️ 只作用于预测卡片链路；开发者模式计时链路不经过本文件，不受影响。
@@ -172,9 +176,17 @@ export interface PlanLite {
  * ⚠️ 不做「跨线路」取舍：若某条线根本到不了优先站，它照旧保留原下车点
  *    （例如 25 路只有 `T363/2`，不会因为别的线能到 `T367` 而被动刀）。
  */
-const STOP_PRIORITY: { prefer: string; drop: string[] }[] = [
-  { prefer: "T367", drop: ["T363"] },
-  { prefer: "C690", drop: ["C688"] },
+const STOP_PRIORITY: { prefer: string; drop: string[]; note: string }[] = [
+  {
+    prefer: "T367",
+    drop: ["T363"],
+    note: "用户口径 2026-09-16：能在「望德聖母灣馬路/連貫公路」(T367) 下车，就不在「連貫公路/威尼斯人」(T363) 下车",
+  },
+  {
+    prefer: "C690",
+    drop: ["C688"],
+    note: "用户口径 2026-09-16：能在「蝴蝶谷大馬路總站」(C690) 上下车，就不在「和諧廣場/業興大廈」(C688) 上下车",
+  },
 ];
 
 /** 按优先级互斥组过滤候选站点（保序；无优先站时原样返回） */
@@ -192,6 +204,36 @@ export interface PlanLegsRow extends PlanLegLite {
   plan_id: number;
 }
 
+/**
+ * ★ R5（IMP6）（2026-11-04 · 需求 U9）：**按 `mainCodeOf` 归一去重**（保序）。
+ *
+ * 已查实缺陷：原先两处都写 `[...new Set(out.filter(Boolean))]` —— 那是**字符串全等**去重，
+ * 不做站台归一。实例：`C690/3`、`C690`、`C690/1`、`T367`、`T367/2` ⇒ `new Set` 得 5 个
+ * ⇒ 每个各生成一条 seed ⇒ **同一物理站最多 5 张卡**（说的是同一件事）。
+ * 按 `mainCodeOf` 归一并保留首次出现的写法后，只剩 `C690, T367` 两个。
+ *
+ * ⚠️ **IMP6：归一只用于「去重键」，展示值必须保留原始站台码** ——
+ *   同一主码里若有一个带站台号的写法（`C690/2`），**展示值取它**，不得抹平成 `C690`。
+ *   站台号是真实信息（DSAT 报站与站牌都按站台区分），抹掉等于降级卡面精度。
+ */
+export function dedupeByMain(list: string[]): string[] {
+  const order: string[] = [];
+  const picked = new Map<string, string>();
+  for (const s of list) {
+    if (!s) continue;
+    const k = mainCodeOf(s);
+    const cur = picked.get(k);
+    if (cur === undefined) {
+      picked.set(k, s);
+      order.push(k);
+      continue;
+    }
+    // 同一物理站的两种写法：优先保留**带站台号**的那个（`s !== k` ⇔ s 有站台后缀）
+    if (cur === k && s !== k) picked.set(k, s);
+  }
+  return order.map((k) => picked.get(k)!);
+}
+
 /** 一条载具段的候选（上车站 / 下车点）—— ★ v1.1.3：出参前先过「上下车点优先级」 */
 function boardsOf(leg: PlanLegLite, route: string): string[] {
   const meta = leg.route_meta?.[route];
@@ -199,7 +241,7 @@ function boardsOf(leg: PlanLegLite, route: string): string[] {
   if (meta?.board?.length) out.push(...meta.board);
   if (leg.board_candidates?.length) out.push(...leg.board_candidates);
   if (leg.from_station) out.push(leg.from_station);
-  return applyStopPriority([...new Set(out.filter(Boolean))]);
+  return applyStopPriority(dedupeByMain(out));
 }
 
 /** 一条载具段的下车候选（首段才展开；末位=强制终点，语义与 alight_candidates 一致） */
@@ -210,9 +252,10 @@ function alightsOf(leg: PlanLegLite, route: string): string[] {
   else if (leg.alight_candidates?.length) out.push(...leg.alight_candidates);
   if (meta?.to) out.push(meta.to);
   if (leg.to_station) out.push(leg.to_station);
-  // 去重但保序；末尾若与 meta.to 重复自动折叠
+  // ★ R5（IMP6）：按主码归一去重（`C690/3 ≡ C690`）—— 同站多台是同一物理位置，不该各占一个名额；
+  //   但**展示值保留原始站台码**（有站台号的优先）
   // ★ v1.1.3：同样过「上下车点优先级」——C690/C688 这一组对上车与下车都生效
-  return applyStopPriority([...new Set(out.filter(Boolean))]);
+  return applyStopPriority(dedupeByMain(out));
 }
 
 /**
