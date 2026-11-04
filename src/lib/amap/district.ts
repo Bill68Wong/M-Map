@@ -300,10 +300,18 @@ export async function loadMacauDistrict(AMap: any, timeoutMs = DISTRICT_TIMEOUT_
   try {
     if (!AMap) throw new Error("AMap 未就绪");
     // 澳门主环 + 澳方管辖区环**并行**取（澳方管辖区失败不影响主流程）
-    const [macauRings, exclaveRings] = await Promise.all([
+    const [macauRingsFirst, exclaveRings] = await Promise.all([
       searchBoundaries(AMap, MACAU_ADCODE, timeoutMs),
       withTimeout(searchBoundaries(AMap, HENGQIN_EXCLAVE_ADCODE, timeoutMs), timeoutMs),
     ]);
+
+    // ★ 2026-11-04：移动端弱网实测，插件加载 + 首次查询偶发超过 6s ⇒ 一次失败即**永久无遮罩**
+    //   （桌面端网络快，不复现）。失败后隔 1s 重试一次；仍失败才走 fallback。
+    let macauRings = macauRingsFirst;
+    if (!macauRings || !macauRings.length) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      macauRings = await searchBoundaries(AMap, MACAU_ADCODE, timeoutMs);
+    }
 
     if (!macauRings || !macauRings.length) {
       // ⚠️ fallback 分支**故意不带** HENGQIN_PORT_RING：
