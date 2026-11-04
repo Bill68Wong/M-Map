@@ -65,6 +65,16 @@ import { queryOf } from "./StepSheet";
 import { useRouteVehicles } from "./useRouteVehicles";
 import { useRouteOverview } from "./useRouteOverview";
 import { useRideTracking, type RidePhase, type RideTrackView } from "./useRideTracking";
+/**
+ * ★ U2（2026-11-04）：赶车标签的**单向锁存**下发通道。
+ *
+ * 为什么是 Context 而不是 prop 透传：值要穿 `RouteSheet` → `RouteDetailPane` → `NavDetailBody`
+ * 三层，而中间两份文件本轮不在改动范围（同一工作区还有别的成员在改）。
+ * Context 只依赖 React 树，不依赖中间的传参写法。
+ * ⚠️ 值本身必须由**本文件（会话层）**持有：放 `NavDetailBody` 会随面板重挂载丢状态
+ *   （peek → detail 回来标签又出现）。
+ */
+import { CatchTagLatchContext } from "./NavDetailBody";
 import { useNavRemaining } from "./useNavRemaining";
 import { useUserFix } from "./useUserFix";
 import { useNavFrame } from "./useNavFrame";
@@ -341,15 +351,27 @@ export default function NavShell({
    */
   const gpsIntervalMs = ridePhase === "riding" ? 1_500 : navActive ? 3_000 : 10_000;
   /**
-   * ★ v3.7.0 S2（#11 / S2「候车期粗定位」）：`coarse` **只在候车期**开 ——
-   *   候车时允许复用 30s 内的系统缓存坐标（出点快、省电）；**乘车期必须 `false`**
-   *   （riding 要新鲜高精度坐标，否则蓝点/报站读数会跳）。浏览态维持既有 `maximumAge: 0`。
+   * ★ I0（2026-11-04）：`coarse` **全程关闭**（原为「候车期开粗定位」，本轮改掉）。
+   *
+   * ── 为什么必须关（根因，不是口味）──────────────────────────────────────
+   *   `coarse = true` ⇒ `enableHighAccuracy: false` + `maximumAge: 30s`
+   *   （`useUserFix.ts:187-189`）⇒ 单点 σ ≈ **50m**。
+   *   而「用户是否上车」靠**位置变化**判定（相对距离斜率）：σ=50m 时算斜率需要
+   *   ~45 秒才有足够信噪比；σ≈10m（高精度）时 5 帧 / 6 秒即可。
+   *   ⇒ 候车期用粗定位，正是「正常上车却锁不到车牌」的根因。
+   *
+   * ── 代价（用户已知并接受）──────────────────────────────────────────────
+   *   候车期耗电与发热增加。这是明确接受的交换：判定要准。
+   *
+   * ⚠️ 不要顺手「优化」成 `navActive ? 3_000 : 10_000` 之类 —— 上方 `gpsIntervalMs`
+   *   本轮**刻意不动**（用户选的是「全程高精度」，不是「降频省电」；同批改两个变量
+   *   会让耗电归因不清）。
    */
   const userFixR = useUserFix({
     enabled: true,
     intervalMs: gpsIntervalMs,
     maximumAge: 0,
-    coarse: navActive && ridePhase !== "riding",
+    coarse: false,
   });
 
   /**
@@ -407,6 +429,43 @@ export default function NavShell({
   useEffect(() => {
     setRidePhase(ride.phase);
   }, [ride.phase]);
+
+  /* ══════════════════════════════════════════════════════════════════════
+     ★ U2（2026-11-04）：**赶车标签的单向锁存**「本次导航是否已经上过车」
+     ─────────────────────────────────────────────────────────────────────
+     ── 为什么不能用「当前 phase」判（两次历史缺陷各用一个错判据）──────────
+       · 缺陷 #1（标签被全删）：`startSession("out")` 在用户按下「开始导航」时
+         **同时**做两件事 —— `rideStart()` 进 `boarding` **且** `setWalkSeg("out")`
+         （见下方 `startSession`）。⇒「步行去车站」这一路上 `ride.phase` 已经是
+         `boarding`、而 `navPhase` 是 `walk`。任何「`boarding` ⇒ 已到站 ⇒ 隐藏标签」
+         的写法，都会在用户刚出门时把标签抹掉 —— 而那正是最需要它的时刻。
+       · 缺陷 #2（上车后仍在显示）：只按「有没有导航」判，没有「已上车」这个**单向事实**
+         ⇒ riding 时、乃至下车后的末段步行（`navPhase` 又回到 `walk`）都还在显示。
+     故用**单向锁存**：一旦进入过 `riding` 即置位，此后任何 phase 变化（下车 / 末段步行）
+     都无权让它复活。
+
+     ── 三条实现纪律 ──────────────────────────────────────────────────
+       ① 自动判定与手动「我已上车」**一视同仁**：两者产物都是 `ride.phase === "riding"`。
+          区别对待 = 缺陷 #2 原样复发（手动上车后标签还在）。
+       ② 置位写在**渲染期**（单向、幂等），不是为了省一次 effect —— 而是为了
+          「进入 riding 的**那一次 commit** 里标签就已不在 DOM」。改成 effect 置位会让
+          那一帧仍渲染标签（截图与屏幕阅读器都能抓到）。
+       ③ 复位只有「会话边界」与用户显式撤回（见 `resetCatchLatch` 的调用点）。
+     ══════════════════════════════════════════════════════════════════════ */
+  const hasEnteredRiding = useRef(false);
+  /** 复位后强制一次重渲染（计数本身无业务含义；只在复位路径自增） */
+  const [, bumpCatchLatch] = useState(0);
+  if (ride.phase === "riding") hasEnteredRiding.current = true;
+  /**
+   * 锁存复位（唯一入口）。
+   * ⚠️ 复位点必须是**显式**的（事件 / 会话边界），不要在渲染期靠 phase 反推复位 ——
+   *   那等于把「当前 phase」重新变成判据，缺陷 #1/#2 会一起复活。
+   */
+  const resetCatchLatch = useCallback(() => {
+    if (!hasEnteredRiding.current) return;
+    hasEnteredRiding.current = false;
+    bumpCatchLatch((n) => n + 1);
+  }, []);
 
   /**
    * ★ 2026-11-03（需求 1）：**剩余行程服务端重算通道**（顶部总时长 / 到达时刻 / 纵条 同源）。
@@ -652,8 +711,9 @@ export default function NavShell({
    *     "车上又开始步行"老问题，只是入口从"再点开始步行"变成了"自动判定成功"。
    *
    * ── 为什么只清 `"out"` 不清 `"in"` ─────────────────────────────────────
-   *   末段步行（`"in"`）是 `ride.phase === "done"` 之后才由 `:697` 进入的，
-   *   与 riding 不可能并存；无条件清 null 反而会误杀。
+   *   末段步行（`"in"`）是 `ride.phase === "done"` 之后才进入的（见下方 `startSession`
+   *   的推进链 / 末段推进 effect），与 riding 不可能并存；无条件清 null 反而会误杀。
+   *   ⚠️ 这里刻意不写具体行号：旧的 `:697` 已漂移，行号式引用**每次改动都会失效**。
    *
    * 顺带解决 team-lead 关心的**次生损害**：死锁期间偏航会自动烧掉"本段唯一一次
    * 自动重算额度"（`:663-671`）。本 effect 在判定成功的第一时间就 `endWalk()`
@@ -676,7 +736,13 @@ export default function NavShell({
    * ★ T1：**开始/推进一条导航会话**（唯一入口语义）。
    *   · `seg="out"` ⇒ 冻结起点 + 乘车引擎进 boarding + 立刻进入步行出发段（顶栏直接出行走指令，
    *     用户不必再点一次「开始步行」）；
-   *   · 乘车引擎在 `walkActive` 期间**不会自动上车**（`useRideTracking.tryAuto` 早退）。
+   *   · ⚠️ **v3.10.0 起 `tryAuto` 不再因步行段早退** —— 上车判定在步行段内就会跑
+   *     （`useRideTracking.tryAuto` 的守卫现在只有 `if (phase !== "boarding" || !active) return;`；
+   *      旧的「`walkActive` ⇒ 早退」已被删除，`walkActive` 现在只影响拉车辆帧的间隔
+   *      `schedule(walkActive ? POLL_MS * 5 : 0)`）。
+   *     ⇒ 进入 riding 后由本文件上方那个 effect **清掉出发段步行**（`walkSeg === "out"`），
+   *       避免「riding + 步行横幅并存」。
+   *     ⇒ 旧注释「乘车引擎在 `walkActive` 期间不会自动上车」自 v3.10.0 起**与实际相反**，特此改写。
    */
   /** 引擎入口/出口的稳定引用（`ride` 每次渲染都是新对象，直接进依赖会让下面的回调恒变） */
   const rideStart = ride.onStart;
@@ -691,19 +757,32 @@ export default function NavShell({
        */
       if (ridePhaseNow === "riding") return;
       freezeOrigin(); // ★ T2：起点锚点在此刻固定
-      if (seg === "out" && ridePhaseNow === "off") rideStart();
+      if (seg === "out" && ridePhaseNow === "off") {
+        rideStart();
+        /**
+         * ★ U2 复位点①：**会话开始**（`ride.phase` 恰好从 `off` 起步的那一刻）。
+         *   放在与 `rideStart()` 同一个分支里 —— 二者必须同生同灭，否则会出现
+         *   「新会话仍带着上一次的锁存 ⇒ 标签永不显示」（锁存是单向的，自己不会消）。
+         */
+        resetCatchLatch();
+      }
       walkRoute.ensure(seg);
       setWalkSeg(seg);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ridePhaseNow, rideStart, walkRoute.ensure, userPos, from, originAnchor],
+    [ridePhaseNow, rideStart, resetCatchLatch, walkRoute.ensure, userPos, from, originAnchor],
   );
 
-  /** ★ T1：真出口 —— 结束导航（同时收步行段与乘车引擎） */
+  /**
+   * ★ T1：真出口 —— 结束导航（同时收步行段与乘车引擎）
+   * ★ U2 复位点②：**结束导航**（用户点「结束导航」/ 面板关闭走同一条路）。
+   *   不复位的话，下一次导航（哪怕是同一条路线重新开始）永远不显示赶车标签。
+   */
   const endSession = useCallback(() => {
     endWalk();
     rideStop();
-  }, [endWalk, rideStop]);
+    resetCatchLatch();
+  }, [endWalk, rideStop, resetCatchLatch]);
 
   /* ══════════════════════════════════════════════════════════════════════
      ★ 步行路径「重算」通道（偏航自动 1 次 + 手动 1 次 = 预取 2 + 重算 2 = 上限 4）
@@ -1018,6 +1097,12 @@ export default function NavShell({
      *   不收的话 `walkActive` 会带进新卡的乘车引擎 ⇒ 自动上车被判互斥永久挡住。
      */
     endWalk();
+    /**
+     * ★ U2 复位点③：**换一条路线 / 换方案**（点另一张卡、或在详情里「切过去」）。
+     *   这是**另一趟行程**：上一趟的「已上车」是过去时，对本趟没有意义。
+     *   不复位 ⇒ 点第二张卡时标签仍然隐身（用户会以为"这条路线没有赶车提示"）。
+     */
+    resetCatchLatch();
     setDetailCard({ card, degraded });
     setPane("detail");
     setSnap("half");
@@ -1032,8 +1117,12 @@ export default function NavShell({
        *   横幅、折线、`data-walk-*` 全留在界面上，底栏还照给「开始导航」
        *   （因为 `walkActive && phase==="ready"` 根本不看面板开合）。
        *   乘车侧本来就是这样：`navActive` 变 false ⇒ `useRideTracking` 自 reset。
+       *
+       * ★ U2 复位点④：**离开详情（会话结束）** —— 与上一行的"乘车引擎自 reset"对齐：
+       *   引擎都归 zero 了，锁存若不复位就会比引擎活得更久 ⇒ 下次导航标签永不出现。
        */
       endWalk();
+      resetCatchLatch();
       setPane("recommend");
       setSnap("full");
     } else {
@@ -1093,10 +1182,23 @@ export default function NavShell({
    *     + 直接进入步行出发段（顶栏立刻出行走指令，用户不必再点「开始步行」）；
    *   · `onStop`（「结束导航」）⇒ `endSession()`：步行段 + 乘车引擎 + 观测钩子一起收。
    * 其余字段原样透传（面板/纵条/卡片都按原契约读）。
+   *
+   * ★ U2 复位点⑤：**用户点「我没上车」** —— 这是锁存的**唯一用户侧复位入口**（设计 §3.2）。
+   *   语义 = 「我刚才那次上车判定作废」⇒ 标签必须按候车态重新出现。
+   *   ⚠️ 必须在**同一个 handler 里**先复位再调引擎的 `onNotBoard`：引擎会 `setPhase("boarding")`
+   *   并清 `boardMatch`，两者同帧生效才不会出现"回等车了但标签还是不显示"。
    */
   const trackView: RideTrackView = useMemo(
-    () => ({ ...ride, onStart: () => startSession("out"), onStop: endSession }),
-    [ride, startSession, endSession],
+    () => ({
+      ...ride,
+      onStart: () => startSession("out"),
+      onStop: endSession,
+      onNotBoard: () => {
+        resetCatchLatch();
+        ride.onNotBoard();
+      },
+    }),
+    [ride, startSession, endSession, resetCatchLatch],
   );
 
   /**
@@ -1119,6 +1221,17 @@ export default function NavShell({
   }, [detailActive, detailCard, ride.legIndex, ride.lastVehicleTs, colors]);
 
   return (
+    /**
+     * ★ U2：**锁存下发通道**（见上方 `hasEnteredRiding` 块注释）。
+     *   包住整棵子树而不是只包 `RouteSheet`：`NavDetailBody` 在 `RouteSheet` 里面，
+     *   中间还隔着 `RouteDetailPane`，Context 不受中间层传参写法影响。
+     *   ⚠️ 值在渲染期读取（`hasEnteredRiding.current`）——它与「进入 riding 的那次 commit」
+     *     同帧，故标签在**同一次 commit** 里就已从 DOM 移除。
+     */
+    <CatchTagLatchContext.Provider value={hasEnteredRiding.current}>
+    {/* ⚠️ 下面这段 `<section>` 及其子树的缩进**刻意保持原样**（不给 Provider 再加一级）——
+        包一层 Provider 若要全局重排缩进，会把整块 300 行 JSX 变成"全文件改动"，
+        审查时看不出真正的语义改动。结构仍以标签为准：Provider > section > … */}
     <section className="nav-shell nav-shell--full">
       <div className="nav-map-wrap">
         <NavMap
@@ -1479,6 +1592,7 @@ export default function NavShell({
       {/* ★ v3.3.0（AC-93 · ADR-102）：`?diag=pin` 起终点钉诊断浮层 —— **生产默认不渲染** */}
       {diagPin && <PinDiag />}
     </section>
+    </CatchTagLatchContext.Provider>
   );
 }
 
