@@ -19,6 +19,15 @@ import { VEH_STALE_SEC } from "./observe-hooks";
 
 /** `data-cand-state` 的取值集合（设计 §2.10 定稿，六个值一个不多一个不少） */
 export type CandState = "unique" | "strong" | "ambiguous" | "stale" | "none" | "off";
+/**
+ * `ambiguous` 是**一个值、两种成因**（team-lead 2026-11-04 裁决：不新增第 7 个枚举值）：
+ *   ① **停靠本上车站的车 ≥2 辆** —— 任何一辆都可能不是用户要等的车；
+ *   ② **`strong` 与 `weak` 指向不同车** —— 一车"刚走"、另一车"正停"，本帧证据自相矛盾。
+ * 合并的理由：两者对用户的表现与处置**完全相同**（都是"别指错车"⇒ 不显示），
+ *   没有任何需要分开的处置动作；而每多一个枚举值，QA 矩阵就多一维。
+ * ⚠️ 若将来出现"两种成因要给不同文案"的需求，**那时**才拆，且必须同时改 `data-cand-state`
+ *   的契约文档（QA 断言依赖它）。
+ */
 
 export interface CandViewInput {
   /** 判定层产物；`null` = 本帧没算（未到候车期 / 非巴士段 / 已清场） */
