@@ -137,6 +137,38 @@ export function remainFromIdxOf(prog: TrackProgress | null | undefined): number 
 }
 
 /**
+ * 到下车还有**几站**（要经过几站才到下车点，0 = 已到站）。
+ *
+ * ── 为什么不能用「已过站数」算（这是修一个真实 off-by-one 的地方）────────────
+ *   `progressOf` 停靠分支给的是 `passedIdx = atIdx − 1`（见上方 `progressOf` ①）。
+ *   若统一按 `lastIdx − passedIdx` 算，停靠在第 k 站会得出 `lastIdx − k + 1`，
+ *   **比真实剩余站数多 1** ⇒ 车停在下车站时还会显示「还有 1 站下车」，
+ *   与同一帧的到站提醒（`prog.atIdx === alightIdx ⇒ alarm="now"`，底栏「即将到达」）自相矛盾。
+ *
+ * ── 锚站（与「分钟」的基准站**刻意不是同一个**，别合并）──────────────────
+ *   数「还要经过几站」要从**当前所在（或刚离开）的站**起算：
+ *     · `kind === "at"`      ⇒ 锚站 = `atIdx`（车就停在第 k 站，还剩 `lastIdx − k` 站）；
+ *     · `kind === "between"` ⇒ 锚站 = `passedIdx`（= 区间起点站；车正驶向 `passedIdx + 1`，
+ *                              那也算「还要经过的一站」，所以不能用区间终点站）。
+ *   ⚠️ 而 `remainFromIdxOf`（分钟用）返回的是**区间终点站 `nextIdx`** —— 因为
+ *   `segRemainSec` 量的就是「到那一站」的剩余。两者差 1 是**语义必然**：
+ *     「还要经过几站」含正在开往的那一站，「到那一站的剩余时间」不含它。
+ *   ⇒ **不要**把 `stopsAwayOf` 改成复用 `remainFromIdxOf`：那会让行驶态的站数少 1
+ *     （实测：车在 A2→A3 区间、下车站是 A3 时，会写「还有 0 站下车」而不是「还有 1 站」）。
+ *
+ * @param lastIdx 本段**下车站**的下标（= `stops.length − 1`；< 1 表示站序不足两站）
+ * @returns `null` = 站序不足两站 / 进度不可用（`lost`/`unknown`）⇒ 调用方**不显示站数**
+ */
+export function stopsAwayOf(prog: TrackProgress | null | undefined, lastIdx: number): number | null {
+  if (!prog || prog.kind === "lost" || prog.kind === "unknown") return null;
+  const rawAnchor = prog.kind === "at" ? (prog.atIdx ?? prog.passedIdx + 1) : prog.passedIdx;
+  const anchor = Number(rawAnchor);
+  if (!Number.isFinite(anchor) || anchor < 0) return null;
+  if (!Number.isFinite(lastIdx) || lastIdx < 1) return null;
+  return Math.max(0, Math.trunc(lastIdx) - Math.trunc(anchor));
+}
+
+/**
  * 本帧「到基准站」的剩余秒数 = 上行 `/api/nav/remaining` 的 `segRemainSec`。
  *
  * ① 车辆帧**显式**停靠在本段某站（`atStation` 存在且 `status === "stopping"`）⇒ 返回 `0`；

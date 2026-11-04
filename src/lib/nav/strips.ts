@@ -75,6 +75,15 @@ export function buildStrips(card: RecommendCard, ctx: StripBuildCtx): SegmentStr
       return {
         code,
         label: ctx.nameOf.get(code) ?? code,
+        /**
+         * ⚠️ 逐跳分钟**不受 `patchedCard` 影响**（本函数只从 card 取 `ride.minutes` / `waitMin` 等
+         * 段级时间，`minToNext` 一律现查 `lookupHop`）⇒ 服务端下发的 `liveStrips` 与前端静态
+         * `strips` 在这一列上**逐字节相同**。
+         * 正因如此，前端 `NavDetailBody` 的「到下车分钟 / 还有几站」可以用**静态** `strips` 的站序与
+         * `minToNext` 与 `remainFromIdxOf` 配对（下标不会错位）。
+         * ⇒ 若哪天服务端开始 patch `minToNext`（例如按位置裁剪已走路段），**前端那两处必须一起换**：
+         *   改读 `liveStrips`，否则基准站下标会落在两份不同的站序上。
+         */
         minToNext: hop ? hop.minutes : 0,
         level: hop ? hop.level : 0,
         role: isFirst ? "board" : isLast ? "alight" : "mid",

@@ -37,7 +37,7 @@ import {
   remainServedOf,
   remainTotalMinOf,
 } from "@/lib/nav/remaining-view";
-import { remainFromIdxOf } from "@/lib/nav/track";
+import { remainFromIdxOf, stopsAwayOf } from "@/lib/nav/track";
 import type { RideTrackView } from "./useRideTracking";
 /* ★ v3.6.0 S5：步行预览（展开键 + 静态步骤列表） */
 import WalkSegToggle from "@/components/walk/WalkSegToggle";
@@ -567,11 +567,15 @@ export default function NavDetailBody({
      ④ 仍**不做**本地秒级递减：每帧（12s）由 `segProgress` 重新校准，与顶部「全程剩余」
         同一节拍（绝对锚每秒递减那条通道只服务顶部，见 `remainNowMs`）。
      ══════════════════════════════════════════════════════════════════════ */
+  /**
+   * ★ U3：**基准站**（剩余距离的起算站）—— 分钟与站数**共用这一个值**。
+   *   停靠态 = 所停站 `atIdx`；行驶态 = 区间终点站 `nextIdx`（规则见 `lib/nav/track.ts#remainFromIdxOf`）。
+   */
+  const pivotIdx = remainFromIdxOf(track?.prog ?? null);
   const alightMin = useMemo(() => {
     const full = card.rides[legIdx]?.minutes;
     const legMinutes = full != null && Number.isFinite(full) && full >= 0 ? full : null;
     const seg = track?.segProgress?.segRemainSec ?? null;
-    const pivotIdx = remainFromIdxOf(track?.prog ?? null);
     // 三样都没有 ⇒ 无值（**不写「约 0 分」**：那读起来像已到站，会与到站提醒抢语义）
     if (legMinutes === null && seg === null && pivotIdx === null) return null;
     const min = legRemainMinOf({
@@ -581,14 +585,20 @@ export default function NavDetailBody({
       legMinutes: legMinutes ?? 0,
     });
     return Number.isFinite(min) && min >= 0 ? min : null;
-  }, [track?.segProgress?.segRemainSec, track?.prog, trackStops, legIdx, card.rides]);
+  }, [track?.segProgress?.segRemainSec, pivotIdx, trackStops, legIdx, card.rides]);
   /** 显示值：地板 1 分（写「约 0 分」读起来像已到站，会与到站提醒抢语义 —— 沿用既有口径） */
   const shownAlightMin = alightMin == null ? null : Math.max(1, Math.round(alightMin));
-  /** 到下车还有几站（`null` = 进度未知 / 站序不足两站：不写「还有 0 站」，那是假精确） */
-  const stopsAway =
-    track?.prog && trackStops.length >= 2
-      ? Math.max(0, trackStops.length - 1 - track.prog.passedIdx)
-      : null;
+  /**
+   * 到下车还有几站（0 = 已到站）= `lastIdx − 锚站`，由 `lib/nav/track.ts#stopsAwayOf` 算。
+   * ⚠️ 三条不能改回去的地方：
+   *   ① **不能**按「已过站数」算（`lastIdx − prog.passedIdx`）：停靠态 `passedIdx = atIdx − 1`
+   *      ⇒ 多算 1 站（车停在下车站还会写「还有 1 站下车」，与底栏「即将到达」同屏矛盾）；
+   *   ② **不能**改成复用 `remainFromIdxOf`（分钟用的基准站 = 区间终点站）：行驶态会**少算** 1 站
+   *      （车在 2→3 区间、下车站是 3 时会写「还有 0 站下车」）—— 两者差 1 是语义必然
+   *      （站数含正在开往的那一站，到那一站的剩余时间不含它）；
+   *   ③ `null` = 进度不可用 / 站序不足两站：不写「还有 0 站」，那是假精确。
+   */
+  const stopsAway = stopsAwayOf(track?.prog ?? null, trackStops.length - 1);
 
   /**
    * 上车后主行「要盯的那一站」：到站提醒已在响（`alarm === "now"`）⇒ 当前停靠站；

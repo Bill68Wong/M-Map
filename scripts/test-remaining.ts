@@ -43,7 +43,7 @@ import type {
 } from "../src/lib/recommend/types";
 import { recomputeRemaining, type RemainingCtx } from "../src/lib/nav/remaining";
 import { buildStrips } from "../src/lib/nav/strips";
-import { progressOf, remainFromIdxOf, segRemainSecOf, type TrackVehicle } from "../src/lib/nav/track";
+import { progressOf, remainFromIdxOf, segRemainSecOf, stopsAwayOf, type TrackVehicle } from "../src/lib/nav/track";
 import { PROGRESS_H, PROGRESS_W } from "../src/lib/nav/progress-params";
 
 /* ══════════════════════ 断言工具 ══════════════════════ */
@@ -576,6 +576,79 @@ console.log("\n⑭ 基准站规则 remainFromIdxOf / segRemainSecOf（纯函数�
   ok(segRemainSecOf(false, null) === null, "未停靠且无融合值 ⇒ null（回退逐跳累加）");
   ok(segRemainSecOf(false, -5) === null, "负融合值 ⇒ null（脏数据不外泄）");
   ok(segRemainSecOf(false, Number.NaN) === null, "NaN ⇒ null");
+
+  /* ⑤ `stopsAwayOf`：「还有几站下车」与基准站同源（修停靠态多算 1 站的 off-by-one）
+   * ── 为什么这条必须有 ──────────────────────────────────────────────────
+   *   `progressOf` 停靠分支给 `passedIdx = atIdx − 1`（track.ts:76-86）。
+   *   若按「已过站数」算 `lastIdx − passedIdx`，停靠在第 k 站会得出 `lastIdx − k + 1`
+   *   —— 比真实剩余跳数多 1 站；而行驶态 `nextIdx = k+1` 恰好算对
+   *   ⇒ 这个错**只在停靠时出现**，还会与「即将到达」的到站提醒同屏打架。
+   *   全部用**真实 `progressOf` 产物**喂，不手搓 TrackProgress 字面量（避免"测的是我抄的期望"）。
+   */
+  {
+    const lastIdx = stopMains.length - 1; // [A1,A2,A3] ⇒ 2 = 下车站
+    const atSt = (code: string): TrackVehicle => ({
+      plate: "T1",
+      lat: 0,
+      lng: 0,
+      status: "stopping",
+      interval: null,
+      atStation: { code },
+      progress: null,
+    });
+    const onHop = (from: string, to: string): TrackVehicle => ({
+      plate: "T1",
+      lat: 0,
+      lng: 0,
+      status: "moving",
+      interval: { from: { code: from }, to: { code: to } },
+      atStation: null,
+      progress: null,
+    });
+
+    const pAt1 = progressOf(stopMains, atSt("A2")); // 停靠在中间站（下标 1）
+    const pAtAlight = progressOf(stopMains, atSt("A3")); // 停靠在下车站
+    const pAtBoard = progressOf(stopMains, atSt("A1")); // 停靠在上车站（还没发车）
+    const pMoving = progressOf(stopMains, onHop("A2", "A3")); // 行驶在中→下
+
+    ok(stopsAwayOf(pAt1, lastIdx) === 1, "停靠中间站(1) ⇒ 还有 1 站（真实剩余 1 跳）", `实际 ${stopsAwayOf(pAt1, lastIdx)}`);
+    ok(stopsAwayOf(pMoving, lastIdx) === 1, "行驶在中→下 ⇒ 还有 1 站（正在开往的那一站要算）", `实际 ${stopsAwayOf(pMoving, lastIdx)}`);
+    ok(stopsAwayOf(pAtAlight, lastIdx) === 0, "停靠下车站 ⇒ 0 站（次行此时提前返回「本站下车」）", `实际 ${stopsAwayOf(pAtAlight, lastIdx)}`);
+    ok(stopsAwayOf(pAtBoard, lastIdx) === 2, "停靠上车站 ⇒ 还有 2 站（全段未走）", `实际 ${stopsAwayOf(pAtBoard, lastIdx)}`);
+    /** ★ 这一条专门锁「行驶态不得少算 1 站」：直接复用 `remainFromIdxOf`（区间终点站）会算成 0 */
+    {
+      const pOnHop0 = progressOf(stopMains, onHop("A1", "A2"));
+      ok(
+        stopsAwayOf(pOnHop0, lastIdx) === 2,
+        "行驶在上→中 ⇒ 还有 2 站（复用「分钟」基准站会错算成 1）",
+        `实际 ${stopsAwayOf(pOnHop0, lastIdx)}`,
+      );
+      ok(
+        stopsAwayOf(pOnHop0, lastIdx) !== lastIdx - remainFromIdxOf(pOnHop0)!,
+        "站数锚站 ≠ 分钟基准站（前者含正在开往的那一站，差 1 是语义必然）",
+        `站数锚=${lastIdx - stopsAwayOf(pOnHop0, lastIdx)!} 分钟基准=${remainFromIdxOf(pOnHop0)}`,
+      );
+    }
+    ok(stopsAwayOf(null, lastIdx) === null, "无进度 ⇒ null（不写「还有 0 站」）");
+    ok(
+      stopsAwayOf({ kind: "lost", passedIdx: -1, atIdx: null, nextIdx: null }, lastIdx) === null,
+      "丢信号 ⇒ null（不猜站数）",
+    );
+    ok(stopsAwayOf(pAt1, 0) === null, "站序不足两站（lastIdx=0）⇒ null");
+
+    /* 变异自检：旧公式（按已过站数算）在**停靠态**必多 1 站 —— 这条是 off-by-one 的可检出证据 */
+    const oldFormula = (p: typeof pAt1): number => Math.max(0, lastIdx - p.passedIdx);
+    ok(
+      oldFormula(pAt1) === 2 && stopsAwayOf(pAt1, lastIdx) === 1,
+      "[变异] 旧公式（lastIdx − passedIdx）停靠态多算 1 站能被检出",
+      `旧=${oldFormula(pAt1)} 新=${stopsAwayOf(pAt1, lastIdx)}`,
+    );
+    ok(
+      oldFormula(pMoving) === stopsAwayOf(pMoving, lastIdx),
+      "[变异] 行驶态两者同值（说明这个 off-by-one **只在停靠时**出现）",
+      `旧=${oldFormula(pMoving)} 新=${stopsAwayOf(pMoving, lastIdx)}`,
+    );
+  }
 }
 
 /* ══════════════ ⑮ 连续刷新：切换瞬间不得跳变（U3 · 根因证据 + 回归锁）══════════════
