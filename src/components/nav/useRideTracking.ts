@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   anchorOf,
   cutAt,
+  distToBoardM,
   mainOf,
   monotonicCut,
   progressOf,
@@ -151,9 +152,9 @@ export type BoardMatch = "none" | "auto" | "confirmed" | "corrected" | "manual";
 export type MatchSource = "gps" | "gps+vehicle" | "vehicle" | "manual";
 
 /**
- * ★ 2026-11-05：**本次 riding 是靠什么进入的**（`RideTrackView.boardEntry`）。
+ * ★ 2026-11-05：**本次 riding 是靠什么进入的**（`RideTrackView.enteredVia`）。
  *
- * 为什么必须与 `hasPosEvidence` 分开成两个量（不能合成一个布尔）：
+ * 为什么必须与 `boardedByPosition` 分开成两个量（不能合成一个布尔）：
  *   停站判据上线后，「进入 riding」不再等价于「人已在车上」——
  *   车一到站就切，用户可能还在跑。消费方（赶车标签锁存）要的条件是
  *   「进入 riding **且** 有位置证据（或用户手动确认）」，而不是「进入 riding」。
@@ -236,17 +237,26 @@ export interface RideTrackView {
   autoSwitched: boolean;
   /**
    * ★ 2026-11-05：本次 riding 的**进入方式**（`null` = 不在 riding）。见 `BoardEntry`。
-   * ⚠️ 消费方（赶车标签锁存）**不得**只用本字段决定隐藏，必须与 `hasPosEvidence` 配合：
+   * ⚠️ 消费方（赶车标签锁存）**不得**只用本字段决定隐藏，必须与 `boardedByPosition` 配合：
    *   车停靠上车站就切 riding 之后，人可能还在跑，此时隐藏赶车标签会在最需要它的时候消失
    *   （负责人裁决：「加上位置证据再隐藏」）。
    */
-  boardEntry: BoardEntry | null;
+  enteredVia: BoardEntry | null;
   /**
    * ★ 2026-11-05：**位置证据是否已到达**（本次 riding 内一旦为真不再回退）。
-   *   `boardEntry === "station"` 时它从 `false` 起，随用户移动、r2 或跟车斜率判据成立后
+   *   `enteredVia === "station"` 时它从 `false` 起，随用户移动、r2 或跟车斜率判据成立后
    *   **在进入 riding 之后**翻真 —— 这才是「可以隐藏赶车标签」的时刻。
    */
-  hasPosEvidence: boolean;
+  boardedByPosition: boolean;
+  /**
+   * ★ 2026-11-05：**参照车距上车站的直线距离（米）**；`null` = 无参照车（无牌）或未知。
+   *
+   * 用途：给「`enteredVia === "station"` 但用户其实没上车」的滞留风险做兜底 ——
+   *   车已驶离上车站足够远而 `boardedByPosition` 仍未成立 ⇒ 可判"没上这班车"。
+   * ⚠️ 直线距离（非沿线里程）；⚠️ 无牌时恒 `null`，**不要**当 0 或 Infinity 用。
+   * ⚠️ 阈值由消费方定，本引擎不给建议值（避免判定层把自己的口径渗进展示层）。
+   */
+  refVehDistToBoardM: number | null;
   /** 轻反馈文案（「已开始跟踪 51 路 · 车牌」/ 轻轨「已开始跟踪行程（线名）」） */
   autoNote: string;
   /** 进度来源（车辆 / GPS 驱动）——供来源标注与站条 */
@@ -619,12 +629,32 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   /** ★ 中置信：`boardMatch="auto"` + 本标记（不占用 `confirmed`，见 `BoardMatch` 注释） */
   const [matchPending, setMatchPending] = useState(false);
   /** ★ 2026-11-05：本次 riding 的进入方式（`null` = 不在 riding）。见 `BoardEntry`。 */
-  const [boardEntry, setBoardEntry] = useState<BoardEntry | null>(null);
+  const [enteredVia, setEnteredVia] = useState<BoardEntry | null>(null);
   /**
-   * ★ 2026-11-05：**位置证据是否已到达**（本次 riding 内）。
+   * ★ 2026-11-05：**位置证据是否已成立**（本次 riding 内的当前值）。
    *   一旦为真就不再回退（证据一旦获得不会消失），也**不再重复计算**（省投影开销）。
    */
-  const [hasPosEvidence, setHasPosEvidence] = useState(false);
+  const [boardedByPosition, setBoardedByPosition] = useState(false);
+  /**
+   * ★ 2026-11-05：**参照车距上车站的直线距离（米）**（`RideTrackView.refVehDistToBoardM`）。
+   *
+   * ── 为什么需要它（fe-nav-ui 报的滞留风险）──────────────────────────────
+   *   `enteredVia === "station"` 切进 riding 后，若用户其实**没上车**（车来了但没挤上），
+   *   则 `boardedByPosition` 永不翻真 ⇒ 赶车标签会一直显示「小跑能赶上」= 新的滞留缺陷。
+   *   兜底判据不能靠"自创时间阈值"，要用物理信号：**车已驶离上车站足够远，位置证据却仍未成立
+   *   ⇒ 用户没上这班车**。
+   *
+   * ── 量本身怎么来的（不是临时造的）────────────────────────────────────
+   *   用**现成**的 `track.ts#distToBoardM(v, boardPos)`（线路几何已有，`boardPos`
+   *   来自 `anchors[legIndex].board`，同一个值候车期就在用）+ 已锁的参照车 `vehicleRef`。
+   *   ⇒ 零新增几何计算、零新增请求，只在既有 `fetchFrame` 的 riding 分支里多算一次 `hypot`。
+   *
+   * ⚠️ **直线距离，不是沿线里程**。对「是否已驶离」这个单调判断够用（绕路时直线仍单调增），
+   *   但**不要**拿它当"车走了多远"的精确值用。
+   * ⚠️ **无牌 riding（多车歧义）时恒为 `null`** —— 参照车未知，如实留空，不猜。
+   *   消费方遇到 `null` 时应视为「本兜底判据不可用」，**不要**当成 0 或 Infinity。
+   */
+  const [refVehDistToBoardM, setRefVehDistToBoardM] = useState<number | null>(null);
   const [pendingPlate, setPendingPlate] = useState<string | null>(null);
   /**
    * ★ v3.7.0 S3：车辆匹配器的跨帧状态（用户里程环 / 车牌→里程环 / 排除名单）。
@@ -869,8 +899,9 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     setMatchSource("gps");
     setMatchPending(false);
     setPendingPlate(null);
-    setBoardEntry(null); // ★ 2026-11-05：会话重置（否则下一段带着上一段的进入方式）
-    setHasPosEvidence(false);
+    setEnteredVia(null); // ★ 2026-11-05：会话重置（否则下一段带着上一段的进入方式）
+    setBoardedByPosition(false);
+    setRefVehDistToBoardM(null);
     matcherRef.current?.reset();
     vehicleRef.current = null;
     missRef.current = 0;
@@ -1156,6 +1187,12 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         missRef.current = 0;
         setNote("");
         vehicleRef.current = v;
+        /**
+         * ★ 2026-11-05：更新「参照车距上车站」—— 只在**已锁牌**的 riding 帧里更新。
+         *   无牌时 `vehicleRef` 为 null ⇒ 走不到这里 ⇒ 该值保持上次（切牌后 `repick` 会重算）。
+         *   ⚠️ 必须在 `vehicleRef.current = v` 之后：本行用的就是这一帧的坐标。
+         */
+        setRefVehDistToBoardM(distToBoardM(v, boardPos));
 
         // ★ v3.4.0（进度模型）：本段「位置感知剩余」——服务端 progress（坐标投影结果）
         //   与客户端「时间项」融合：fused = w·D + (1−w)·max(md − u, 0)。
@@ -1217,12 +1254,12 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       const route = leg?.route.replace(/^LRT-/, "") ?? "";
       const lrt = leg?.kind === "lrt";
       setPhase("riding");
-      setBoardEntry(entry);
+      setEnteredVia(entry);
       /**
        * ★ 位置证据：`position` 进入的当场就为真；`station` 进入的从 false 起，
        *   之后由「riding 期间位置判据」effect 在证据到达时翻真（**进入 riding 之后才翻转**）。
        */
-      setHasPosEvidence(entry === "position");
+      setBoardedByPosition(entry === "position");
       setPlate(nextPlate);
       setProgressSource(source);
       /**
@@ -1377,7 +1414,7 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       /**
        * `evidence === "atstop"` ⇒ 停站判据（无位置证据）；其余（r2 / slope）⇒ 有位置证据。
        * ⚠️ 两者对消费方的差别是**赶车标签能否立刻隐藏**：停站进入时车刚到，人可能还在跑，
-       *    必须等位置证据到达（`hasPosEvidence` 翻真）才隐藏。
+       *    必须等位置证据到达（`boardedByPosition` 翻真）才隐藏。
        */
       switchToRiding(res.plate, res.source, res.evidence === "atstop" ? "station" : "position");
     }
@@ -1518,7 +1555,7 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   }, [userFix, phase, tryAuto]);
 
   /**
-   * ★ 2026-11-05：**riding 期间判「位置证据是否到达」**（供 `RideTrackView.hasPosEvidence`）。
+   * ★ 2026-11-05：**riding 期间判「位置证据是否到达」**（供 `RideTrackView.boardedByPosition`）。
    *
    * ── 为什么必须有这个 effect ──────────────────────────────────────────────
    *   停站判据（`atBoardStopOf`）让 riding 的语义从「人已在车上」变成「车到了，人可能还在跑」。
@@ -1528,7 +1565,7 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
    *   旧代码里 `autoBoardOf` 只在 boarding 跑（`tryAuto` 早退），所以没有现成的量可用。
    *
    * ── 三条纪律 ────────────────────────────────────────────────────────────
-   *   ① **一次性**：`hasPosEvidence` 一旦为真立刻 return，不再重复计算
+   *   ① **一次性**：`boardedByPosition` 一旦为真立刻 return，不再重复计算
    *      （`r2Of` 要对窗内每帧做全折线投影，不设这道闸会每 3s 白烧一次）；
    *   ② **不回退**：证据一旦获得不会消失，故只 `setTrue`、从不 `setFalse`
    *      （换腿/重置才清，见 `doAlight` / `reset`）；
@@ -1536,7 +1573,7 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
    *      避免把"展示层需求"渗进判定链路。
    */
   useEffect(() => {
-    if (phase !== "riding" || !active || hasPosEvidence) return;
+    if (phase !== "riding" || !active || boardedByPosition) return;
     const leg = legs[legIndex];
     if (!leg) return;
     const ok = positionEvidenceOf({
@@ -1546,8 +1583,8 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       vehFrames: vehHistRef.current,
       plate,
     });
-    if (ok) setHasPosEvidence(true);
-  }, [phase, active, userFix, plate, legs, legIndex, hasPosEvidence]);
+    if (ok) setBoardedByPosition(true);
+  }, [phase, active, userFix, plate, legs, legIndex, boardedByPosition]);
 
   /* 轮询（riding 且有车牌）—— ★ v3.7.0 S2：同样接恢复补刷 */
   useEffect(() => {
@@ -1917,8 +1954,9 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     autoUsedLeftRef.current = AUTO_TRIES_PER_LEG; // ★ I-3：次数按「每次开始导航」重置
     plateLockedTsRef.current = 0;
     vehHistRef.current = [];
-    setBoardEntry(null); // ★ 2026-11-05
-    setHasPosEvidence(false);
+    setEnteredVia(null); // ★ 2026-11-05
+    setBoardedByPosition(false);
+    setRefVehDistToBoardM(null);
     lastSwitchTsRef.current = Date.now();
     boardStreakRef.current = 0;
     boardingStartedAtRef.current = Date.now(); // ★ 判定启动宽限起点（AC-25a 防首帧闪烁）
@@ -1985,10 +2023,10 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         setPhase("riding");
         /**
          * ★ 2026-11-05：手动上车 ⇒ `manual`（用户本人断言已在车上）。
-         *   `hasPosEvidence` 置真：手动是**用户明确确认**，消费方无需等位置证据。
+         *   `boardedByPosition` 置真：手动是**用户明确确认**，消费方无需等位置证据。
          */
-        setBoardEntry("manual");
-        setHasPosEvidence(true);
+        setEnteredVia("manual");
+        setBoardedByPosition(true);
         setPlate(ranked[0].plate);
         setProgressSource("vehicle");
         /* ★ v3.7.0 S3：用户显式标记上车 ⇒ `manual`（与自动判定的 `auto` 可区分） */
@@ -2010,7 +2048,7 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
 
   const repick = useCallback((p: string) => {
     /**
-     * ★ 2026-11-05：「不是这辆」换车 —— **不动** `boardEntry` / `hasPosEvidence`：
+     * ★ 2026-11-05：「不是这辆」换车 —— **不动** `enteredVia` / `boardedByPosition`：
      *   换的是"哪辆车"，不是"怎么进入 riding"。位置证据（r2 / 跟车斜率）证明的是
      *   「用户随线路在移动」，与锁到哪辆车无关，故无需重判、也不应回退。
      */
@@ -2064,8 +2102,9 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       setAnomaly("none");
       setAutoSwitched(false);
       setAutoNote("");
-      setBoardEntry(null); // ★ 2026-11-05：换腿 ⇒ 重新计「怎么进的」
-      setHasPosEvidence(false);
+      setEnteredVia(null); // ★ 2026-11-05：换腿 ⇒ 重新计「怎么进的」
+      setBoardedByPosition(false);
+      setRefVehDistToBoardM(null);
       anomalyStreakRef.current = 0;
       vehicleRef.current = null;
       missRef.current = 0;
@@ -2370,8 +2409,9 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     candidates,
     candAtStop,
     autoSwitched,
-    boardEntry,
-    hasPosEvidence,
+    enteredVia,
+    boardedByPosition,
+    refVehDistToBoardM,
     autoNote,
     progressSource,
     boardMatch,
