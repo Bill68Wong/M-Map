@@ -36,13 +36,16 @@ import { ladderStateOf, rideNoteOf, type LadderState } from "@/lib/nav/ride-note
 import {
   ANOMALY_CONFIRM,
   ANOMALY_MIN_GAP_MS,
+  AUTO_TRIES_PER_LEG,
   autoBoardOf,
   anomalyOf,
   detectPausedOf,
   nextLegCooldownOf,
   type Anomaly,
+  type BoardEvidence,
   type FixLite,
 } from "@/lib/nav/boarding-detect";
+import type { VehFrame } from "@/lib/nav/follow-frames";
 import type { LL, ColoredLeg, OverviewLegInput } from "@/lib/nav/route-overview";
 import type { RecommendCard, SegmentStrip } from "@/lib/recommend/types";
 import { COOLDOWN_VEHICLE_SEC, useCooldown } from "./useCooldown";
@@ -88,6 +91,11 @@ const BOARD_WALK_EXTRA_FRAMES = 2;
 const MISS_LIMIT = 3;
 /** GPS 采样窗口保留时长（ms） */
 const FIX_KEEP_MS = 90_000;
+/**
+ * ★ I-3：车辆帧历史保留条数（8 条 ≈ 96s，覆盖 12s 轮询 + 一次恢复补刷）。
+ *   与 `FIX_KEEP_MS` 同量级：`followFramesOf` 的窗口上限 30s，8 条足够两端内插。
+ */
+const VEH_HIST_KEEP = 8;
 /**
  * ★ 本批：蓝点吸附到线路投影的最大距离（米）——对不上就冻结（Token `--you-snap-max`）
  * ⚠️ 该 CSS Token（`globals.css:7010`）**未接线**，改它不生效；值以此常量为准。
@@ -376,6 +384,52 @@ function setLadderHook(state: LadderState | null, coloredLen: number) {
 }
 
 /**
+ * ★ I-3（2026-11-04）：**上车判定诊断**观测钩子（QA 用 `body[...]` 断言）。
+ *
+ * 为什么必须新增：既有 `data-board-match` / `data-match-source` 只能表达「锁没锁上牌」，
+ * 无法区分三种完全不同的失败：
+ *   ① **没机会**（无候选车 / 车没动）        ⇒ `data-board-evidence=none|station`
+ *   ② **有机会但没锁上**（多车歧义）        ⇒ `data-board-evidence=station` + `data-plate-state=none`
+ *   ③ **判上了但 UI 没显示**（渲染链路问题）⇒ `data-plate-state=locked` + `data-plate-ts`
+ *
+ * 取值：
+ *   · `data-plate-state`   ∈ `none | locked` —— 「本帧**有没有可锁的牌**」：
+ *      `none` = 没机会（无候选车）或多车歧义锁不上；`locked` = 有牌可锁。
+ *      是否**真的**落库看 `data-plate-ts`（有值 = 已进入乘坐态并锁牌，两者成对出现）。
+ *   · `data-board-evidence`∈ `slope | r2 | station | none`（本帧**最强可用证据**，≠ 一定命中）
+ *   · `data-follow-slope`  = 相对距离斜率（m/s，2 位小数）—— **本根因的直接观测量**：
+ *      ≈0 = 与车同步（已上车）；≈3.3 = 在站台、车在开走。**无样本时该属性不存在**（不是写 0）
+ *   · `data-plate-ts`      = 锁牌时刻（epoch ms）—— 用来核对「判定与锁牌是否同帧」
+ *
+ * ⚠️ 成对写入 / 清理：`v == null` ⇒ 四个属性**一起摘除**；调用点在
+ *    `tryAuto`（每帧写）与「phase 落到 off/done / 组件卸载」（清）。`boarding`/`riding`
+ *    期间**不**清 —— 否则切到 riding 的那一瞬间就把「锁上了」擦掉，钩子等于没加。
+ *    与 `setLadderHook` 同一纪律（不得让下一轮会话读到上一轮的陈旧值）。
+ */
+function setBoardDiagAttr(
+  v: { plateState: "none" | "locked"; evidence: BoardEvidence; slope: number | null; plateTs: number | null } | null,
+) {
+  if (typeof document === "undefined") return;
+  try {
+    if (v == null) {
+      document.body.removeAttribute("data-plate-state");
+      document.body.removeAttribute("data-board-evidence");
+      document.body.removeAttribute("data-follow-slope");
+      document.body.removeAttribute("data-plate-ts");
+      return;
+    }
+    document.body.setAttribute("data-plate-state", v.plateState);
+    document.body.setAttribute("data-board-evidence", v.evidence);
+    if (v.slope == null) document.body.removeAttribute("data-follow-slope");
+    else document.body.setAttribute("data-follow-slope", v.slope.toFixed(2));
+    if (v.plateTs == null) document.body.removeAttribute("data-plate-ts");
+    else document.body.setAttribute("data-plate-ts", String(Math.round(v.plateTs)));
+  } catch {
+    /* SSR / 只读 body —— 观测钩子失败不得影响导航 */
+  }
+}
+
+/**
  * ★ 需求5 L3：超时信号（有则用，无则退化为"没有信号"）。
  *
  * 为什么不直接在调用点写 `AbortSignal.timeout(ms)`：Safari 16 以下 / 部分 WebView 没有
@@ -533,9 +587,24 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   const anchorRef = useRef<BoardAnchor | null>(null);
   /** 最近 GPS 采样（R2 / 安全网用） */
   const fixesRef = useRef<FixLite[]>([]);
-  /** 自动判定状态（冷却 / 单次） */
+  /**
+   * ★ I-3（I1）：**车辆帧历史**（每次成功往返 push 一条，只留末尾 `VEH_HIST_KEEP` 条）。
+   *   用途：`followFramesOf` 要在「两帧车辆快照之间」内插出 `v(t)`，把车辆里程对齐到
+   *   用户定位的时间戳；没有这段历史，`d(t)` 会按车速锯齿增长 ⇒ 斜率判据恒失效。
+   */
+  const vehHistRef = useRef<VehFrame[]>([]);
+  /** 自动判定状态（冷却 / 本腿剩余次数） */
   const lastSwitchTsRef = useRef(0);
-  const autoUsedRef = useRef(false);
+  /**
+   * ★ I-3（I4）：本腿**剩余**自动判定次数（初值 `AUTO_TRIES_PER_LEG = 2`）。
+   *   为什么不再是布尔：旧版点一次「我没上车」就把本段自动判定**永久关闭**
+   *   （`autoUsedRef.current = true` 之后 boarding 期间无任何复位路径，注释却写
+   *   「冷却后再允许自动」—— 承诺了代码没有的东西）。现在每次自动上车消耗 1 次，
+   *   用户仍可纠正 2 次；用尽后只剩手动/纠错入口（如实，不假装还能自动）。
+   */
+  const autoUsedLeftRef = useRef(AUTO_TRIES_PER_LEG);
+  /** ★ I-3：锁牌时刻（`data-plate-ts` 的值源；`0` = 当前无牌） */
+  const plateLockedTsRef = useRef(0);
   /** 轻轨 / GPS 推进状态 */
   const ladderRef = useRef<LrtLadder | null>(null);
   const lrtStateRef = useRef({ passedIdx: -1, computed: -1, dist: 0, ts: 0, badStreak: 0 });
@@ -731,7 +800,9 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     anchorRef.current = null; // ★ 锚定车只对「本段本次候车」有效
     ladderRef.current = null;
     lrtStateRef.current = { passedIdx: -1, computed: -1, dist: 0, ts: 0, badStreak: 0 };
-    autoUsedRef.current = false;
+    vehHistRef.current = []; // ★ I-3：车辆帧历史随会话一起清（跨段混用的内插毫无意义）
+    autoUsedLeftRef.current = AUTO_TRIES_PER_LEG;
+    plateLockedTsRef.current = 0;
     lastSwitchTsRef.current = 0;
     anomalyStreakRef.current = 0;
     ridingStartIdxRef.current = -1;
@@ -859,6 +930,14 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
         }));
         listRef.current = list;
         lastCompanyRef.current = j.company ?? null; // ★ 本批：帧顶层运营商（mapVehicles 涂装色）
+        /**
+         * ★ I-3：记一帧车辆快照（供 `followFramesOf` 在「两帧之间」内插，把车辆里程
+         *   对齐到用户定位的时间戳）。只留末尾 `VEH_HIST_KEEP` 条 —— 与 `fixesRef`
+         *   的 `FIX_KEEP_MS` 同量级，足够覆盖 30s 拟合窗 + 一次恢复补刷。
+         */
+        const hist = vehHistRef.current;
+        hist.push({ ts: Date.now(), vehicles: list });
+        if (hist.length > VEH_HIST_KEEP) hist.splice(0, hist.length - VEH_HIST_KEEP);
         // ★ v3.7.0 S2：车辆帧时间戳（**唯一**写入点）+ 观测钩子 `data-veh` / `data-veh-age`
         //   `fetchedAt` 只作「帧标识」判断数据有没有真的更新（不做跨时钟减法，见 observe-hooks）
         setLastVehicleTs(Date.now());
@@ -1049,7 +1128,7 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
             : `已开始跟踪 ${route} 路`,
       );
       lastSwitchTsRef.current = Date.now();
-      autoUsedRef.current = true;
+      plateLockedTsRef.current = nextPlate ? Date.now() : 0; // ★ I-3：`data-plate-ts`
       ridingStartIdxRef.current = -1;
       anchorRef.current = null; // ★ 已上车 ⇒ 候车锚点作废（下一段候车重新锚定）
       missRef.current = 0;
@@ -1116,12 +1195,25 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       colored: leg.colored,
       boardMain,
       boardPos,
+      stopMains, // ★ I-3：锁牌的 L-b 判据（车已在本段站序内前移）
       vehicles: listRef.current,
+      vehFrames: vehHistRef.current, // ★ I-3：车辆帧历史（斜率判据要两端内插）
       fixes: fixesRef.current,
       lastSwitchTs: lastSwitchTsRef.current,
       nowMs: Date.now(),
-      autoUsed: autoUsedRef.current,
+      autoLeft: autoUsedLeftRef.current,
       streak: boardStreakRef.current,
+    });
+    /**
+     * ★ I-3：把本帧诊断写入 `body[data-plate-state|data-board-evidence|data-follow-slope|data-plate-ts]`。
+     *   放在 `!res.hit` 早退**之前** —— 否则「没判上」时这些属性永远不更新，
+     *   三种失败（没机会 / 有机会没锁上 / 锁上了没显示）又混成一种。
+     */
+    setBoardDiagAttr({
+      plateState: res.plate ? "locked" : "none",
+      evidence: res.evidence,
+      slope: res.followSlope,
+      plateTs: plateLockedTsRef.current || null,
     });
     // ★ v3.6.0（架构 §3.1）：唯一切换条件 = `hit && streak >= need`（need 由 autoBoardOf 返回）。
     //   **删除**旧版 `res.reason === "r1"` 特权分支 —— 车辆信号不得单独触发上车。
@@ -1151,9 +1243,16 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       fix: fixNow ? { lng: fixNow.lng, lat: fixNow.lat } : null,
     });
     if (res.streak >= need) {
+      /**
+       * ★ I-3（I4）：每次**自动**判定成立消耗 1 次（初值 2），不再把本段自动判定一刀封死。
+       *   配合 `onNotBoard` 的 20s 冷却 ⇒ 「误判 → 点我没上车 → 还能再自动判一次」。
+       *   ⚠️ 扣次数放在这里（而不是 `switchToRiding` 里）：手动「我已上车」（`board()`）
+       *   走的是同一个 `switchToRiding`，那不属于自动判定，不该扣。
+       */
+      autoUsedLeftRef.current = Math.max(0, autoUsedLeftRef.current - 1);
       switchToRiding(res.plate, res.source);
     }
-  }, [phase, active, legs, legIndex, strips, anchors, boardPos, switchToRiding]);
+  }, [phase, active, legs, legIndex, strips, anchors, boardPos, stopMains, switchToRiding]);
 
   /**
    * ★ v3.7.0 S2（D1）：**恢复补刷**的唯一挂载点。
@@ -1625,7 +1724,9 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     setAnomaly("none");
     // ★ v3.6.0（架构 §3.1）：**不再清零**冷却 —— 改为从"现在"起算，
     //   即「开始导航后 20s 内不做自动判定」。旧版清零 = 冷却形同不存在。
-    autoUsedRef.current = false;
+    autoUsedLeftRef.current = AUTO_TRIES_PER_LEG; // ★ I-3：次数按「每次开始导航」重置
+    plateLockedTsRef.current = 0;
+    vehHistRef.current = [];
     lastSwitchTsRef.current = Date.now();
     boardStreakRef.current = 0;
     boardingStartedAtRef.current = Date.now(); // ★ 判定启动宽限起点（AC-25a 防首帧闪烁）
@@ -1774,13 +1875,15 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       lastCompanyRef.current = null;
       ladderRef.current = null;
       lrtStateRef.current = { passedIdx: -1, computed: -1, dist: 0, ts: 0, badStreak: 0 };
+      vehHistRef.current = []; // ★ I-3：换腿 ⇒ 车辆帧历史作废（新段几何/方向都不同）
+      plateLockedTsRef.current = 0;
       alightStreakRef.current = 0;
       boardStreakRef.current = 0;
       buzz([120, 60, 120]);
       if (legIndex + 1 < total) {
         setLegIndex((i) => i + 1);
         setPhase("boarding");
-        autoUsedRef.current = false;
+        autoUsedLeftRef.current = AUTO_TRIES_PER_LEG; // ★ I-3：下一段是全新行程，次数重置
         /**
          * ★ 冷却复位：策略由 `nextLegCooldownOf` 决定（纯函数 + 有断言，别在这里内联判断）。
          *   默认**归零**（与 `start()` 的「不清零」相反，勿"统一"成 `Date.now()`）：
@@ -1839,7 +1942,12 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     boardStreakRef.current = 0;
     ladderRef.current = u.ladder;
     lrtStateRef.current = { ...u.lrtState };
-    autoUsedRef.current = true; // 撤销后不再自动（防抖）
+    /**
+     * 撤销自动下车 = 用户否定了这次自动推进 ⇒ 本腿不再自动判（防抖）。
+     * ★ I-3：落地为「把剩余次数清零」，与改前 `autoUsedRef = true` 行为等价（**不是**回归）。
+     */
+    autoUsedLeftRef.current = 0;
+    vehHistRef.current = []; // ★ I-3：撤销跨越了「下一段」，车辆帧历史已不可比
   }, []);
 
   /**
@@ -1893,9 +2001,22 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     alarmRef.current = "none";
     anomalyStreakRef.current = 0;
     ladderRef.current = null;
+    plateLockedTsRef.current = 0;
+    boardStreakRef.current = 0;
     lastSwitchTsRef.current = Date.now();
     boardingStartedAtRef.current = Date.now(); // ★ 回到等车态同样有启动宽限
-    autoUsedRef.current = true; // 冷却后再允许自动
+    /**
+     * ★ I-3（I4）：**不再**永久关闭本段自动判定。
+     *
+     * 旧版这行是 `autoUsedRef.current = true;  // 冷却后再允许自动` —— 注释承诺了
+     * 代码里不存在的路径：`boarding-detect` 的硬门读它即整段不再判，而全仓只在
+     * 「开始导航」「换腿」两处复位，boarding 期间**没有任何**复位入口 ⇒
+     * 用户纠正一次之后，本段再也无法自动判定（注释与实现相反）。
+     *
+     * 现在：点「我没上车」本身**不扣次数**（扣的是那次自动上车），只起 20s 冷却
+     * （`lastSwitchTsRef` 已置为现在）防抖 ⇒ 冷却后仍可再自动判 —— 次数由
+     * `autoUsedLeftRef`（初值 2）如实记账，用尽后如实不再自动。
+     */
   }, [clearTraveled]);
 
   /** 「还没到」→ 清除到站提醒，回乘车中 */
@@ -1997,6 +2118,20 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
   }, [ladderState, coloredLen]);
   /** 卸载即摘属性 —— 否则下一轮会话会读到上一轮的陈旧值 */
   useEffect(() => () => setLadderHook(null, 0), []);
+
+  /**
+   * ★ I-3：**上车判定诊断钩子的清理**（与 `tryAuto` 里的写入成对）。
+   *   · `boarding` / `riding` 期间**保留** —— 关键就在这里：判上牌的那一帧写的是
+   *     `data-plate-state=locked` + `data-plate-ts`，若切到 riding 就立刻摘掉，
+   *     QA 永远观察不到「锁上了」，本钩子就白加了；riding 期间值冻结在最后一次判定帧。
+   *   · `off` / `done`（会话结束）⇒ 四个属性一起摘除，避免下一轮读到陈旧值。
+   *   ⚠️ 依赖只放 `phase`：值是 `tryAuto` 每帧写的，这里只负责「何时清」。
+   */
+  useEffect(() => {
+    if (phase === "boarding" || phase === "riding") return;
+    setBoardDiagAttr(null);
+  }, [phase]);
+  useEffect(() => () => setBoardDiagAttr(null), []);
 
   return {
     phase,
