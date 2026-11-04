@@ -34,7 +34,7 @@ import {
   type AutoBoardInput,
   type FixLite,
 } from "@/lib/nav/boarding-detect";
-import { departedCandidatesOf, pickLockPlateOf } from "@/lib/nav/plate-lock";
+import { alignedDOf, departedCandidatesOf, pickLockPlateOf } from "@/lib/nav/plate-lock";
 import {
   FOLLOW_MAX_SLOPE_MPS,
   FOLLOW_MIN_ALONG_M,
@@ -717,8 +717,15 @@ console.log("\n[⑯ I1 相对距离斜率]");
 /* ══════════ ⑰ I-3 · I2 多车歧义：差 <2σ 不锁 / >2σ 锁近者 ══════════ */
 console.log("\n[⑰ I2 多车歧义]");
 {
-  eq(pickLockPlateOf([{ plate: "A", d: 10, via: ["L-a"] }, { plate: "B", d: 28, via: ["L-a"] }]).plate, null, "d 差 18m < 2σ ⇒ 不锁（分不出是哪辆）");
-  ok(pickLockPlateOf([{ plate: "A", d: 10, via: ["L-a"] }, { plate: "B", d: 28, via: ["L-a"] }]).ambiguous, "歧义标记");
+  /**
+   * ⚠️ 2026-11-04：`FOLLOW_AMBIG_M` 由 20 收到 **12**（见 `follow-slope.ts` 该常量的推导）。
+   *   故"歧义"用例的差必须用 <12；而 18m 差（3σ）现在**应当**能分辨、必须锁。
+   *   这不是"为了让断言变绿而放宽"——旧 20 是配在**错位 d**（σ≈26m）上的，实测只有 0.8σ；
+   *   新 12 配在**对齐 d**（σ≈6m）上，是真正的 2σ。两轮锁错率见 ㉑ 组的 RED/GREEN。
+   */
+  eq(pickLockPlateOf([{ plate: "A", d: 10, via: ["L-a"] }, { plate: "B", d: 18, via: ["L-a"] }]).plate, null, "d 差 8m < 12（2σ）⇒ 不锁（分不出是哪辆）");
+  ok(pickLockPlateOf([{ plate: "A", d: 10, via: ["L-a"] }, { plate: "B", d: 18, via: ["L-a"] }]).ambiguous, "歧义标记");
+  eq(pickLockPlateOf([{ plate: "A", d: 10, via: ["L-a"] }, { plate: "B", d: 28, via: ["L-a"] }]).plate, "A", "d 差 18m（3σ）⇒ 可分辨，锁 d 小者");
   eq(pickLockPlateOf([{ plate: "A", d: 10, via: ["L-a"] }, { plate: "B", d: 45, via: ["L-a"] }]).plate, "A", "d 差 35m > 2σ ⇒ 锁 d 小者");
   eq(pickLockPlateOf([{ plate: "A", d: null, via: ["L-a"] }]).plate, "A", "唯一候选且无里程（L-a 强证据）⇒ 锁它");
   eq(pickLockPlateOf([{ plate: "A", d: null, via: ["L-b"] }, { plate: "B", d: null, via: ["L-c"] }]).plate, null, "多候选且都无里程 ⇒ 不猜");
@@ -741,7 +748,7 @@ console.log("\n[⑰ I2 多车歧义]");
   eq(wide.plate, "MA0101", "锁 d 小者");
 
   const histNear2 = vehHistOf("MA0101", uM6.map((x) => x + 10));
-  const histFar2 = vehHistOf("MA0102", uM6.map((x) => x + 28)); // 差 18m < 20m
+  const histFar2 = vehHistOf("MA0102", uM6.map((x) => x + 20)); // 差 10m < 12m（2σ）
   const near2 = merge(histNear2, histFar2);
   const narrow = autoBoardOf(inputOf({ fixes: fix6, vehFrames: near2, vehicles: near2[4].vehicles }));
   eq(narrow.hit, true, "里程差 <2σ ⇒ 仍可判「在车上」");
@@ -855,6 +862,330 @@ console.log("\n[⑳ I4 次数与冷却]");
   eq(frame(T + SWITCH_COOLDOWN_MS * 3).hit, false, "第 3 次不再自动（次数用尽 ⇒ 如实停手）");
 }
 
+
+/* ══════════ ㉑ 同线双车：锁错率（P0 严重缺陷 · 2026-11-04） ══════════ */
+/**
+ * 缺陷（fe-latency 实测，负责人定性为严重 bug）：同线有后车时，约一半的判定
+ * **锁到先走的那辆**（前车）⇒ 进度 / 报站 / 下车提醒全部跟着错车走。
+ *
+ * 本组给出的**根因结论**（用真代码复现，见 RED 段）：
+ *   不是「歧义门 20m 太窄」，而是 `d` 把**两个时刻**相减 ——
+ *   `departedCandidatesOf` 旧口径 = `|u(当前定位帧) − v(最近车辆帧)|`，两者相差 0~12s
+ *   （`POLL_MS`）⇒ 两车同时被回退 `lag·v`（最多 40m）。用户在后车时，前车的**旧**位置
+ *   恰好落到用户附近 ⇒ `argmin` 系统性偏向先走的那辆。lag 在 0~12s 均匀 ⇒ 约 2/3 帧判错，
+ *   再被「车距 26.7m 只比门 20m 大 6.7m」吃掉一部分 ⇒ 实测净锁错 25~39%。
+ *
+ * 修法：`alignedDOf` 把 `v(t)` 内插到每个定位帧时刻、取 `|median(u − v)|`，
+ *   两车的 `d` 因此来自同一时刻、同一用户位置 ⇒ 其差即真实车距。
+ *
+ * 本组同时给 **RED（raw 口径）/ GREEN（aligned 口径）** 两轮，跑的是**同一个 fixture、
+ * 同一套统计**，唯一差别是喂不喂 `fixes`/`vehFrames`：
+ *   · RED   = 不喂历史 ⇒ 走 raw 回退口径 ⇒ 复现旧缺陷（断言锁错 ≥20%）
+ *   · GREEN = 喂历史 ⇒ 走对齐口径 ⇒ 锁错必须为 0，且锁对率显著上升
+ */
+console.log("\n[㉑ 同线双车锁错率 · RED/GREEN]");
+{
+  /* ── 确定性噪声（不用 Math.random：断言必须可复现）── */
+  const mulberry32 = (a: number) => () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const gauss = (rnd: () => number): number => {
+    let u = 0;
+    let v = 0;
+    while (u === 0) u = rnd();
+    while (v === 0) v = rnd();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  /** 把「沿线里程 m」写成带噪声的定位点（噪声按**米**给） */
+  const noisyAt = (m: number, sigM: number, rnd: () => number) => {
+    const p = atM(m);
+    return { lng: p.lng + gauss(rnd) * sigM * DEG_PER_M_LNG, lat: p.lat + (gauss(rnd) * sigM) / 111_320 };
+  };
+
+  const SPEED = 3.33; // 12 km/h
+  const POLL = 12_000; // 生产车辆轮询间隔
+  const FIXGAP = 3_000; // 候车期定位间隔
+  const SPAN = 100_000;
+  const SIG_USER = 10;
+  const SIG_VEH = 10;
+
+  type Who = "A" | "B" | "station";
+
+  /**
+   * 造一轮双车场景。
+   * @param gapM  车距（米）—— 生产实测 8s 车距 ≈ 26.7m
+   * @param phase 用户帧相对车辆帧的相位（ms）⇒ 覆盖 lag ∈ [0, POLL) 的全部取值
+   */
+  function dualBus(o: { who: Who; gapM: number; phase: number; seed: number; sigVeh?: number }) {
+    const SIGV = o.sigVeh ?? SIG_VEH;
+    const rnd = mulberry32(o.seed);
+    const mileOf = (ts: number, front: boolean) => SPEED * (ts / 1000) + (front ? o.gapM : 0);
+    const vehFrames: VehFrame[] = [];
+    for (let ts = 0; ts <= SPAN; ts += POLL) {
+      vehFrames.push({
+        ts,
+        vehicles: [
+          {
+            plate: "AA0001",
+            ...noisyAt(mileOf(ts, true), SIGV, rnd),
+            status: "moving",
+            interval: { from: { code: "T100" }, to: { code: "T101" } },
+            atStation: null,
+          },
+          {
+            plate: "BB0002",
+            ...noisyAt(mileOf(ts, false), SIGV, rnd),
+            status: "moving",
+            interval: { from: { code: "T100" }, to: { code: "T101" } },
+            atStation: null,
+          },
+        ],
+      });
+    }
+    const fixes: FixLite[] = [];
+    for (let ts = o.phase; ts <= SPAN; ts += FIXGAP) {
+      const trueU = o.who === "A" ? mileOf(ts, true) : o.who === "B" ? mileOf(ts, false) : 0;
+      fixes.push({ ...noisyAt(trueU, SIG_USER, rnd), accuracy: 10, ts });
+    }
+    return { vehFrames, fixes };
+  }
+
+  /** 在每帧定位上判一次，统计 锁对 / 锁错 / 歧义（= 未锁） */
+  function measure(o: {
+    who: Who;
+    gapM: number;
+    aligned: boolean;
+    seeds?: number;
+    phases?: number[];
+    /** RED 用：替换判定规则（缺省 = 现行 `pickLockPlateOf`） */
+    legacy?: (c: ReturnType<typeof departedCandidatesOf>) => string | null;
+    sigVeh?: number;
+  }) {
+    const want = o.who === "A" ? "AA0001" : o.who === "B" ? "BB0002" : null;
+    const phases = o.phases ?? [0, 2_000, 4_000, 6_000, 8_000, 10_000];
+    const seeds = o.seeds ?? 3;
+    let right = 0;
+    let wrong = 0;
+    let amb = 0;
+    let n = 0;
+    for (let s = 0; s < seeds; s++) {
+      for (const ph of phases) {
+        const fx = dualBus({ who: o.who, gapM: o.gapM, phase: ph, seed: 1000 * s + ph + 7, sigVeh: o.sigVeh });
+        for (const f of fx.fixes) {
+          if (f.ts < 30_000) continue; // 避开起步段（"历史不足"另有 ⑥ 专测）
+          const past = fx.fixes.filter((x) => x.ts <= f.ts);
+          const vf = fx.vehFrames.filter((x) => x.ts <= f.ts);
+          const latest = vf[vf.length - 1];
+          if (!latest) continue;
+          const cands = departedCandidatesOf({
+            vehicles: latest.vehicles,
+            boardMain: "T100",
+            stopMains: STOP_MAINS,
+            colored: PATH,
+            fix: { lng: f.lng, lat: f.lat },
+            tolM: 80,
+            // ★ 唯一的差别：喂不喂历史（决定走 raw 还是 aligned 口径）
+            fixes: o.aligned ? past : null,
+            vehFrames: o.aligned ? vf : null,
+          });
+          const plate = o.legacy ? o.legacy(cands) : pickLockPlateOf(cands).plate;
+          n++;
+          const pick = { plate } as { plate: string | null };
+          if (pick.plate == null) amb++;
+          else if (pick.plate === want) right++;
+          else wrong++; // 含站台场景（want=null ⇒ 给牌即"多余锁牌"）
+        }
+      }
+    }
+    const pct = (x: number) => (x / Math.max(1, n)) * 100;
+    return { right: pct(right), wrong: pct(wrong), amb: pct(amb), n, rightN: right, wrongN: wrong };
+  }
+  const fmt = (m: { right: number; wrong: number; amb: number }) =>
+    `锁对 ${m.right.toFixed(1)}% · 锁错 ${m.wrong.toFixed(1)}% · 歧义 ${m.amb.toFixed(1)}%`;
+
+  /**
+   * ── ① RED：**旧判定规则 + 真实 raw d** ⇒ 复现「锁错 ≥ 20%」 ──
+   *
+   * 注意口径：新版 `pickLockPlateOf` 对「多候选 + raw 口径」直接判**歧义不锁**（安全降级），
+   * 所以在它上面跑 RED 只会得到 100% 歧义 —— 复现不出缺陷。故 RED 用**旧规则**
+   * （raw `d` 取 argmin，歧义门 20m）作用在 `departedCandidatesOf` 产出的**真实 raw d 值**上：
+   * 这正是改前的生产行为（`89c8c6c` 之前的 `pickLockPlateOf`）。
+   * ⇒ 断言的是「raw d 本身的信息就是错的（argmin 选错 ≥20%）」，与门多宽无关。
+   */
+  const legacyPick = (cands: ReturnType<typeof departedCandidatesOf>): string | null => {
+    const withD = cands.filter((c) => c.d != null).sort((a, b) => (a.d as number) - (b.d as number));
+    if (!withD.length) return null;
+    const first = withD[0];
+    const second = withD[1];
+    if (second && (second.d as number) - (first.d as number) < 20) return null; // 旧门 = 20
+    return first.plate;
+  };
+  const redB = measure({ who: "B", gapM: 26.7, aligned: false, legacy: legacyPick });
+  ok(
+    redB.wrong >= 20,
+    `RED：旧规则(raw d + 门 20m) · 用户在后车 ⇒ 复现旧缺陷（锁错应 ≥20%，实际 ${redB.wrong.toFixed(1)}%）`,
+    fmt(redB),
+  );
+  /**
+   * RED 补充证据：**只看 argmin**（不管门多宽）也有 ≥20% 选错 ⇒ 证明问题在 d 本身而不在门。
+   * 这条同时解释了「为什么单纯加宽/收窄歧义门治不好」——门再宽也只是把错锁换成不锁。
+   */
+  const redArgmin = measure({ who: "B", gapM: 26.7, aligned: false, legacy: (c) => {
+    const withD = c.filter((x) => x.d != null).sort((a, b) => (a.d as number) - (b.d as number));
+    return withD.length ? withD[0].plate : null;
+  } });
+  ok(
+    redArgmin.wrong >= 20,
+    `RED：仅看 argmin（门宽无关）也 ≥20% 选错（实际 ${redArgmin.wrong.toFixed(1)}%）⇒ 根因是 d 口径`,
+    fmt(redArgmin),
+  );
+
+  /* ── ② GREEN：同一 fixture 换对齐口径 ⇒ 锁错必须归零 ── */
+  const greenB = measure({ who: "B", gapM: 26.7, aligned: true });
+  eq(greenB.wrongN, 0, `GREEN：对齐口径 · 用户在后车 ⇒ 锁错必须为 0（${fmt(greenB)}）`);
+  ok(greenB.right >= 85, `GREEN：锁对率应 ≥85%（实际 ${greenB.right.toFixed(1)}%）`, fmt(greenB));
+  ok(
+    greenB.right > redB.right + 30,
+    `GREEN 锁对率必须显著高于 RED（${redB.right.toFixed(1)}% → ${greenB.right.toFixed(1)}%）`,
+  );
+
+  /* ── ③ 反例二：用户在前车（旧口径下本来就对，不得回归）── */
+  const redA = measure({ who: "A", gapM: 26.7, aligned: false });
+  const greenA = measure({ who: "A", gapM: 26.7, aligned: true });
+  eq(greenA.wrongN, 0, `GREEN：对齐口径 · 用户在前车 ⇒ 锁错必须为 0（${fmt(greenA)}）`);
+  ok(greenA.right >= 85, `GREEN：前车锁对率应 ≥85%（实际 ${greenA.right.toFixed(1)}%）`, fmt(greenA));
+  ok(
+    greenA.wrong <= redA.wrong,
+    "GREEN 不得让前车场景变差（旧口径在前车场景本来就判对）",
+    `RED ${fmt(redA)} → GREEN ${fmt(greenA)}`,
+  );
+
+  /* ── ④ 反例三：用户在站台（未上车）⇒ 端到端不得判上 ── */
+  const st = measure({ who: "station", gapM: 26.7, aligned: true });
+  {
+    const fx = dualBus({ who: "station", gapM: 26.7, phase: 0, seed: 4242 });
+    const last = fx.fixes[fx.fixes.length - 1];
+    const vf = fx.vehFrames.filter((x) => x.ts <= last.ts);
+    const res = autoBoardOf({
+      legKind: "bus",
+      legDegraded: false,
+      colored: PATH,
+      boardMain: "T100",
+      boardPos: { ...atM(0) },
+      stopMains: STOP_MAINS,
+      vehicles: vf[vf.length - 1].vehicles,
+      vehFrames: vf,
+      fixes: fx.fixes,
+      lastSwitchTs: 0,
+      nowMs: last.ts + 1,
+      streak: 2,
+    });
+    eq(res.hit, false, "站台用户（车已开走、人未动）⇒ 端到端不得判上");
+    // 牌层面：`pickLockPlateOf` 不负责判断"有没有上车"，它可能在两车里挑一个；
+    // 但 hit=false ⇒ 该牌子不会被采用。如实记录，不做"必须 null"的假断言。
+    ok(true, `站台场景牌层面（仅记录，不参与判上）：${fmt(st)}`);
+  }
+
+  /* ── ⑤ 车距敏感性：只要车距 ≥ 实测值，锁错就必须为 0 ── */
+  for (const gapM of [15, 26.7, 50]) {
+    const g = measure({ who: "B", gapM, aligned: true });
+    if (gapM >= 26.7) {
+      eq(g.wrongN, 0, `对齐口径 · 车距 ${gapM}m ≥ 实测车距 ⇒ 锁错必须为 0（${fmt(g)}）`);
+      ok(g.right >= 85, `车距 ${gapM}m ⇒ 锁对率应 ≥85%（实际 ${g.right.toFixed(1)}%）`);
+    } else {
+      /**
+       * 15m 车距**低于对齐估计量的可分辨下限**（2σ≈12m，余量仅 3m）⇒ 允许偶发锁错。
+       * 如实断言"不超过 5%"，而不是假装归零；这也给出"多近会开始不安全"的界。
+       */
+      ok(g.wrong <= 5, `车距 ${gapM}m 低于分辨率下限 ⇒ 锁错应 ≤5%（实际 ${g.wrong.toFixed(1)}%）`, fmt(g));
+      ok(g.amb >= 40, `且应以歧义为主（实际 ${g.amb.toFixed(1)}%）⇒ 表现为"不锁"而不是"锁错"`);
+    }
+  }
+
+  /* ── ⑤b 车辆噪声敏感性：诚实标注"真机 σ_veh 未知"的残余风险 ── */
+  for (const sigVeh of [5, 20]) {
+    const g = measure({ who: "B", gapM: 26.7, aligned: true, sigVeh });
+    const bound = sigVeh <= 10 ? 0 : 3;
+    ok(
+      g.wrongN === 0 || g.wrong <= bound,
+      `σ_veh=${sigVeh}m · 车距 26.7m ⇒ 锁错 ≤${bound}%（实际 ${g.wrong.toFixed(1)}%）`,
+      fmt(g),
+    );
+  }
+
+  /* ── ⑥ 历史不足 ⇒ **不得**猜：>1 候选且无对齐样本 ⇒ 判歧义 ── */
+  {
+    const fx = dualBus({ who: "B", gapM: 26.7, phase: 0, seed: 99 });
+    const early = fx.fixes[2]; // 定位仅 3 帧、车辆帧 ≤2 帧
+    const vf = fx.vehFrames.filter((x) => x.ts <= early.ts);
+    const cands = departedCandidatesOf({
+      vehicles: vf[vf.length - 1].vehicles,
+      boardMain: "T100",
+      stopMains: STOP_MAINS,
+      colored: PATH,
+      fix: { lng: early.lng, lat: early.lat },
+      tolM: 80,
+      fixes: fx.fixes.filter((x) => x.ts <= early.ts),
+      vehFrames: vf,
+    });
+    const pick = pickLockPlateOf(cands);
+    eq(pick.plate, null, "对齐样本不足（<5 帧）且有两个候选 ⇒ 不锁（宁可留空，不猜）");
+    ok(pick.ambiguous, "且必须标记为歧义（上层据此区分「没机会」与「有机会但分不清」）");
+  }
+
+  /* ── ⑦ 唯一候选不受「必须对齐」限制（旧行为不回归）── */
+  {
+    const fx = followFixture({ uM: [10, 20, 30, 40, 50], vM: [12, 22, 32, 42, 52] });
+    const cands = departedCandidatesOf({
+      vehicles: fx.vehFrames[4].vehicles,
+      boardMain: "T100",
+      stopMains: STOP_MAINS,
+      colored: PATH,
+      fix: { lng: fx.fixes[4].lng, lat: fx.fixes[4].lat },
+      tolM: 80,
+      // 故意不喂历史 ⇒ raw 口径；唯一候选仍应锁上
+    });
+    eq(pickLockPlateOf(cands).plate, "MB0001", "只有一辆候选 ⇒ raw 口径也锁（无需比较，旧行为不变）");
+  }
+
+  /* ── ⑧ `alignedDOf` 的空/退化输入 ── */
+  {
+    eq(alignedDOf({ colored: PATH, fixes: [], vehFrames: [], plate: "X", nowTs: 1 }).d, null, "alignedDOf：无样本 ⇒ null");
+    eq(
+      alignedDOf({ colored: PATH, fixes: fixesAt([1, 2]), vehFrames: [], plate: "X", nowTs: 1 }).d,
+      null,
+      "alignedDOf：无车辆帧 ⇒ null",
+    );
+    eq(
+      alignedDOf({ colored: [], fixes: fixesAt([1, 2, 3, 4, 5]), vehFrames: vehHistOf("X", [1, 2]), plate: "X", nowTs: 100_000 })
+        .d,
+      null,
+      "alignedDOf：几何缺失 ⇒ null",
+    );
+  }
+
+  /* ── ⑨ 口径标注：对齐成功必须标 aligned（上层据此决定能否比较）── */
+  {
+    const fx = followFixture({ uM: [0, 3, 6, 9, 12, 15], vM: [0, 3, 6, 9, 12, 15] });
+    const cands = departedCandidatesOf({
+      vehicles: fx.vehFrames[5].vehicles,
+      boardMain: "T100",
+      stopMains: STOP_MAINS,
+      colored: PATH,
+      fix: { lng: fx.fixes[5].lng, lat: fx.fixes[5].lat },
+      tolM: 80,
+      fixes: fx.fixes,
+      vehFrames: fx.vehFrames,
+    });
+    eq(cands[0]?.dKind, "aligned", "喂齐历史 ⇒ 口径必须是 aligned");
+    ok((cands[0]?.nAligned ?? 0) >= 5, `参与对齐的样本帧数应 ≥5（实际 ${cands[0]?.nAligned}）`);
+    ok(cands[0]?.d != null && (cands[0].d as number) < 30, "完全同步 ⇒ d 应接近 0", `d=${cands[0]?.d?.toFixed(1)}`);
+  }
+}
 
 const total = pass + fail;
 console.log(`\n结果：${fail === 0 ? "PASS" : "FAIL"} · ${pass}/${total} 通过${fail ? ` · ${fail} 失败` : ""}`);

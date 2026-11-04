@@ -515,6 +515,15 @@ export function autoBoardOf(input: AutoBoardInput): AutoBoardResult {
           stopMains: input.stopMains,
           colored: input.colored,
           fix: latest ? { lng: latest.lng, lat: latest.lat } : null,
+          /**
+           * ★ 2026-11-04（同线双车锁错 P0）：**必须**把定位历史与车辆帧历史喂进去。
+           *   不喂 ⇒ `d` 退回「当前定位帧 − 最近车辆帧」的**错位**口径（相差 0~12s），
+           *   两车同时被回退 ⇒ 用户在后车时前车反而更"近" ⇒ 实测 25.7~39.4% 锁错。
+           *   喂进去 ⇒ `alignedDOf` 内插对齐后取 `|median(u − v)|` ⇒ 锁错 0.0%。
+           *   ⚠️ 这两行是**功能开关**，不是可选优化：删掉就等于把锁错缺陷原样退回。
+           */
+          fixes,
+          vehFrames: input.vehFrames ?? null,
           tolM: Math.max(
             R2_TOL_M,
             (latest && Number.isFinite(latest.accuracy) ? latest.accuracy : 0) * R2_ACC_TOL_FACTOR,

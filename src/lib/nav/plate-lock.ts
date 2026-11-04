@@ -31,24 +31,86 @@
  */
 import { cumDistM, type LL } from "./route-overview";
 import { mainOf, progressOf, type TrackVehicle } from "./track";
-import { alongMileM, vehicleMileOnPath } from "./follow-frames";
-import { FOLLOW_AMBIG_M, FOLLOW_MAX_D_M } from "./follow-slope";
+import { alongMileM, followFramesOf, vehicleMileOnPath, type VehFrame } from "./follow-frames";
+import { FOLLOW_AMBIG_M, FOLLOW_MAX_D_M, medianOf } from "./follow-slope";
 
 /** 「车已不在上车站」的证据来源（三条件并集；任一成立即可） */
 export type DepartVia = "L-a" | "L-b" | "L-c";
 
+/** 候选车的距离口径：`aligned` = 时间对齐中位（可比较）；`raw` = 单帧错位（**不可**用于比较） */
+export type DistKind = "aligned" | "raw";
+
 export interface DepartCand {
   plate: string;
-  /** 用户与该车的沿线里程差（米）；几何/定位不可用 ⇒ `null` */
+  /**
+   * 用户与该车的沿线里程差（米）—— **择优比较用这个值**。
+   * `aligned`：把 `v(t)` 内插到每个定位帧时刻后取 `|median(u − v)|`（见 `alignedDOf`）。
+   * `raw`（历史不足时的回退）：`|最新帧 u − 最近车辆帧 v|`，**含 0~12s 时间错位**。
+   */
   d: number | null;
   via: DepartVia[];
+  /** `d` 的口径；缺省按 `aligned` 处理（兼容既有调用点与测试字面量） */
+  dKind?: DistKind;
+  /** 参与对齐的样本帧数（`raw` 时无意义） */
+  nAligned?: number;
+}
+
+/** 择优用的对齐窗（ms）= 45s ≈ 4 个车辆帧周期 ⇒ 车辆位置噪声可被中位压掉一层 */
+export const LOCK_ALIGN_SPAN_MS = 45_000;
+/**
+ * 对齐估计量的最少样本帧数 = 5。
+ * 依据：`median` 在 n<5 时崩溃点过低（1 个离群帧即可带动结论）；5 帧 ≈ 15s（定位 3s 一帧）
+ * 已能覆盖 1 个以上车辆帧段。
+ */
+export const LOCK_ALIGN_MIN_FRAMES = 5;
+
+/**
+ * 某车相对用户的**时间对齐**里程差（米）—— 本模块的核心估计量。
+ *
+ * ── 为什么必须对齐（2026-11-04 修「同线双车锁错 25.7~39.4%」的根因）────────
+ *   旧口径 `d = |u(t_now) − v(t_last_frame)|` 把**两个不同时刻**相减：车辆帧 12s 一帧
+ *   ⇒ 车位置最多旧 12s（回退 40m）。两车**同时**被回退 ⇒ 用户在后车时前车的旧位置
+ *   恰好落到用户附近 ⇒ `argmin` 系统性偏向**先走的那辆**。
+ *   实测（车距 26.7m、σ=10m）：lag 10s ⇒ d_前 6.6 / d_后 33.3 ⇒ 锁前车（错）；
+ *   lag 1s ⇒ 23.4 / 3.3 ⇒ 锁后车（对）。lag 在 0~12s 均匀 ⇒ 约 2/3 的帧判错。
+ *
+ * ── 对齐后为什么就对了 ────────────────────────────────────────────────
+ *   `followFramesOf` 在**两帧车辆快照之间**线性内插出 `v(t)`，与每个定位帧同刻相减；
+ *   再取 `median(u − v)`。两车的 `d` 因此来自**同一时刻、同一用户位置**，其差即真实车距。
+ *
+ * ⚠️ 用 `|median(u − v)|` 而不是 `median(|u − v|)`：后者被半正态偏置抬高
+ *   （E|N(0,σ)| = 0.8σ），实测让 26.7m 车距只剩 ~18m 的观测差 ⇒ 歧义率反而更高。
+ *   取带符号中位再取绝对值，正确车的 `d` 才真的 ≈ 0。
+ */
+export function alignedDOf(o: {
+  colored: LL[];
+  fixes: { lng: number; lat: number; accuracy: number; ts: number }[];
+  vehFrames: VehFrame[];
+  plate: string;
+  /** 参考时刻（调用方传最新定位帧 ts）；窗 = [now − LOCK_ALIGN_SPAN_MS, now] */
+  nowTs: number;
+}): { d: number | null; n: number } {
+  if (o.colored.length < 2 || o.fixes.length < 2 || (o.vehFrames?.length ?? 0) < 2) return { d: null, n: 0 };
+  const frames = followFramesOf({
+    fixes: o.fixes,
+    vehFrames: o.vehFrames,
+    colored: o.colored,
+    plate: o.plate,
+    maxFrames: 32,
+  });
+  const win = frames.filter((f) => o.nowTs - f.ts <= LOCK_ALIGN_SPAN_MS);
+  if (win.length < LOCK_ALIGN_MIN_FRAMES) return { d: null, n: win.length };
+  const signed = win.map((f) => f.u - f.v);
+  return { d: Math.abs(medianOf(signed)), n: signed.length };
 }
 
 /**
  * 候选车 = **已不在上车站**的车。
  *
- * @param fix  用户最新**可信**定位（算 `d` 用）；缺省或越容差 ⇒ `d` 一律 null（不猜）
- * @param tolM 用户投影容差（米，缺省 80 —— 与 `R2_TOL_M` 同口径，由调用方传入以避免双源）
+ * @param fix       用户最新**可信**定位（算 `raw` 口径用）；缺省或越容差 ⇒ `raw` 为 null
+ * @param tolM      用户投影容差（米，缺省 80 —— 与 `R2_TOL_M` 同口径，由调用方传入避免双源）
+ * @param fixes     用户定位历史 —— **给齐 `fixes` + `vehFrames` 才启用对齐口径**
+ * @param vehFrames 车辆帧历史
  */
 export function departedCandidatesOf(o: {
   vehicles: TrackVehicle[];
@@ -58,6 +120,8 @@ export function departedCandidatesOf(o: {
   colored: LL[];
   fix?: { lng: number; lat: number } | null;
   tolM?: number;
+  fixes?: { lng: number; lat: number; accuracy: number; ts: number }[] | null;
+  vehFrames?: VehFrame[] | null;
 }): DepartCand[] {
   const board = mainOf(o.boardMain);
   if (!board) return [];
@@ -67,7 +131,7 @@ export function departedCandidatesOf(o: {
     if (v.interval?.from?.code && mainOf(v.interval.from.code) === board) via.push("L-a");
     if (o.stopMains && o.stopMains.length >= 2 && progressOf(o.stopMains, v).passedIdx >= 0) via.push("L-b");
     if (v.atStation?.code && mainOf(v.atStation.code) !== board) via.push("L-c");
-    if (via.length) cands.push({ plate: v.plate, d: null, via });
+    if (via.length) cands.push({ plate: v.plate, d: null, via, dKind: "raw", nAligned: 0 });
   }
   if (!cands.length || o.colored.length < 2) return cands;
 
@@ -78,10 +142,28 @@ export function departedCandidatesOf(o: {
     const r = alongMileM(o.colored, cum, o.fix);
     if (r && r.dist <= tol) u = r.m;
   }
-  if (u == null) return cands; // 用户位置不可信 ⇒ d 一律 null（不猜）
+  const fixes = o.fixes ?? null;
+  const vehFrames = o.vehFrames ?? null;
+  const nowTs = fixes && fixes.length ? fixes[fixes.length - 1].ts : Number.NaN;
+
   for (const c of cands) {
+    // ① 对齐口径（可比较，择优用）
+    if (fixes && vehFrames && Number.isFinite(nowTs)) {
+      const a = alignedDOf({ colored: o.colored, fixes, vehFrames, plate: c.plate, nowTs });
+      c.nAligned = a.n;
+      if (a.d != null) {
+        c.d = a.d;
+        c.dKind = "aligned";
+        continue;
+      }
+    }
+    // ② 回退：单帧错位口径 —— **只用于「唯一候选」的资格判定**，不参与两车比较
+    if (u == null) continue;
     const mv = vehicleMileOnPath(o.colored, cum, o.vehicles, c.plate);
-    if (mv != null) c.d = Math.abs(u - mv);
+    if (mv != null) {
+      c.d = Math.abs(u - mv);
+      c.dKind = "raw";
+    }
   }
   return cands;
 }
@@ -95,25 +177,35 @@ export interface LockPick {
 }
 
 /**
- * 从候选里挑**可锁车牌**：取 `d` 最小者，且与第二名的差必须 > `FOLLOW_AMBIG_M`（2σ≈20m）。
+ * 从候选里挑**可锁车牌**：取 `d` 最小者，且与第二名的差必须 > `FOLLOW_AMBIG_M`。
  * 无里程可比时只有「唯一候选」才锁 —— 分不出是哪辆就**不猜**（与 `r1Of` 的多车歧义同口径）。
  *
  * ⚠️ **L-a 与 L-b/L-c 的资格不同**（防错锁）：
  *   · L-a（车刚从**本站**开走）= 时间 + 空间的强证据 ⇒ 允许「只有它一辆」就锁（旧版行为不变）；
  *   · L-b / L-c 是为「整段乘车」放宽出来的 ⇒ 必须有**位置确认**（`d ≤ FOLLOW_MAX_D_M`）。
- *     否则会出现「用户在站台等车，却锁住 2km 外那辆同线车」的错锁 —— 这正是放宽锁牌窗口
- *     最容易引入的新失效模式。判据不成立的同帧绝不锁，宁可留空。
+ *     否则会出现「用户在站台等车，却锁住 2km 外那辆同线车」的错锁 —— 这正是放宽锁牌
+ *     窗口最容易引入的新失效模式。判据不成立的同帧绝不锁，宁可留空。
+ *
+ * ⚠️ **多车比较只接受 `aligned` 口径**（2026-11-04 修）：
+ *   `raw` 含 0~12s 时间错位（两车同时被回退），拿它比大小会系统性偏向先走的车
+ *   ⇒ 实测 25.7~39.4% 锁错。故 >1 个候选时，任一候选缺 `aligned` ⇒ **判歧义、不锁**
+ *   （宁可留空让上层走 GPS 推算，也不锁错车）。唯一候选不受此限（无需比较）。
  */
 export function pickLockPlateOf(cands: DepartCand[]): LockPick {
   if (!cands.length) return { plate: null, d: null, ambiguous: false };
   const eligible = cands.filter((c) => c.via.includes("L-a") || (c.d != null && c.d <= FOLLOW_MAX_D_M));
   if (!eligible.length) return { plate: null, d: null, ambiguous: false };
-  const withD = eligible.filter((c) => c.d != null).sort((a, b) => (a.d as number) - (b.d as number));
-  if (!withD.length) {
-    return eligible.length === 1
-      ? { plate: eligible[0].plate, d: null, ambiguous: false }
-      : { plate: null, d: null, ambiguous: true };
+  if (eligible.length === 1) {
+    const only = eligible[0];
+    return { plate: only.plate, d: only.d, ambiguous: false };
   }
+  // 多候选：只有「全部都能对齐」时才允许比大小
+  const kind = (c: DepartCand): DistKind => c.dKind ?? "aligned";
+  const comparable = eligible.filter((c) => c.d != null && kind(c) === "aligned");
+  if (comparable.length < eligible.length) {
+    return { plate: null, d: null, ambiguous: true };
+  }
+  const withD = comparable.sort((a, b) => (a.d as number) - (b.d as number));
   const first = withD[0];
   const second = withD[1];
   if (second && (second.d as number) - (first.d as number) < FOLLOW_AMBIG_M) {
