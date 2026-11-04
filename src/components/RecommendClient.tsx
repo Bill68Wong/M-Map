@@ -20,6 +20,7 @@ import Link from "next/link";
 import RecommendCards from "./RecommendCards";
 import Icon from "./ui/Icon";
 import { errorTextOf } from "@/lib/ui/error-text";
+import { RECOMMEND_LIMIT_DEFAULT } from "@/lib/recommend/limits";
 import type { RecommendCard, SchoolZone } from "@/lib/recommend/types";
 
 interface Payload {
@@ -99,7 +100,13 @@ export default function RecommendClient({
     setBusy(true);
     setErr(null);
     try {
-      const qs = new URLSearchParams({ from: fromSlug, to: toSlug, limit: "5", force: "1" });
+      // ★ 2026-11-04（U10）：张数必须与 SSR 同源（`limits.ts`）—— 写死 "5" 会让刷新掉回 5 张
+      const qs = new URLSearchParams({
+        from: fromSlug,
+        to: toSlug,
+        limit: String(RECOMMEND_LIMIT_DEFAULT),
+        force: "1",
+      });
       if (zone) qs.set("zone", zone);
       const res = await fetch(`/api/recommend?${qs.toString()}`, { cache: "no-store" });
       const body = (await res.json()) as {
@@ -178,6 +185,7 @@ export default function RecommendClient({
         toSlug={toSlug}
         excluded={data.excluded}
         missed={data.missed}
+        limit={RECOMMEND_LIMIT_DEFAULT}
       />
 
       <footer className="rc-footer">

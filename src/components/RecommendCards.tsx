@@ -15,6 +15,7 @@
  *   不留白屏（计划 §7.1）。
  */
 import RecommendCard from "./RecommendCard";
+import { RECOMMEND_LIMIT_DEFAULT } from "@/lib/recommend/limits";
 import type { RecommendCard as CardData, SchoolZone } from "@/lib/recommend/types";
 
 export default function RecommendCards({
@@ -28,6 +29,7 @@ export default function RecommendCards({
   hrefBuilder,
   cardAction,
   onCardOpen,
+  limit = RECOMMEND_LIMIT_DEFAULT,
 }: {
   cards: CardData[];
   colors: Record<string, string>;
@@ -48,6 +50,12 @@ export default function RecommendCards({
    *   主页「出发」推荐层与收藏组合页用它替代整页跳转。
    */
   onCardOpen?: (card: CardData) => void;
+  /**
+   * ★ 2026-11-04（U10）：**本列表取了前几张卡**。必须下传给每张卡 ——
+   *   卡片的详情链接要带回同一个张数，否则详情页只按更少的张数回查，
+   *   **第 N 张卡必然 `route_changed`（点了没反应）**。
+   */
+  limit?: number;
 }) {
   // 剔除原因（分两类：没车 vs 赶不上）—— 合并成一个数组只用于文案拼接
   // ★ P1-2（T05 修复）：界面文案**一律简体**（站名/线路名才用繁体；校名「澳門科技大學」属地名）
@@ -86,6 +94,7 @@ export default function RecommendCards({
           hrefOverride={hrefBuilder?.(c)}
           cardAction={cardAction?.(c, i + 1)}
           onCardOpen={onCardOpen ? () => onCardOpen(c) : undefined}
+          limit={limit}
           /* ★ v1.1.8：入场错峰（原先 5 张卡同时同速上浮，既没方向感也白花一次动画预算） */
           delayMs={i * 40}
         />

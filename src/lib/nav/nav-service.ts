@@ -33,11 +33,14 @@ import { gcj02ToWgs84, haversineM } from "@/lib/amap/coord";
 import { nowBucketOfHolidayAware } from "@/lib/rebuild/holidays";
 import { fixWalkDistance, walkMinutes } from "@/lib/amap/walk-fix";
 import { fetchTransitPlans, type RawPlan, type TransitCacheIo, type AmapTransitRawResponse } from "@/lib/amap/transit";
+import { convergeByAlight } from "@/lib/recommend/converge";
 import { fetchLive } from "@/lib/recommend/live";
+import { ALT_BUSES_MAX, NAV_LIMIT_DEFAULT } from "@/lib/recommend/limits";
 import { amapPlanToSeed, modelOption, type ModeledOption } from "@/lib/recommend/model";
 import { contextFor, loadStatics, type RecStatic } from "@/lib/recommend/query";
 import { loadHeadway } from "@/lib/recommend/headway";
 import { PREF_DEFAULTS, type Prefs } from "@/lib/recommend/score";
+import type { ScheduleHideReason } from "@/lib/recommend/schedule";
 import { mainCodeOf } from "@/lib/recommend/segment-lookup";
 import type { AltBusView, OptionSeed, RecommendCard, SchoolZone } from "@/lib/recommend/types";
 import { candidatesToSeeds, chainToCandidates, pathsToCandidates, LOCAL_SUMMARY } from "./enumerate-nav";
@@ -150,6 +153,11 @@ export interface NavOutput {
   /** 被剔除的线路（无在途车 / 已收车）与「首段赶不上」——沿用旧语义 */
   excluded: string[];
   missed: string[];
+  /**
+   * ★ 2026-11-04（U8）：因「不在运营窗口 **且** 无车」被隐藏的线路（与上面两位并列）。
+   * 记录 `{route, boardMain, reason}` —— 没有这一位，「因运营时间隐藏」就不可观测。
+   */
+  skipped_by_schedule: { route: string; boardMain: string; reason: ScheduleHideReason }[];
   stats: NavStats;
   generatedAt: number;
 }
@@ -367,7 +375,8 @@ function withWalkOverride(r: WalkResolver, ov?: WalkOverride): WalkResolver {
 export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
   const tAll = Date.now();
   const nowMs = input.nowMs ?? Date.now();
-  const limit = Math.max(1, Math.min(20, input.limit ?? 5));
+  // ★ 2026-11-04（U10）：默认张数 5 → `NAV_LIMIT_DEFAULT`（与 /recommend 同值、但常量并存不合并）
+  const limit = Math.max(1, Math.min(20, input.limit ?? NAV_LIMIT_DEFAULT));
   const zone = input.zone ?? null;
   const origin = input.origin;
   const dest = input.dest;
@@ -610,9 +619,17 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
     ? { items: rankedLocal, dropped: [] as { key: string; reason: string }[], localCap: Number.POSITIVE_INFINITY }
     : mergeSources(amapItems, rankedLocal, {});
   const ranked = rankItems(merged.items, prefs);
+  /**
+   * ★ 2026-11-04（U9）：**同线同上下车站（按主码）收敛** —— 位置与 `/recommend` 一致：
+   *   必须在 `slice(limit)` **之前**（否则被收敛的卡已经占掉名额）。
+   *   判定键带 `route` ⇒ 跨线永不合并（`25` 与 `26A` 出 2 张；`25` 与 `25X` 视为两条线）。
+   *   ⚠️ 收敛后 `RankedItem` 的来源标记（`origin`）取**代表卡自己**的那一条。
+   */
+  const convergeKeep = new Set(convergeByAlight(ranked.map((i) => i.card), prefs.mode));
+  const converged = ranked.filter((i) => convergeKeep.has(i.card));
   // ★ v3.3.0（AC-105）：**轻轨优先** —— 注入点 = `rankItems` 之后、`slice(limit)` **之前**；
   //   只重排不增删（未开启/未命中则原样，静默）。
-  const ordered = applyLrtPriority(ranked, limit, input.lrtFirst ?? false);
+  const ordered = applyLrtPriority(converged, limit, input.lrtFirst ?? false);
   const cards = ordered.slice(0, limit).map((r) => r.card);
 
   // ★ P2-a：回填「本班之外的后续班次」（**逐字复用旧 `service.ts` v1.1.5 口径**）
@@ -656,6 +673,7 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
     provenance,
     excluded: [...new Set(baseCtx.excluded)],
     missed: [...new Set(baseCtx.missed)],
+    skipped_by_schedule: baseCtx.skippedBySchedule ?? [],
     stats: {
       staticMs,
       transitMs,
@@ -713,14 +731,33 @@ export function backfillAltBuses(
       const sib = siblings.find((s) => s.parentPlanId === m.card.planId && s.route === pr);
       if (sib) groups.push(...sib.alts.filter(byThreshold));
     }
+    /**
+     * ★ 2026-11-04（U9/U8）：**只允许卡面标签里出现过的线路**贡献后续班次行。
+     *
+     * `m.card.rides[0].parallelRoutes` 已被模型层的「运营时间 ∧ 实时车」谓词过滤过
+     * （`model.ts#keepParallel`）；这里再按同一集合裁一次，把「标签里没这条线、后续班次行里
+     * 却有它的车」这条不一致路径**从结构上堵死**（而不是靠调用顺序保证）。
+     */
+    const allowed = new Set<string>(
+      [m.card.rides[0]?.route, ...(m.card.rides[0]?.parallelRoutes ?? [])].filter(
+        (x): x is string => !!x,
+      ),
+    );
     // 去重（键 = `route + totalMin`）——sibling 与主干线可能给出同线同班次
     const seen = new Set<string>();
     const dedup = groups.filter((g) => {
+      if (!allowed.has(g.route)) return false;
       const k = `${g.route}|${g.totalMin}`;
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
     });
-    if (dedup.length) m.card.altBuses = dedup;
+    /**
+     * ★ 2026-11-04（U9）：单卡**最多 `ALT_BUSES_MAX` 行**。
+     * ⚠️ 上限必须落在本函数内（`m.card.altBuses = …` **之前**）：若只截主干线、
+     *   回填时又把并行线加回来，上限形同不存在（口径见 `limits.ts`）。
+     */
+    const capped = dedup.slice(0, ALT_BUSES_MAX);
+    if (capped.length) m.card.altBuses = capped;
   }
 }

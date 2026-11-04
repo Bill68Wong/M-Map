@@ -898,6 +898,22 @@ export interface ReachReport {
   live: boolean;
 }
 
+/**
+ * ★ 2026-11-04（需求 U9）：**备选下车点**（同一条线、同一上车站，但下车站不同）。
+ *
+ * 只在**详情页**出现（`card.alightOthers`），**不进卡片列表** —— 卡片列表口径是
+ * 「一卡一个下车点」（`converge.ts`）。点选后走同一份 URL 契约（`buildCardHref`）
+ * 重新进详情 ⇒ 不需要新状态机。
+ */
+export interface AlightOption {
+  /** 原始站码（带站台号，如 `C690/3`）—— URL 契约与命中四元组都用原始码 */
+  code: string;
+  /** 展示文案：`站码 站名` */
+  label: string;
+  /** 该下车点的详情页地址（`/card?...&alight=<code>`） */
+  href: string;
+}
+
 /** `/api/card` 的完整返回 */
 export interface CardDetailPayload {
   fromSlug: string;
@@ -910,6 +926,11 @@ export interface CardDetailPayload {
   strips: SegmentStrip[];
   /** 折叠栏：该站台剩余所有可达线路（含本卡自己，按 minutes 升序、null 排最后） */
   reports: ReachReport[];
+  /**
+   * ★ 2026-11-04（U9）：同线同站的**其他**下车点（已排除当前这张卡的那个；上限见 `limits.ts`）。
+   * 空数组 = 该线在这个上车站只有这一个下车点（常态）。
+   */
+  alightOthers: AlightOption[];
   /** 筛选阈值 = 第 N 张卡的总时长（用户口径「速度優於五張卡片最慢方案」） */
   thresholdMin: number;
   generatedAt: number;

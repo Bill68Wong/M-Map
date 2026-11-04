@@ -5,7 +5,7 @@
  *      ② 只读探针 / 性能压测（拿结构化 stats 核对桶数与 DSAT 调用数）
  *
  * 参数：`from` `to`（place slug：home / school / hengqin / gate）
- *      `zone`（B/C | N/O | R，默认 N/O）· `limit`（默认 5）· `force=1`（绕过缓存）
+ *      `zone`（B/C | N/O | R，默认 N/O）· `limit`（默认 `RECOMMEND_LIMIT_DEFAULT`）· `force=1`（绕过缓存）
  *
  * ⚠️ 函数区域：v3.7.0（ADR C1）起由**项目级** `vercel.json: "regions": ["hkg1"]` 决定
  *    （原 `preferredRegion = "sin1"` 是 route 段配置，Hobby 下不生效、真身 iad1 ⇒ 已清理）。
@@ -17,6 +17,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
+import { RECOMMEND_LIMIT_DEFAULT } from "@/lib/recommend/limits";
 import { recommend } from "@/lib/recommend/service";
 import { parsePrefs } from "@/lib/recommend/score";
 import { DEFAULT_ZONE, SCHOOL_ZONES, type SchoolZone } from "@/lib/recommend/types";
@@ -44,7 +45,7 @@ export async function GET(req: NextRequest) {
     : DEFAULT_ZONE;
 
   const limitRaw = Number(sp.get("limit"));
-  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(20, Math.trunc(limitRaw)) : 5;
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(20, Math.trunc(limitRaw)) : RECOMMEND_LIMIT_DEFAULT;
   const force = sp.get("force") === "1" || sp.get("force") === "true";
 
   // ★ B4（需求 8）：可选参数 `prefs`（balanced | fewer_transfers | less_walk）；
@@ -66,6 +67,8 @@ export async function GET(req: NextRequest) {
         colors: r.colors,
         excluded: r.excluded,
         missed: r.missed,
+        // ★ 2026-11-04（U8）：因「不在运营窗口 ∧ 无车」被隐藏的线路（诊断位，与上两位并列）
+        skipped_by_schedule: r.skipped_by_schedule,
         stats: r.stats,
       },
       // 结果本身有 10s 缓存，但**响应必须不缓存**（刷新语义由 force 控制）

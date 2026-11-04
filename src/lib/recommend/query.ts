@@ -478,6 +478,8 @@ export function contextFor(
     live,
     excluded: [],
     missed: [],
+    // ★ 2026-11-04（U8）：「因运营时间且无车」被隐藏的线路（与 excluded/missed 并列，独立可观测）
+    skippedBySchedule: [],
     nowBucket,
   };
 }
