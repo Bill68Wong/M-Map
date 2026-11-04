@@ -439,6 +439,17 @@ export interface StationHit {
  * @param boardMain 本段上车站主码
  */
 export function atBoardStopOf(vehicles: TrackVehicle[], boardMain: string): StationHit {
+  /**
+   * ⚠️⚠️ **与同文件的 `candAtStopOf`（`e700dd9`，待撤）职责重叠** —— 两者都在扫
+   *   「本帧停靠在上车站的车」。分工：
+   *     · **本函数** = 用于**切 riding**（判定层，命中即切，`atStation` 非空即算，不看 status）
+   *     · `candAtStopOf` = 用于**显示候选车牌**（展示层，要求 `status==="stopping"`、
+   *       还有 strong 档与距离门、返回 4 态）
+   *   显示功能已由负责人裁决撤掉，`candAtStopOf` 将随 `e700dd9` revert 删除
+   *   （同时删 `CAND_STRONG_MAX_M` / `CandAtStop` 类型 / `useRideTracking` 的 `candAtStop` 字段）。
+   *   ⇒ **若未来重新引入「显示来车」功能，必须复用本函数，不要写第三份。**
+   *   （两段并存的唯一原因是 revert 顺序：把判据建在待删代码上，revert 时会一起删掉。）
+   */
   const board = mainOf(boardMain);
   if (!board) return { hit: false, plate: null, n: 0 };
   const hits = vehicles.filter((v) => v.atStation?.code && mainOf(v.atStation.code) === board);
