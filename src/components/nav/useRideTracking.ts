@@ -1764,6 +1764,19 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     setYouAt({ afterIdx: i0, frac: 0.5 });
   }, [phase, active, userFix, legs, legIndex, prog, stopMains, listTick, ladderTick]);
 
+  /**
+   * ★ 观测钩子 `data-you-dot` 的**卸载清场**（独立 effect，非上面那条 effect 的 cleanup）。
+   *
+   * 为什么必须独立一条：上面那条 effect 每次依赖变化都会跑 cleanup，挂在它上面等于
+   * 「每次换帧清一次」，语义错。这里要表达的是**「组件生命周期 = 钩子生命周期」**：
+   * 只要 `useRideTracking` 活着，`data-you-dot` 就合法；一旦卸载（用户跳去 `/help`、
+   * `/line/[code]` 等，`reset()` 也不会跑），属性必须消失。
+   *
+   * 不清的后果（实测可达）：`document.body` 上残留上一次的值，语义仍是"渲染层有坐标"
+   * ⇒ 跳页后的 QA 用例读到幽灵钩子，会误判整只钩子不可信并弃用它（过期钩子型假绿）。
+   */
+  useEffect(() => () => setYouDotHook(null), []);
+
   /* ── 操作 ── */
   const start = useCallback(() => {
     setPhase("boarding");
