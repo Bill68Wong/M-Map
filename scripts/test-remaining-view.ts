@@ -299,6 +299,17 @@ console.log("── ④b 信息行钩子语义（同源一处 + 「不显示」�
    */
   ok(/legRemainMinOf\(\{/.test(body), "到下车分钟来自 legRemainMinOf（与服务端同式）");
   ok(!/liveStrips\?\.\[legIdx\]\?\.rideMin/.test(body), "不再把 liveStrips.rideMin 当到下车分钟（请求失败会卡住）");
+  /**
+   * ⑦ **站数口径来源**锁：必须走 `track.ts#stopsAwayOf`（停靠态不再多算 1 站）。
+   *   为什么落在源码级：站数是渲染期表达式，没有独立纯函数入口可喂；
+   *   而它的两处旧写法（`lastIdx − passedIdx` 多算 1、复用 `remainFromIdxOf` 少算 1）
+   *   都能靠这一条挡住 —— 语义回归由 `test-remaining.ts` ⑭ ⑤ 段用真实 `progressOf` 锁。
+   */
+  ok(
+    /const stopsAway = stopsAwayOf\(track\?\.prog \?\? null, trackStops\.length - 1\)/.test(body),
+    "站数来自 stopsAwayOf（停靠态正确、行驶态不少算 1）",
+  );
+  ok(!/trackStops\.length - 1 - track\.prog\.passedIdx/.test(body), "站数不再按「已过站数」算（停靠态会多 1）");
 }
 
 /* ══════════════════════════════════════════════════════════════════════
