@@ -15,6 +15,9 @@
  *   · `body[data-veh-age]`  = 距最后一帧**车辆**数据的整数秒（随停更递增、拿到新帧归零）
  *   · `body[data-user-fix]` = `"<ts>,<acc>"` —— **只写时间戳与精度，禁止写经纬度**
  *     （截图 / 共享屏幕 / 录屏都不外泄位置；坐标断言用 `.user-dot` 屏幕位移代替）
+ *   · `body[data-you-dot]`  = `"<ts>,<acc>"` —— **交给渲染层的那个坐标**的时刻与精度
+ *     （riding 期蓝点走 `youDot`，会冻结；与 `data-user-fix` 相减才能分辨
+ *      「定位死了」与「定位活着但渲染层冻住」—— 详见 `setYouDotHook`）
  *
  * ── 阈值（Spec §5 锁定）────────────────────────────────────────────────
  *   · 车辆 stale：**30s**（约束：> 2×`POLL_MS`=24s 且 ≤90s，否则正常抖动会误报）
@@ -91,6 +94,39 @@ export function setUserFixHook(ts: number, accuracyM: number): void {
   if (!Number.isFinite(ts) || ts <= 0) return;
   const acc = Number.isFinite(accuracyM) ? Math.max(0, Math.round(accuracyM)) : 0;
   write("data-user-fix", `${Math.round(ts)},${acc}`);
+}
+
+/* ══════════ 维度 A′ · 导航蓝点（riding 视觉层） ══════════ */
+
+/**
+ * `body[data-you-dot]="<ts>,<acc>"` —— **实际交给渲染层的那个坐标**的采样时刻与精度。
+ *
+ * ── 解决什么（`data-user-fix` 顶不了）────────────────────────────────────
+ *   `data-user-fix` 只证明「GPS 通道产出了一帧」。但 riding 期间蓝点渲染读的是
+ *   `ride.youDot ?? userFixR.fix`，而 `youDot` 会**冻结**在上一好点
+ *   （`useRideTracking` 的 `lastGoodDotRef`：accuracy>150m / 离线路>60m / 无 fix，
+ *   `ROUTE_OVERVIEW` 的吸附又是**顶点**最近点，步长实测 ≈33m）。
+ *   冻住时「GPS 在前进」与「蓝点不动」可以同时成立 ⇒ 只读 `data-user-fix` 分辨不出来。
+ *
+ * ── 为什么写 `ts` 而不是 `ageMs`（刻意的，不是笔误）──────────────────────
+ *   写 `ageMs` 是**自刷新值**：本钩子只在坐标变化时被调用，通道一停更就不再执行，
+ *   界面上会永久停在「最后一次算出的很小 age」⇒ 假绿（本项目「假绿五来源」之一）。
+ *   写 `ts` 相反：读数方用 `Date.now() - ts` 自行计算，越停越旧，**无法自我满足**。
+ *
+ * ── 判读（两钩子相减，唯一正确用法）────────────────────────────────────
+ *   · `data-user-fix` 前进 且 `data-you-dot` 落后 **>30s** ⇒ **渲染层冻住**（蓝点在卡，真问题）
+ *   · 两者同步前进 ⇒ 渲染层在跟 ⇒ 此时蓝点静止 = 顶点量化 / 等红灯，**正确行为**
+ *   · 两者都不前进 ⇒ 定位通道死（查 `data-geo` / `data-user-fix`，是另一套判据）
+ *
+ * ⚠️ 只写时间戳与精度，**禁止写经纬度**（截图/录屏/共享屏幕不外泄位置）。
+ */
+export function setYouDotHook(ts: number | null, accuracyM?: number): void {
+  if (ts == null || !Number.isFinite(ts) || ts <= 0) {
+    write("data-you-dot", null);
+    return;
+  }
+  const acc = typeof accuracyM === "number" && Number.isFinite(accuracyM) ? Math.max(0, Math.round(accuracyM)) : 0;
+  write("data-you-dot", `${Math.round(ts)},${acc}`);
 }
 
 /* ══════════ 维度 B · 车辆数据 ══════════ */

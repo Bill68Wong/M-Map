@@ -51,7 +51,7 @@ import type { RecommendCard, SegmentStrip } from "@/lib/recommend/types";
 import { COOLDOWN_VEHICLE_SEC, useCooldown } from "./useCooldown";
 import type { VehicleLite } from "./VehicleMarker";
 import type { UserFix } from "./useUserFix";
-import { inflightGate, noteVehFail, noteVehFrame, registerVehSentinel, retainVehTicker, shouldForceRefresh } from "./observe-hooks";
+import { inflightGate, noteVehFail, noteVehFrame, registerVehSentinel, retainVehTicker, setYouDotHook, shouldForceRefresh } from "./observe-hooks";
 import { useResumeRefresh } from "./useResumeRefresh";
 import { createVehicleMatcher, usableMedium } from "./vehicle-match-run";
 import { MATCH_VEHICLE_ENABLED } from "@/lib/nav/match-vehicle";
@@ -842,6 +842,9 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     setJustAlighted(false);
     setYouDot(null);
     setYouAt(null);
+    /** ★ 观测钩子同步清空：`reset()` 可能不伴随 `active` 变化（如换 `card`），
+     *  只靠下方 effect 的分支清理会留下上一段的 `data-you-dot`（过期钩子型假绿）。 */
+    setYouDotHook(null);
     setListTick(0);
     setLadderTick(0);
   }, [clearTraveled]);
@@ -1704,12 +1707,14 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     if (phase !== "riding" || !active) {
       lastGoodDotRef.current = null;
       setYouDot(null);
+      setYouDotHook(null);
       setYouAt(null);
       return;
     }
     const leg = legs[legIndex];
     if (!leg || leg.colored.length < 2 || leg.degraded) {
       setYouDot(null);
+      setYouDotHook(null);
       setYouAt(null);
       return;
     }
@@ -1729,6 +1734,13 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
     }
     if (!dot && lastGoodDotRef.current) dot = { ...lastGoodDotRef.current, frozen: true };
     setYouDot(dot);
+    /**
+     * ★ 观测钩子：把**实际交给渲染层的坐标时刻**写出去（含冻结时那份旧 `ts`）。
+     *   `dot.ts` 在 live 时等于 `userFix.ts`（与 `data-user-fix` 同源）、冻结时停在
+     *   上一好点 ⇒ 两个属性一相减就能分辨「定位死了」与「渲染层冻住」。
+     *   ⚠️ 不写经纬度；格式与 `data-user-fix` 一致（`ts,acc`）。
+     */
+    setYouDotHook(dot ? dot.ts : null, dot ? dot.accuracy : undefined);
 
     // ── 纵条 youAt（★ v3.2.0 需求 6 / AC-78：**二值 + 驻留**，移除连续插值）──
     const lastIdx = stopMains.length - 1;
