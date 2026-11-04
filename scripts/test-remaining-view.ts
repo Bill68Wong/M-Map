@@ -398,7 +398,7 @@ console.log("── ⑤ 变异自检（守护型断言必须能检出造错，�
 }
 
 /* ══════════════════════════════════════════════════════════════════════
-   ⑥ 信息行三数自洽（停靠 / 行驶 × 边界）—— 2026-11-04 新增
+   ⑥ 信息行「到下车两数」纯函数层（停靠 / 行驶 × 边界）—— 2026-11-04 新增
    ─────────────────────────────────────────────────────────────────────
    信息行同帧显示三个数，**锚站刻意不同**（差 1 是语义必然，不是错位）：
      · `data-stops-away`     还有几站下车：`at` → `atIdx`；`between` → `passedIdx`
@@ -407,13 +407,20 @@ console.log("── ⑤ 变异自检（守护型断言必须能检出造错，�
        （「分钟」量的是「到那一站还剩多久」⇒ 锚「区间终点站」）
      · `data-eta-scope`      上车后 `alight` / 上车前 `board`（board 态**不带**分钟）
    **本段存在的理由：这是本批最容易被下一个人"统一"掉的地方。**
-     谁把两个 pivot 合并成一个，下面「不变量 2」与两条变异断言立刻红。
+     谁把两个 pivot 合并成一个，下面「不变量 P1~P3」与两条变异断言立刻红。
    ⚠️ 只用**真实 `progressOf` 产物**喂入（不手搓 `TrackProgress`）——
      手搓对象测不出真实状态机的边界，本项目已因此错过一次（be-remaining 的实测教训）。
-   ⚠️ `alarm` 判据在组件里是**内联表达式**（无导出函数）⇒ 本段只能**复刻**，
-     故另用源码字符串锁住复刻（见下方「复刻锁定」），防止复刻与线上漂移。
+   ══════════════════════════════════════════════════════════════════════
+   ★★ **本段只守「纯函数层」（team-lead 2026-11-04 裁定的边界）**：
+     · 归属本文件：`stopsAwayOf` / `legRemainMinOf` / `shownAlightMin` 的**输入→输出**、
+       源码接线字符串、变异自检。能定位「哪个函数错了」。
+     · **不属**本文件：`alarm` 与站数的**同帧组合**（「即将到达」+「还有 2 站」这类）、
+       `data-nav-missed` 三义、文案期望值 —— 权威在 `scripts/test-nav-info-consistency.ts`
+       （fe-nav-ui）。那里能定位「哪个组合打架」。
+     ⇒ 所以本段**刻意不再复刻 `alarm`**：两处各存一份 alarm 期望值，将来改一处忘另一处，
+       就会出现「一个绿一个红而没人知道谁对」。需要 alarm 的组合断言，去那份文件。
    ══════════════════════════════════════════════════════════════════════ */
-console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行驶 × 边界）──");
+console.log("── ⑥ 信息行两数（纯函数层：真实 progressOf × 停靠/行驶 × 边界）──");
 {
   const MAINS = ["M100", "M200", "M300", "M400"];
   const LAST = MAINS.length - 1; // 3
@@ -438,7 +445,8 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
   /**
    * 复刻信息行的三数派生（与 `NavDetailBody` / `NavShell` 的**真实接线**一一对应）：
    *   `stopsAway` ← `stopsAwayOf`；`pivotIdx` ← `remainFromIdxOf`；
-   *   `min` ← `legRemainMinOf`；`shown` ← 地板 `Math.max(1, round)`；`alarm` ← 引擎内联式。
+   *   `min` ← `legRemainMinOf`；`shown` ← 地板 `Math.max(1, round)`。
+   * ⚠️ **不复刻 `alarm`**（见段头：同帧组合归 `test-nav-info-consistency.ts`）。
    * `rawSegSec` 传**组件实际看到的** `segProgress.segRemainSec`（停靠帧该值为 null，
    * 因为 `useRideTracking` 在车辆无 `progress` 时把 `segProgress` 置 null）。
    */
@@ -452,8 +460,7 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
       legMinutes: LEG_MIN,
     });
     const shown = Math.max(1, Math.round(min));
-    const alarm = p.atIdx === LAST ? "now" : p.nextIdx === LAST ? "soon" : "none";
-    return { stopsAway, pivotIdx, min, shown, alarm };
+    return { stopsAway, pivotIdx, min, shown };
   };
 
   const P_AT_BOARD = progressOf(MAINS, at("M100/1")); // 原始站码带站台后缀 ⇒ 顺带验证 mainOf 归一
@@ -480,73 +487,70 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
   ok(P_UNKNOWN.kind === "unknown", "前置：站序外的站码 ⇒ unknown（不是「在起点站」）", P_UNKNOWN.kind);
   ok(P_LOST.kind === "lost", "前置：无车辆帧 ⇒ lost", P_LOST.kind);
 
-  // ── 四态 × 边界，逐格钉死「期望值」──
-  // 行格式：[名称, 进度, 组件看到的 segRemainSec, 期望站数, 期望分钟, 期望 alarm]
-  const CASES: Array<[string, TrackProgress, number | null, number | null, number, string]> = [
-    ["停靠上车站", P_AT_BOARD, null, 3, 12, "none"],
-    ["停靠中间站 1", P_AT_MID1, null, 2, 9, "none"],
-    ["停靠中间站 2（下车站前站）", P_AT_MID2, null, 1, 5, "soon"],
-    ["停靠下车站", P_AT_ALIGHT, null, 0, 0, "now"],
-    ["行驶第一段 M100→M200（无位置模型）", P_RUN_FIRST, null, 3, 9, "none"],
-    ["行驶最后一段 M300→M400（无位置模型）", P_RUN_LAST, null, 1, 0, "soon"],
-    ["行驶第一段 + 位置模型剩 120s", P_RUN_FIRST, 120, 3, 11, "none"],
-    ["已过站（车驶离下车站 M400→M900）", P_RUN_PAST, null, 0, 0, "none"],
-    ["丢信号（lost）", P_LOST, null, null, 12, "none"],
-    ["站序对不上（unknown）", P_UNKNOWN, null, null, 12, "none"],
+  // ── 四态 × 边界，逐格钉死「期望值」（**只有纯函数两列**：站数 / 到下车分钟）──
+  // 行格式：[名称, 进度, 组件看到的 segRemainSec, 期望站数, 期望分钟]
+  const CASES: Array<[string, TrackProgress, number | null, number | null, number]> = [
+    ["停靠上车站", P_AT_BOARD, null, 3, 12],
+    ["停靠中间站 1", P_AT_MID1, null, 2, 9],
+    ["停靠中间站 2（下车站前站）", P_AT_MID2, null, 1, 5],
+    ["停靠下车站", P_AT_ALIGHT, null, 0, 0],
+    ["行驶第一段 M100→M200（无位置模型）", P_RUN_FIRST, null, 3, 9],
+    ["行驶最后一段 M300→M400（无位置模型）", P_RUN_LAST, null, 1, 0],
+    ["行驶第一段 + 位置模型剩 120s", P_RUN_FIRST, 120, 3, 11],
+    ["已过站（车驶离下车站 M400→M900）", P_RUN_PAST, null, 0, 0],
+    ["丢信号（lost）", P_LOST, null, null, 12],
+    ["站序对不上（unknown）", P_UNKNOWN, null, null, 12],
   ];
-  for (const [name, p, rawSeg, wantAway, wantMin, wantAlarm] of CASES) {
+  for (const [name, p, rawSeg, wantAway, wantMin] of CASES) {
     const d = deriveRow(p, rawSeg);
     ok(d.stopsAway === wantAway, `${name}：还有几站 = ${String(wantAway)}`, `实际 ${String(d.stopsAway)}`);
     ok(Math.abs(d.min - wantMin) < 1e-9, `${name}：到下车分钟 = ${wantMin}`, `实际 ${d.min}`);
-    ok(d.alarm === wantAlarm, `${name}：alarm = ${wantAlarm}`, `实际 ${d.alarm}`);
   }
 
-  // ── 跨态不变量（本段的核心价值）──
-  const rows = CASES.map(([name, p, rawSeg]) => ({ name, d: deriveRow(p, rawSeg) }));
+  // ── 跨态不变量（纯函数口径）──
+  const rows = CASES.map(([name, p, rawSeg]) => ({ name, p, d: deriveRow(p, rawSeg) }));
 
   /**
-   * 不变量 1（拆成正反两个方向，**别合并**）：
-   *   1a 已到站（`alarm="now"`）⇒ 站数必然是 0 —— 硬方向，任何实现都必须满足；
-   *   1b 站数 0 但 `alarm≠"now"` ⇒ **只允许「已过站」这一种解释**（车已驶离下车站）。
-   *      ⚠️ 这里**不能**写成双向 `(站数===0) ⟺ alarm="now"`：那条断言在本批我一度写成双向，
-   *      只是因为表里**没有「已过站」这一行**才侥幸全绿 —— 一旦补上真实状态立刻红。
-   *      双向写法会把一个真实存在的状态判成"不该出现"，属于**用断言掩盖现实**。
-   *      「已过站」时次行的文案是**已知缺口**（当前会渲染「还有 0 站下车 · 约 1 分」），
-   *      是否改成「已过站 · 请下车」属产品裁决，见下方 §已知缺口 的登记断言。
+   * 不变量 P1~P3：**`stopsAwayOf` 的取值域**，用纯函数事实表述（**不引入 `alarm`**）。
+   *   之所以能纯函数化：站数只由「锚站」与 `lastIdx` 决定 ——
+   *     · P1 停靠在 **下车站**（`kind="at"` 且 `atIdx===lastIdx`）⇒ 0；
+   *     · P2 行驶且**区间起点就是下车站**（`kind="between"` 且 `passedIdx===lastIdx`）⇒ 0
+   *       —— 这就是「已过站」（用户没下车，车已开走），是 0 的**唯一另一种**来源；
+   *     · P3 其余可用状态 ⇒ ≥1（不得为 0）；不可用状态（lost/unknown）⇒ null。
+   * ⚠️ 不要写成「站数 0 ⟺ 某单一状态」：0 有**两种**合法来源（到站 / 过站），
+   *   写成单值等价会把真实状态判成"不该出现"（本批我一开始就是双向写法，
+   *   只因表里缺「已过站」一行才侥幸全绿）。
+   * ⚠️ 「站数 0 + `alarm` 组合该配哪句文案」**不在本段**——那是同帧跨钩子口径，
+   *   见 `scripts/test-nav-info-consistency.ts`（段头已声明边界）。
    */
-  ok(
-    rows.every(({ d }) => d.alarm !== "now" || d.stopsAway === 0),
-    "不变量 1a：已到站（alarm=now）⇒ 站数必为 0",
-    rows.filter(({ d }) => d.alarm === "now" && d.stopsAway !== 0).map((r) => r.name).join(","),
-  );
   {
-    const zeroNotNow = rows.filter(({ d }) => d.stopsAway === 0 && d.alarm !== "now");
+    const atLast = rows.filter(({ p }) => p.kind === "at" && p.atIdx === LAST);
+    const runFromLast = rows.filter(({ p }) => p.kind === "between" && p.passedIdx === LAST);
     ok(
-      zeroNotNow.every(({ name }) => name.includes("已过站")),
-      "不变量 1b：站数 0 且 alarm≠now ⇒ 只能是「已过站」（不得由其它状态产出）",
-      zeroNotNow.map((r) => `${r.name}(alarm=${r.d.alarm})`).join(",") || "本表无此状态",
+      atLast.length === 1 && atLast.every(({ d }) => d.stopsAway === 0),
+      "不变量 P1：停靠在下车站 ⇒ 站数 0",
+      atLast.map((r) => `${r.name}=${String(r.d.stopsAway)}`).join(","),
+    );
+    ok(
+      runFromLast.length === 1 && runFromLast.every(({ d }) => d.stopsAway === 0),
+      "不变量 P2：行驶且区间起点是下车站（已过站）⇒ 站数 0",
+      runFromLast.map((r) => `${r.name}=${String(r.d.stopsAway)}`).join(","),
+    );
+    const usable = rows.filter(({ p }) => p.kind === "at" || p.kind === "between");
+    const others = usable.filter(({ p }) => !(p.kind === "at" && p.atIdx === LAST) && !(p.kind === "between" && p.passedIdx === LAST));
+    ok(
+      others.length >= 4 && others.every(({ d }) => typeof d.stopsAway === "number" && d.stopsAway >= 1),
+      "不变量 P3：其余可用状态 ⇒ 站数 ≥1（不得为 0）",
+      `比对 ${others.length} 行 / ${others.map((r) => `${r.name}=${String(r.d.stopsAway)}`).join(",")}`,
     );
   }
 
   /**
-   * 不变量 2：`alarm=soon`（底栏「即将到达」）**必须且只能**伴随「还有 1 站」。
-   * ⚠️ 注意命题方向：写成「站数 ≥1 ⇒ 不得 soon」是**错的** ——
-   *   行驶 M300→M400（下车站 400）时站数 1 且 soon，这是**正确且必要**的组合
-   *   （1 站 + 即将到达 = 同一件事的两种说法）。真正要禁的是「还有 2 站」+「即将到达」。
-   */
-  ok(
-    rows.every(({ d }) => d.alarm !== "soon" || d.stopsAway === 1),
-    "不变量 2：alarm=soon ⇒ 还有 1 站（禁「还有 2 站 + 即将到达」同屏）",
-    rows.filter(({ d }) => d.alarm === "soon" && d.stopsAway !== 1).map((r) => r.name).join(","),
-  );
-
-  /**
-   * 不变量 3：站数只有三种合法值 —— `null`（进度不可用）/ `≥1` / `0`；
-   *   且 `0` 必属「已到站」或「已过站」（见不变量 1a/1b），**不得**由其它状态产出。
+   * 不变量 3：站数只有三种合法值 —— `null`（进度不可用）/ `≥1` / `0`。
    */
   ok(
     rows.every(({ d }) => d.stopsAway === null || d.stopsAway >= 1 || d.stopsAway === 0),
-    "不变量 3：站数 ∈ {null} ∪ {≥1} ∪ {0}（0 的两种解释由 1a/1b 分别锁死）",
+    "不变量 3：站数 ∈ {null} ∪ {≥1} ∪ {0}（0 的两种来源由 P1/P2 分别锁死）",
   );
 
   /** 不变量 4：无位置模型的帧，到下车分钟必须落在 [0, 整段静态分钟]（不出现负数 / 超过整段） */
@@ -616,16 +620,15 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
       `统一 ${unified(P_AT_MID2)} / 正确 ${stopsAwayOf(P_AT_MID2, LAST)}`,
     );
     ok(
-      unified(P_RUN_LAST) === 0 && stopsAwayOf(P_RUN_LAST, LAST) === 1 && deriveRow(P_RUN_LAST, null).alarm === "soon",
-      "[变异] 但它在行驶末段错 1 站 ⇒ 会写出「还有 0 站下车」+「即将到达」同屏（本批踩过的坑）",
+      unified(P_RUN_LAST) === 0 && stopsAwayOf(P_RUN_LAST, LAST) === 1,
+      "[变异] 但它在行驶末段错 1 站 ⇒ 会写出「还有 0 站下车」（本批踩过的坑）",
       `统一 ${unified(P_RUN_LAST)} / 正确 ${stopsAwayOf(P_RUN_LAST, LAST)}`,
     );
   }
 
-  /* ── 接线与「复刻锁定」（源码字符串；防组件侧把口径改回去 / 防复刻漂移）── */
+  /* ── 接线（源码字符串；防组件侧把口径改回去。`alarm` 不复刻，归同帧矩阵那份）── */
   {
     const navDetail = readFileSync("src/components/nav/NavDetailBody.tsx", "utf8");
-    const rideEngine = readFileSync("src/components/nav/useRideTracking.ts", "utf8");
 
     ok(
       navDetail.includes("stopsAwayOf(track?.prog ?? null, trackStops.length - 1)"),
@@ -665,7 +668,12 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
     const subStart = navDetail.indexOf("const postSub = useMemo(");
     const subEnd = subStart >= 0 ? navDetail.indexOf("}, [infoMode", subStart) : -1;
     const subCode = subStart >= 0 && subEnd > subStart ? codeOnly(navDetail.slice(subStart, subEnd)) : "";
-    const hasMissedEarly = subCode !== "" && /if\s*\(\s*missedStop\s*\)\s*return/.test(subCode);
+    /**
+     * ⚠️ 判据只要求「postSub 里有 `if (missedStop)` 分支」——**不**要求它是单行 `return`：
+     *   owner 后来把它改成两档块（换乘程 / 末程不同文案），单行正则会假红。
+     *   这里守的是「有没有这个提前返回」，不是它的内部形状（内部文案归同帧矩阵那份）。
+     */
+    const hasMissedEarly = subCode !== "" && /if\s*\(\s*missedStop\s*\)/.test(subCode);
     ok(
       hasMissedEarly,
       "接线：postSub 对「已过站」有提前返回（车驶离下车站不落到「还有 0 站」句式）",
@@ -689,16 +697,12 @@ console.log("── ⑥ 信息行三数自洽（真实 progressOf × 停靠/行�
         mLine.trim() || "✗ 未找到 const missedStop 定义",
       );
     }
-    ok(
-      rideEngine.includes('prog.atIdx === alightIdx ? "now" : prog.nextIdx === alightIdx ? "soon" : "none"'),
-      "复刻锁定：alarm 判据与引擎内联表达式逐字一致（改了这里必须同步本脚本）",
-    );
   }
 }
 
 console.log(
   failed === 0
-    ? "\n✅ 全通过（客户端兜底 / 服务端基准 / 两路恒等 / 渲染口径 / 变异自检 / 三数自洽）"
+    ? "\n✅ 全通过（客户端兜底 / 服务端基准 / 两路恒等 / 渲染口径 / 变异自检 / 纯函数两数）"
     : `\n❌ ${failed} 项失败`,
 );
 process.exit(failed === 0 ? 0 : 1);
