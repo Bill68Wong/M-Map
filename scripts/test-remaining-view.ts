@@ -23,6 +23,7 @@ import { readFileSync } from "node:fs";
 import {
   ARRIVE_OVERDUE_TEXT,
   REMAIN_ARRIVED_TEXT,
+  legRemainMinOf,
   remainOf,
   remainServedOf,
   remainTotalMinOf,
@@ -159,6 +160,53 @@ for (const s of [0, 2, 10]) {
     const { A, B, diff } = pairOf(20, s, e);
     // 容差 1 分：remainingMin 可能被服务端四舍五入到 1 位小数
     ok(diff < 1, `stale=${s}s elapsed=${e}min ⇒ A=${A.toFixed(3)} B=${B.toFixed(3)}`, `Δ=${diff.toFixed(4)}`);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   ③b legRemainMinOf —— 「到下车站还有几分钟」的唯一口径（U3）
+   ──────────────────────────────────────────────────────────────────────
+   与服务端 `remaining.ts` 的当前腿剩余**必须同式**：
+     legRemain = segRemainSec/60 + Σ minToNext[pivotIdx .. 倒数第二站]
+   否则顶部「总时长」与竖条「还有几分钟」会在切换瞬间各说一个数。
+   ══════════════════════════════════════════════════════════════════════ */
+console.log("── ③b legRemainMinOf（本段剩余的唯一口径）──");
+{
+  // 站条：[A1, A2, A3]，两跳各 4 分
+  const hops = [4, 4, 0];
+  ok(
+    legRemainMinOf({ segRemainSec: 120, pivotIdx: 1, minToNext: hops, legMinutes: 8 }) === 6,
+    "首跳 2 分 + 基准站 A2 之后 4 分 = 6（不是 2）",
+    String(legRemainMinOf({ segRemainSec: 120, pivotIdx: 1, minToNext: hops, legMinutes: 8 })),
+  );
+  ok(
+    legRemainMinOf({ segRemainSec: 0, pivotIdx: 1, minToNext: hops, legMinutes: 8 }) === 4,
+    "停靠 A2（seg=0，基准站=所停站）⇒ 4 分（含「A2→A3」这一跳）",
+  );
+  ok(
+    legRemainMinOf({ segRemainSec: 0, pivotIdx: 2, minToNext: hops, legMinutes: 8 }) === 0,
+    "停靠下车站 ⇒ 0",
+  );
+  ok(
+    legRemainMinOf({ segRemainSec: 120, pivotIdx: null, minToNext: hops, legMinutes: 8 }) === 8,
+    "只有 segRemainSec（基准站未知）⇒ 回落整段 8（保守偏长，不拿 2 当整段）",
+  );
+  ok(
+    legRemainMinOf({ segRemainSec: null, pivotIdx: 1, minToNext: hops, legMinutes: 8 }) === 4,
+    "只有基准站 ⇒ 逐跳累加 4",
+  );
+  ok(
+    legRemainMinOf({ segRemainSec: null, pivotIdx: null, minToNext: hops, legMinutes: 8 }) === 8,
+    "两者都没有 ⇒ 整段 8",
+  );
+  ok(
+    legRemainMinOf({ segRemainSec: -1, pivotIdx: null, minToNext: hops, legMinutes: 8 }) === 8,
+    "负 segRemainSec 视为无效 ⇒ 整段 8（不产生负数）",
+  );
+  // 变异自检：若把「只看 segRemainSec」的旧口径写回去，第一条必失配
+  {
+    const oldImpl = (seg: number | null, legMin: number) => (seg != null && seg >= 0 ? seg / 60 : legMin);
+    ok(oldImpl(120, 8) !== 6, "[变异] 旧口径（seg/60 当整段）能被 6 分这条检出", `旧口径给 ${oldImpl(120, 8)}`);
   }
 }
 

@@ -236,12 +236,12 @@ function mkCard(st: RecStatic, planId: number, routeKey: string, minutes: number
     }
   }
 
-  /* ④ 正常调用 */
+  /* ④ 正常调用（★ U3 后 `segRemainSec` 与 `nextIdx` 必须成对：nextIdx = 基准站） */
   let firstRecomputedAt = 0;
   let firstRemaining = 0;
   let firstArriveAt = 0;
   {
-    const res = await POST(reqWith({ card: cardA, legIndex: 0, segRemainSec: 150 }, `http://${HOST}`));
+    const res = await POST(reqWith({ card: cardA, legIndex: 0, segRemainSec: 150, nextIdx: 2 }, `http://${HOST}`));
     ok(res.status === 200, "正常调用 ⇒ 200", `实际 ${res.status}`);
     ok(res.headers.get("cache-control") === "no-store", "cache-control: no-store");
     const j = (await res.json()) as {
@@ -253,7 +253,8 @@ function mkCard(st: RecStatic, planId: number, routeKey: string, minutes: number
       strips: { rideMin: number }[];
     };
     ok(j.ok === true, "ok:true");
-    ok(j.remainingMin === 4.5, "remainingMin = 2.5 + 2 = 4.5", `实际 ${j.remainingMin}`);
+    // nextIdx=2 = 下车站本身（基准站=下车点）⇒ 基准站之后 0 跳 ⇒ 剩余 = 150s/60 + 末段 2
+    ok(j.remainingMin === 4.5, "remainingMin = 2.5 + 2 = 4.5（基准站=下车站）", `实际 ${j.remainingMin}`);
     ok(j.arriveAt === j.recomputedAt + 4.5 * 60_000, "arriveAt = recomputedAt + remainingMin×60000");
     ok(Array.isArray(j.strips) && j.strips[0]!.rideMin === 2.5, "strips[0].rideMin = 2.5（整份下发）", `实际 ${j.strips?.[0]?.rideMin}`);
     ok(typeof j.serverNowMs === "number", "serverNowMs 有值（供客户端算时钟偏移）");
@@ -263,10 +264,45 @@ function mkCard(st: RecStatic, planId: number, routeKey: string, minutes: number
     firstArriveAt = j.arriveAt;
   }
 
+  /* ④b ★ U3 口径：只传 `segRemainSec`（基准站未知）⇒ 必须回落**该段全量静态分钟**，
+   *     不得把它当整段（那会少算基准站之后的跳，正是本次修的缺陷本体）。
+   *     ⚠️ 每次换一个 `planId`：微缓存键**刻意不含** `segRemainSec/nextIdx`（`route.ts:100-127`），
+   *        同 planId 在同一个 2s 桶内会命中上一条的旧值 ⇒ 本条会验到别人的结果。
+   */
+  {
+    const same = `http://${HOST}`;
+    const soloCard = { ...cardA, planId: 990001 };
+    const solo = (await (await POST(reqWith({ card: soloCard, legIndex: 0, segRemainSec: 150 }, same))).json()) as {
+      remainingMin: number;
+      strips: { rideMin: number; stops: { minToNext?: number }[] }[];
+    };
+    const staticMin = soloCard.rides[0]!.minutes; // 6
+    ok(
+      solo.strips[0]!.rideMin === staticMin,
+      `只传 segRemainSec ⇒ 本段按静态 ${staticMin} 分（不是 150s/60 = 2.5）`,
+      `实际 ${solo.strips[0]!.rideMin}`,
+    );
+    ok(
+      solo.remainingMin === round1(staticMin + (soloCard.walkIn?.minutes ?? 0)),
+      "  剩余 = 本段静态 + 末段步行（保守偏长，不双计）",
+      `实际 ${solo.remainingMin}`,
+    );
+    // 基准站 = 中间站 ⇒ 剩余必须恰好多出「中间站 → 下车站」那一跳（站条同源，不另造数字）
+    const hop2 = Number(solo.strips[0]!.stops[1]?.minToNext ?? 0);
+    const mid = (await (
+      await POST(reqWith({ card: { ...cardA, planId: 990002 }, legIndex: 0, segRemainSec: 150, nextIdx: 1 }, same))
+    ).json()) as { remainingMin: number };
+    ok(
+      Math.abs(mid.remainingMin - round1(2.5 + hop2 + (cardA.walkIn?.minutes ?? 0))) <= 0.06,
+      `基准站=中间站 ⇒ 剩余 = 2.5 + 第二跳 ${hop2} + 末段（严格大于下车站基准的 4.5）`,
+      `实际 ${mid.remainingMin}`,
+    );
+  }
+
   /* ⑤ 微缓存命中的**不变量**（team-lead / 前端共同依赖的那条） */
   {
     await new Promise((r) => setTimeout(r, 60));
-    const res = await POST(reqWith({ card: cardA, legIndex: 0, segRemainSec: 150 }, `http://${HOST}`));
+    const res = await POST(reqWith({ card: cardA, legIndex: 0, segRemainSec: 150, nextIdx: 2 }, `http://${HOST}`));
     const j = (await res.json()) as {
       recomputedAt: number;
       serverNowMs: number;
@@ -291,8 +327,8 @@ function mkCard(st: RecStatic, planId: number, routeKey: string, minutes: number
 
   /* ⑥ 缓存键指纹：同 planId 不同路线不得串数据 */
   {
-    const resA = await POST(reqWith({ card: cardA, legIndex: 0, segRemainSec: 150 }, `http://${HOST}`));
-    const resB = await POST(reqWith({ card: cardB, legIndex: 0, segRemainSec: 150 }, `http://${HOST}`));
+    const resA = await POST(reqWith({ card: cardA, legIndex: 0, segRemainSec: 150, nextIdx: 2 }, `http://${HOST}`));
+    const resB = await POST(reqWith({ card: cardB, legIndex: 0, segRemainSec: 150, nextIdx: 2 }, `http://${HOST}`));
     const a = (await resA.json()) as { strips: { route: string; alight: string }[] };
     const b = (await resB.json()) as { strips: { route: string; alight: string }[] };
     ok(
@@ -339,10 +375,10 @@ function mkCard(st: RecStatic, planId: number, routeKey: string, minutes: number
     // 同 planId、同线路同上落站，只有 walkIn.minutes 与末段时长不同（模拟「→学校」vs「→学校隔壁」）
     const odA = { ...cardA, walkIn: { ...cardA.walkIn, minutes: 2 } };
     const odB = { ...cardA, walkIn: { ...cardA.walkIn, minutes: 11 } };
-    const ra = (await (await POST(reqWith({ card: odA, legIndex: 0, segRemainSec: 150 }, same))).json()) as {
+    const ra = (await (await POST(reqWith({ card: odA, legIndex: 0, segRemainSec: 150, nextIdx: 2 }, same))).json()) as {
       remainingMin: number;
     };
-    const rb = (await (await POST(reqWith({ card: odB, legIndex: 0, segRemainSec: 150 }, same))).json()) as {
+    const rb = (await (await POST(reqWith({ card: odB, legIndex: 0, segRemainSec: 150, nextIdx: 2 }, same))).json()) as {
       remainingMin: number;
     };
     ok(
