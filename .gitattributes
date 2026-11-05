@@ -1,0 +1,8 @@
+# 行尾策略（跨平台）
+#
+# 为什么必须锁 .githooks 为 LF：Git for Windows 默认把文本文件 checkout 成 CRLF，
+# 而 shell 脚本首行 `#!/bin/sh` 末尾带上 \r 会报 `bad interpreter: /bin/sh^M`，
+# 结果是**门禁静默失效**——推送前审核形同不存在，且不会有任何提示（铁律 44b 假绿来源）。
+* text=auto
+.githooks/* text eol=lf
+*.sh text eol=lf

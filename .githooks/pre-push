@@ -1,0 +1,42 @@
+#!/bin/sh
+# 推送前门禁（铁律 56 / 58）· 2026-11-05 立
+#
+# 作用：推送前强制跑一次审核报告，按结论决定是否放行：
+#   exit 0 = PASS                          → 放行
+#   exit 2 = CONFIRM（分类不明/大批量）     → 默认拒绝；只有 PUSH_APPROVED=1 才放行
+#   exit 1 = BLOCK（禁止类型/敏感内容）     → 一律拒绝，PUSH_APPROVED 也不放行
+#
+# PUSH_APPROVED=1 的语义 =「负责人已在对话中看过清单并明确同意」。
+# 它不是万能钥匙：只解锁 CONFIRM，不解锁 BLOCK。
+set -u
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "[pre-push] 找不到 node，无法出具审核清单 ⇒ 拒绝推送（默认方向为失败）" >&2
+  exit 1
+fi
+
+node scripts/review-push.mjs
+code=$?
+
+case "$code" in
+  0)
+    exit 0
+    ;;
+  2)
+    if [ "${PUSH_APPROVED:-0}" = "1" ]; then
+      echo ""
+      echo "[pre-push] CONFIRM 已放行（PUSH_APPROVED=1）。请确认：本次清单已逐项向负责人说明并获同意。"
+      exit 0
+    fi
+    echo ""
+    echo "[pre-push] CONFIRM：清单已列出，但尚未获得确认 ⇒ 拒绝推送。"
+    echo "[pre-push] 确认后：PUSH_APPROVED=1 git push ...（仅在负责人明确同意后使用）"
+    exit 1
+    ;;
+  *)
+    echo ""
+    echo "[pre-push] BLOCK：存在禁止入库文件或敏感内容 ⇒ 拒绝推送（铁律 56/57）。"
+    echo "[pre-push] 处理：从索引移除或补忽略规则后重新 commit；不得绕过。"
+    exit 1
+    ;;
+esac

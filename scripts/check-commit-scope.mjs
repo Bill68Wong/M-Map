@@ -15,50 +15,30 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync, statSync } from "node:fs";
+import {
+  ALLOW_PREFIX,
+  ALLOW_DOCS,
+  ALLOW_FILES,
+  BLOCK_EXT,
+  SENSITIVE,
+  SELF_EXEMPT,
+} from "./lib/push-guard-rules.mjs";
 
-/** 允许进入仓库的路径前缀 */
-const ALLOW_PREFIX = ["src/", "public/", "scripts/", "db/"];
-
-/** 允许进入仓库的单文件 */
-const ALLOW_FILES = new Set([
-  "package.json",
-  "package-lock.json",
-  "tsconfig.json",
-  "next.config.ts",
-  "eslint.config.mjs",
-  "vercel.json",
-  ".gitignore",
-  ".env.example",
-  "README.md",
-  "next-env.d.ts",
-]);
-
-/** 扩展名硬拦截：二进制大件 / 备份 / 环境文件 */
-const BLOCK_EXT = [".pptx", ".mp4", ".mov", ".dump", ".sql", ".gz", ".zip"];
-
-/** 敏感内容特征：命中即硬拦（这些是「绕过访问控制」的说明书特征） */
-const SENSITIVE = [
-  { re: /macauweb/i, why: "DSAT 内部接口路径" },
-  { re: /getRouteAndCompanyList|getRouteData\.html/i, why: "DSAT 未公开接口名" },
-  { re: /genToken|token\s*=\s*md5|md5\(qs\)/i, why: "DSAT 鉴权签名实现" },
-  { re: /签名算法|已破解|已逆向|逆向非公开接口|抓包破解/i, why: "逆向分析描述" },
-  { re: /次\s*\/\s*秒|次\/秒|req\/s/i, why: "采集强度指标（易被判异常使用）" },
-  { re: /DATABASE_URL\s*=\s*postgres/i, why: "疑似真实数据库连接串" },
-  { re: /\beyJ[A-Za-z0-9_-]{20,}\b/, why: "疑似 JWT / Token 明文" },
-  { re: /sbp_[A-Za-z0-9]{20,}/, why: "疑似 Supabase 密钥" },
-];
-
-/** 自身豁免：本脚本的敏感词表里就含这些字面量，扫自己必然误报 */
-const SELF_EXEMPT = new Set(["scripts/check-commit-scope.mjs"]);
+/** 规则（允许路径 / 禁止类型 / 敏感特征）集中在 `scripts/lib/push-guard-rules.mjs`，
+ *  与 `scripts/review-push.mjs` 共用同一份，禁止各写一套（会漂移成两个都不可信的门）。
+ *  `SELF_EXEMPT` 亦由该文件导出，本脚本不再自行维护豁免名单。 */
 
 function isAllowed(file) {
   if (ALLOW_FILES.has(file)) return true;
+  if (ALLOW_DOCS.some((p) => file.startsWith(p))) return true;
   return ALLOW_PREFIX.some((p) => file.startsWith(p));
 }
 
 function stagedFiles() {
   try {
-    const out = execFileSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACMR"], {
+    // core.quotepath=false：中文路径保持 UTF-8 原文，否则会被加引号转义成 \xxx，
+    // 导致白名单匹配与敏感词扫描对中文文件双双失效（2026-11-05 变异自证发现）。
+    const out = execFileSync("git", ["-c", "core.quotepath=false", "diff", "--cached", "--name-only", "--diff-filter=ACMR"], {
       encoding: "utf8",
     });
     return out.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -69,7 +49,7 @@ function stagedFiles() {
 
 function workingFiles() {
   try {
-    const out = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], {
+    const out = execFileSync("git", ["-c", "core.quotepath=false", "ls-files", "--cached", "--others", "--exclude-standard"], {
       encoding: "utf8",
     });
     return [...new Set(out.split("\n").map((s) => s.trim()).filter(Boolean))];

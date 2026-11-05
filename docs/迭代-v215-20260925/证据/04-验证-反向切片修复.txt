@@ -1,7 +1,0 @@
-chooseShape 选中 dir=0 iBoard=268 iAlight=120
-现有 cutColored：null ⇒ 降级（整线着色，无灰虚线）
-修复后 cutColored：149 点 · 起点距 board=23.5m · 终点距 alight=1.8m
-  ⇒ gray(整线 744 点，虚线) + colored(149 点，彩实线)，degraded=false
-
-站序（DB）： dir1:T306@26  dir1:M142@34
-  ⇒ 正确方向 = dir1（九澳→媽閣）；route_shapes dir1 却存了「媽閣→九澳」几何 ⇒ 方向数据错配
