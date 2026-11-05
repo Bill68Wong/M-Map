@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 42" width="32" height="42" role="img" aria-label="终点地图钉（单色）">
-  <title>M Map · 终点地图钉（单色版）</title>
-  <!-- 单色版：跟随 currentColor（灰色态 / 印刷 / 主题切换）。
-       白点用 evenodd 真镂空（而非叠一个白圆）⇒ 放在任何底色上都成立。 -->
-  <path fill="currentColor" fill-rule="evenodd"
-        d="M7.53 23.3 L16 40 L24.47 23.3 A9.5 9.5 0 1 0 7.53 23.3 Z
-           M12.2 19 A3.8 3.8 0 1 1 19.8 19 A3.8 3.8 0 1 1 12.2 19 Z" />
-</svg>

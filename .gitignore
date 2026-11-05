@@ -69,3 +69,13 @@ next-env.d.ts
 
 .vercel
 .env*
+
+# ★ 文档清理（2026-11-05）：过程文档只留本地，不进公开仓库
+#   公开仓库只保留 docs/decisions/ADR-*（架构决策记录）与 docs/brand-export/*（正式品牌导出资产）。
+#   被移除的 455 份文件（迭代/改版/交接/调研/采集/QA/复盘/PPT 预览等）本地副本全部保留，见
+#   .workbuddy/cleanup/docs-remove-list-20261105.txt。
+/docs/*
+!/docs/decisions/
+!/docs/brand-export/
+/docs/decisions/*
+!/docs/decisions/ADR-*

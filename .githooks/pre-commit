@@ -1,0 +1,24 @@
+#!/bin/sh
+# 提交前门禁（铁律 57）· 2026-11-05 立
+# 作用：拦住「敏感内容 / 禁止入库类型」进入提交。允许范围与敏感特征见
+#       scripts/lib/push-guard-rules.mjs（唯一规则源）。
+# 说明：默认只硬拦敏感与禁止类型；路径不在白名单只警告（推送前由 pre-push 再拦一次）。
+set -u
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "[pre-commit] 找不到 node，无法执行门禁 ⇒ 拒绝提交（默认方向为失败）" >&2
+  exit 1
+fi
+
+node scripts/check-commit-scope.mjs
+code=$?
+
+if [ "$code" -ne 0 ]; then
+  echo ""
+  echo "[pre-commit] 已拦截：命中敏感内容或禁止入库类型。"
+  echo "[pre-commit] 处理：git rm --cached <文件>（本地副本保留），或补忽略规则。"
+  echo "[pre-commit] 禁止用 --no-verify 绕过（铁律 57）。"
+  exit 1
+fi
+
+exit 0
