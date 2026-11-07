@@ -113,10 +113,10 @@ function cellLines(html: string): string[] {
     .replace(/<[^>]*>/g, "")
     .replace(/&#(\d+);/g, (_, d: string) => String.fromCodePoint(Number(d)))
     .replace(/&[a-z]+;|&#39;/gi, (m) => ENTITIES[m.toLowerCase()] ?? m)
-    // 终点兜底（CodeQL 认可的口径）：产物**零 `<` 残留**。实体还原可能产生 `<`
-    // （`&lt;` / `&#60;`），按负责人 2026-11-07 裁定清除 —— 船名/状态是纯文本展示
-    // 字段，不依赖 `<` 语义；正常页面不含此字符，字符级等值断言不受影响。
-    .replace(/</g, "");
+    // 终点兜底（CodeQL 认可的口径）：产物不含 HTML 尖括号。实体还原可能产生 `<` / `>`
+    // （如 `&lt;` / `&#60;` / `&gt;` / `&#62;`），统一字符级清除；这些字段为纯文本展示，
+    // 不依赖尖括号语义，且正常页面不含该类字符。
+    .replace(/[<>]/g, "");
   return noTags
     .split("\n")
     .map((s) => s.trim())
