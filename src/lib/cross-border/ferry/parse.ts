@@ -68,10 +68,8 @@ function dropDangerousBlocks(html: string): string {
   do {
     prev = cur;
     cur = cur
-      .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
-      .replace(/<(script|style)\b[^>]*>[\s\S]*$/i, "")
-      .replace(/<!--[\s\S]*?-->/g, "")
-      .replace(/<!--[\s\S]*$/g, "");
+      .replace(/<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
+      .replace(/<!--[\s\S]*?(?:-->|$)/g, "");
   } while (cur !== prev);
   return cur;
 }
