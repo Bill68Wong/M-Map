@@ -26,6 +26,15 @@ export const COOLDOWN_VEHICLE_SEC = 5;
 export const COOLDOWN_RECOMMEND_SEC = 5;
 /** 步行路径重算（偏航/手动）：单次成本低，但高德 walking 有 3 QPS 硬上限（S5 接入用） */
 export const COOLDOWN_WALK_SEC = 3;
+/**
+ * ★ 2026-11-05（通琴号）：站序弹窗「刷新班次」的冷却。
+ *
+ * 为什么**不能**复用 `COOLDOWN_VEHICLE_SEC`（5s，历史上还曾 15s）：
+ *   车辆刷新打的是 DSAT 实时接口（有上游频控、有成本）；通琴号刷新只是**重取静态班次表**
+ *   （`/api/tqh/lines`，幂等只读、CDN 缓存）⇒ 语义是「重新拉一次表」，不是「追实时」。
+ *   两者混用会让用户等一个无意义的车辆级冷却。3s 只用于防连点。
+ */
+export const COOLDOWN_TQH_SEC = 3;
 
 export interface UseCooldown {
   /** 剩余秒数（0 = 可刷新） */

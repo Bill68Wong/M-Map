@@ -20,6 +20,7 @@ import {
   ALLOW_DOCS,
   ALLOW_FILES,
   BLOCK_EXT,
+  BLOCK_EXT_ALLOW,
   SENSITIVE,
   SELF_EXEMPT,
 } from "./lib/push-guard-rules.mjs";
@@ -81,7 +82,7 @@ const softWarns = [];
 
 for (const f of files) {
   const lower = f.toLowerCase();
-  const ext = BLOCK_EXT.find((e) => lower.endsWith(e));
+  const ext = BLOCK_EXT_ALLOW.has(f) ? null : BLOCK_EXT.find((e) => lower.endsWith(e));
   if (ext) hardBlocks.push(`${f} —— 禁止入库的二进制/备份类型（${ext}）`);
   if (lower.includes("/.env") || lower === ".env" || lower.startsWith(".env.")) {
     if (!lower.endsWith(".env.example")) hardBlocks.push(`${f} —— 环境文件（凭据）不得入库`);

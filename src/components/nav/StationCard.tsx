@@ -7,17 +7,37 @@
  *   首页地图点击巴士站 → 浮层卡片：**站名（繁体）+ 该站所有线路的实时报站**
  *   + 「设为起点 / 设为目的地」（联动上方搜索框）。可关闭。
  *
- * ── ★ B4 多台站分组（08 §D，D7）────────────────────────────────────────
- *   一个实体站可有多个**站台分组**（数据上：主码 `T373` + 子码 `T373/1`、`T373/2`）。
- *   · 标题 = **主编号 + 站名**；副行 = 「N 个站台分组 · M 条线路」（先告诉用户"为什么分两块"）；
+ * ── 标题 / 副行 / 分组（2026-11-06 修复批 #2，Spec §3 #2）──────────────
+ *   · 标题 = **「澳门巴士站标号 + 站名」**（`T355 蓮花路停車場`）；
+ *     轻轨站不显示 `LRT-XXX`（产品 2026-09-22 口径，保留）；
+ *   · 副行 = **只写「N 条线路」**（旧版那个「N 个分组 · 」的计数前缀已按 Spec 删除 ——
+ *     用户不需要先读一个分组数才知道下面为什么分块）；
+ *   · 站台分组组名 = **`含站台后缀的标号-站名`**（半角连字符，保留子码斜杠）：
+ *     `T355/1-蓮花路停車場`、`M172/1-亞馬喇前地`；
+ *     ⚠️ 「站台名」取 `/api/station/eta` 的 `platformName`（若后端下发），
+ *        否则回落**主站名**。实测 `stations.name_tc` 在同一主码下的各站台**同名**
+ *        （`M172/1` 与 `M172/16` 都叫 `亞馬喇前地`）⇒ 现阶段产出即 `M172/1-亞馬喇前地`。
  *   · 每个分组 = **发丝线框 + `--radius-card`、无阴影**（不做"卡中卡"投影堆叠）；
- *   · 组头 = 子码（等宽 mono，`--meta`）+ 该组方向说明（muted）；
- *   · 报站行**归入**对应分组；分组按子码升序，组内沿用接口的报站升序；
- *   · **单分组（或无 `platform` 字段）→ 不显示分组容器与子码行** ⇒ 与旧版完全一致（向后兼容）；
- *   · 分组 >3 时第 3 组起折叠。
+ *   · 分组按子码升序，组内沿用接口的报站升序；分组 >3 时第 3 组起折叠；
+ *   · **单分组（或无 `platform` 字段）→ 不显示分组容器与子码行**（向后兼容）。
  *
- *   ⚠️ 08 §D.2：子码里的 `/` 是**分组号**的一部分，**绝不套线路标签的墨色组胶囊**
- *      （否则会被读成"T373 或 1 两条线"）—— 故子码只用等宽同色连写。
+ *   ⚠️ 子码里的 `/` 是**分组号**的一部分，**绝不套线路标签的墨色组胶囊**
+ *      （08 §D.2：否则会被读成"T373 或 1 两条线"）—— 故组名只用等宽同色连写。
+ *
+ * ── 通琴号分组（2026-11-06 修复批 #2 / R1）─────────────────────────────
+ *   同一物理站位的通琴号班次是**本卡的最后几个分组**（不是另一张卡）：
+ *   · 组名 `通琴号-<通琴号站名>`，**不显示巴士标号**；
+ *   · 一个主码可能对应多个通琴号站（`M172` → `亚马喇前地F站台` + `G站台`）⇒ 各成一組；
+ *   · 组内仍按方向（往澳门 / 往横琴）+ 计划发车时刻排列（沿用 `TqhStationTrips`）；
+ *   · 通琴号是**静态时刻表** ⇒ 块内不得出现「还有 N 分钟 / 实时」字样；
+ *   · 通琴号分组**不计入**站台分组（副行只报巴士线路数）。
+ *
+ * ── 线路行可点（2026-11-06 修复批 #4）──────────────────────────────────
+ *   报站行 = 「点站点 → 点线路 → 进该线路查看」（弹窗由前端 C 的 `RouteStopsSheet` 提供）。
+ *   · **导航进行中禁用**（`pickLineDisabled`）：视觉禁用 + 点击无跳转、无报错；
+ *   · 用 `role="button"` + `tabIndex` 而不是 `<button>` —— 行样式（`.nav-station-card__row`）
+ *     是 flex 布局且未做 button 重置，改标签会带出浏览器默认底色/边框；
+ *   · 行内是文本 + `RouteStack`，无嵌套按钮 ⇒ 不需要拦冒泡。
  *
  * ── 数据 ──────────────────────────────────────────────────────────────
  *   · 站名/坐标由调用方（NavShell，来自 `/api/stations`）传入；
@@ -31,9 +51,12 @@
  * ★ 报站的**站数 N** 与「**即将到站**」用 `<b>` + 青花蓝突出（与卡片报站行同款）。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import RouteStack from "@/components/RouteStack";
 import Icon from "@/components/ui/Icon";
 import { EtaText } from "@/components/RoutePieces";
+import { TqhStationTrips } from "./TqhStationCard";
+import type { TqhStationEntry, TqhTrip } from "./tqh-model";
 
 export interface StationCardStation {
   /** 主码 */
@@ -52,6 +75,11 @@ interface EtaItem {
   dir: string;
   /** ★ B4：本站台码（如 `T373/1`）；旧版接口可能不返回 → 缺省时退化为单分组 */
   platform?: string;
+  /**
+   * ★ 2026-11-06（修复批 #2）：该站台**站名**（后端可选下发）。
+   * 未下发 ⇒ 回落主站名（实测同主码下各站台 `name_tc` 相同，视觉无差别）。
+   */
+  platformName?: string;
   dirLabel: string;
   stopsAway: number | null;
   etaMin: number | null;
@@ -146,12 +174,53 @@ export default function StationCard({
   onClose,
   onSetFrom,
   onSetTo,
+  onPickLine,
+  pickLineDisabled = false,
+  tqh = null,
 }: {
   station: StationCardStation;
   colors: Record<string, string>;
   onClose: () => void;
   onSetFrom: () => void;
   onSetTo: () => void;
+  /**
+   * ★ 2026-11-06（修复批 #4 / R3）：点报站行 ⇒ 进入该线路的查看模式。
+   * 弹窗本体由前端 C 的 `RouteStopsSheet` 提供，本组件只负责**触发与传参**
+   * （`code` = 线路码 `26` / `LRT-氹仔线`；`kind` 决定是否走轻轨零请求分支）。
+   * 不传 ⇒ 行不可点（DOM 与改前一致，零回归）。
+   */
+  onPickLine?: (code: string, kind: "bus" | "lrt") => void;
+  /**
+   * ★ 修复批 #4：**导航进行中**（`navActive`）⇒ 禁用跳线路（与「导航态点击不中断」一致）。
+   * 视觉禁用 + 点击无跳转、无报错（不做原生 `disabled`，行不是 button）。
+   */
+  pickLineDisabled?: boolean;
+  /**
+   * ★ 2026-11-05（通琴号 R4 · 负责人裁决 5）：**关联巴士站**在同一张卡片下方追加通琴号班次。
+   *
+   * 口径：站点卡是「这个物理站位有什么车」的答案，通琴号既是同站位的第三类交通方式，
+   * 就不该另开一张卡（用户要来回切两个浮层才能比较）。**只追加、不改既有报站区**：
+   * 通琴号是静态时刻表，无报站 ⇒ 块内不出现任何「还有 N 分钟 / 实时」字样。
+   * ★ 2026-11-06（#2）：改为**最底部的分组**（组名 `通琴号-<站名>`），按通琴号站逐个成组。
+   * 不传（`null`）⇒ DOM 与改前逐字节一致（澳门纯巴士站零回归）。
+   */
+  tqh?: {
+    entries: TqhStationEntry[];
+    phase: "loading" | "ready" | "failed";
+    activeTripCode?: string | null;
+    onPickTrip: (trip: TqhTrip) => void;
+    /**
+     * ★ 2026-11-06（修复批 #6c）：**导航进行中 ⇒ 通琴号班次行禁用**（宿主传 `navActive`）。
+     *
+     * 为什么必须与 `pickLineDisabled` 同时存在：两者在同一张卡片上，
+     *   只禁用线路行会得到「巴士 26 点了没反应、通琴号 A1 点了直接跳走」——
+     *   不报错、不崩，只是行为不一致且无视觉暗示（沉默逻辑错误的教科书形态）。
+     * 实现统一由 `TqhStationTrips` 承担（`aria-disabled` + 行内 `opacity/cursor`，
+     *   **不用原生 `disabled`**），本组件只做透传 ⇒ 视觉与线路行同一套口径。
+     * 缺省 `false` ⇒ DOM 与改前一致（零回归）。
+     */
+    pickTripDisabled?: boolean;
+  } | null;
 }) {
   const [phase, setPhase] = useState<"loading" | "ready" | "failed">("loading");
   const [items, setItems] = useState<EtaItem[]>([]);
@@ -244,11 +313,18 @@ export default function StationCard({
 
   /** 按 `platform` 聚合为站台分组；无 `platform` → 退化成「单组」（不画框、不显子码） */
   const groups = useMemo(() => {
-    const map = new Map<string, { platform: string; items: EtaItem[] }>();
+    const map = new Map<string, { platform: string; platformName: string; items: EtaItem[] }>();
     for (const it of items) {
       const p = (it.platform ?? "").trim();
       const key = p || "__single__";
-      if (!map.has(key)) map.set(key, { platform: p, items: [] });
+      if (!map.has(key)) {
+        map.set(key, {
+          platform: p,
+          // ★ #2：站台名优先用接口下发的 `platformName`，否则回落主站名（见文件头说明）
+          platformName: (it.platformName ?? "").trim(),
+          items: [],
+        });
+      }
       map.get(key)!.items.push(it);
     }
     // 分组按子码升序（`/1` 前 `/2` 后）；组内沿用接口的报站升序
@@ -264,6 +340,54 @@ export default function StationCard({
   const lineCount = new Set(items.map((i) => `${i.route}|${i.dir}`)).size;
   const allFailed = phase === "ready" && !items.length;
 
+  /** 站台分组组名：`<含站台后缀的标号>-<站名>`（半角连字符；无站台码时只用主码兜底） */
+  const groupNameOf = (g: { platform: string; platformName: string }): string => {
+    const name = g.platformName || station.name;
+    if (!g.platform) return name;
+    return name ? `${g.platform}-${name}` : g.platform;
+  };
+
+  /** 线路行可点（#4）；导航态禁用 ⇒ 视觉禁用 + 无跳转 */
+  const canPick = !!onPickLine;
+  const pickDisabled = !canPick || pickLineDisabled;
+  const pickOf = (it: EtaItem) => () => {
+    if (pickDisabled || !onPickLine) return;
+    onPickLine(it.route, it.kind === "lrt" ? "lrt" : "bus");
+  };
+
+  const rowOf = (it: EtaItem) => (
+    <div
+      className="nav-station-card__row"
+      key={`${it.route}-${it.dir}`}
+      {...(canPick
+        ? {
+            role: "button",
+            tabIndex: pickDisabled ? -1 : 0,
+            "aria-disabled": pickDisabled ? "true" : undefined,
+            "aria-label": `查看 ${it.route}${it.dirLabel ? `（${it.dirLabel}）` : ""} 的线路站点`,
+            "data-line-pick": pickDisabled ? "disabled" : "on",
+            onClick: pickOf(it),
+            onKeyDown: (e: ReactKeyboardEvent<HTMLDivElement>) => {
+              if (pickDisabled) return;
+              if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+                e.preventDefault();
+                pickOf(it)();
+              }
+            },
+          }
+        : {})}
+      style={canPick ? { cursor: pickDisabled ? "not-allowed" : "pointer", opacity: pickDisabled ? 0.45 : undefined } : undefined}
+    >
+      <RouteStack codes={[it.route]} colorOf={(c) => colors[c] ?? null} size="sm" />
+      <span className="nav-station-card__dir t-label t-muted">{it.dirLabel}</span>
+      <span className="nav-station-card__eta t-label">
+        {it.kind === "lrt" && reloading
+          ? "正在获取下一班…"
+          : etaNode(it, nowMs, offsetRef.current)}
+      </span>
+    </div>
+  );
+
   return (
     <div className="nav-station-card" role="dialog" aria-label={`站点 ${station.name}`}>
       <div className="nav-station-card__head">
@@ -277,12 +401,9 @@ export default function StationCard({
         </button>
       </div>
 
-      {/* 副行：先告诉用户"为什么下面分了（或没分）组" */}
+      {/* 副行：★ #2 —— 多站台时**只报线路数**（分组计数前缀已删） */}
       {phase === "ready" && items.length > 0 && (
-        <p className="nav-station-card__meta">
-          {multiGroup ? `${groups.length} 个站台分组 · ` : ""}
-          {lineCount} 条线路
-        </p>
+        <p className="nav-station-card__meta">{lineCount} 条线路</p>
       )}
 
       <div className="nav-station-card__list">
@@ -292,25 +413,15 @@ export default function StationCard({
 
         {phase === "ready" &&
           shownGroups.map((g) => {
-            const rows = g.items.map((it) => (
-              <div className="nav-station-card__row" key={`${it.route}-${it.dir}`}>
-                <RouteStack codes={[it.route]} colorOf={(c) => colors[c] ?? null} size="sm" />
-                <span className="nav-station-card__dir t-label t-muted">{it.dirLabel}</span>
-                <span className="nav-station-card__eta t-label">
-                  {it.kind === "lrt" && reloading
-                    ? "正在获取下一班…"
-                    : etaNode(it, nowMs, offsetRef.current)}
-                </span>
-              </div>
-            ));
+            const rows = g.items.map((it) => rowOf(it));
             // ★ 单分组（或无 platform）→ 不显示分组容器与子码行（向后兼容）
             if (!multiGroup) return <div key="single">{rows}</div>;
             const dirs = new Set(g.items.map((i) => i.dirLabel));
             return (
               <div className="st-group" key={g.platform || "__single__"}>
                 <div className="st-group__head">
-                  {/* ★ 子码连写、等宽同色；`/` 是分组号，不套线路胶囊 */}
-                  <span className="st-group__code">{g.platform || main}</span>
+                  {/* ★ 组名 = `标号/子码-站名`；`/` 是分组号，不套线路胶囊 */}
+                  <span className="st-group__code">{groupNameOf(g)}</span>
                   {dirs.size === 1 && <span className="st-group__dir">{g.items[0].dirLabel}</span>}
                 </div>
                 {rows}
@@ -324,6 +435,33 @@ export default function StationCard({
             <Icon name="caretDown" size={16} />
           </button>
         )}
+
+        {/*
+          ★ 通琴号分组（#2 / R1）：**最底部**，每个通琴号站一组，组名 `通琴号-<站名>`，无标号。
+          `data-tqh-append="1"` 为既有观测钩子（保留在组上，存在性判据不变）。
+          加载/失败态复用 `TqhStationTrips` 的降级文案（不出现实时/分钟字样）。
+        */}
+        {tqh &&
+          (tqh.phase !== "ready" ? (
+            <p className="tqh-trips__hint t-label t-muted" data-tqh-append="1">
+              {tqh.phase === "loading" ? "读取通琴号班次…" : "通琴号班次暂时取不到"}
+            </p>
+          ) : (
+            tqh.entries.map((e) => (
+              <div className="st-group" key={`tqh-${e.station.id}`} data-tqh-append="1">
+                <div className="st-group__head">
+                  <span className="st-group__code">通琴号-{e.station.name}</span>
+                </div>
+                <TqhStationTrips
+                  groups={e.groups}
+                  phase="ready"
+                  activeTripCode={tqh.activeTripCode ?? null}
+                  onPickTrip={tqh.onPickTrip}
+                  disabled={tqh.pickTripDisabled ?? false}
+                />
+              </div>
+            ))
+          ))}
       </div>
 
       <div className="nav-station-card__acts">

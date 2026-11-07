@@ -11,7 +11,9 @@
  *   `fromLng` `fromLat` `toLng` `toLat`（必填，GCJ-02）
  *   `fromLabel` `toLabel`（选填，展示名）· `fromKind` `toKind`（gps|poi|station|place）
  *   `fromCode` `toCode`（选填，如 place slug：home/school/hengqin/gate）
- *   `zone`（B/C|N/O|R）· `limit`（默认 `NAV_LIMIT_DEFAULT`）· `nocache=1`（绕过 `transit_cache`）
+ *   `zone`（B/C|N/O|R）· `limit`（默认 `NAV_LIMIT_DEFAULT`）
+ *   · `nocache=1` —— ★ 2026-11-06（问题 #6）语义已收窄：主调用**本来就每次真实调高德**，
+ *     本参数现在表示「**连失败兜底也不要读** `transit_cache`」（宁失败不给旧拓扑）。
  *   `prefs`（可选：`balanced` 默认 | `fewer_transfers` | `less_walk`；**非法值回落 `balanced`**）
  *   `lrtFirst`（可选：`1`/`true` ⇒ **轻轨优先**置顶；**非法值回落 false**，不 400 —— v3.3.0 · AC-105）
  *
@@ -21,6 +23,18 @@
  *
  * 鉴权：v3.6.0 起 middleware **全站公开**（口令门与白名单已拆）⇒ 本接口匿名可调。
  * 幂等：只写 `transit_cache`（缓存，属正常）、`dsat_call_logs`（记账，属正常）。
+ *
+ * ── ★ 2026-11-06（问题 #6 · 杜绝实时巴士数据走缓存）──────────────────────
+ *   · 高德 transit：**每次请求都真实调用**（`stats.transitFromCache` 正常恒 false）；
+ *     `transit_cache` 只在真实调用**两次都失败**时兜底读拓扑，此时
+ *     `stats.transitCacheFallback = true`、`stats.transitFromCache = true` —— 两者必须一起看：
+ *       `fromCache=true & cacheFallback=false` ⇒ 不该出现的组合（说明有回退路径在读缓存）
+ *       `fromCache=true & cacheFallback=true`  ⇒ 高德此刻不可用（查配额/网络，不是正常态）
+ *   · DSAT 报站：`live.ts#queryBusBucket` 用 `force=true` **穿透 5s 进程缓存** ⇒
+ *     `generatedAt`（及 cards 里的实时字段）就是本次请求真实取数时刻，可直接当「数据时刻」展示。
+ *   · 静态索引（`recommend/query.ts`）60s 内复用，但**不含任何实时字段**（见 04-缓存排查.md C4）。
+ *   · 全链路上游 `fetch` 均 `cache:"no-store"`（`amap/transit.ts:554`、`dsat/client.ts:130`），
+ *     本路由自身也是 `no-store` + `force-dynamic` ⇒ 不存在浏览器/CDN/Next Data Cache 的中间层。
  */
 import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/lib/db";

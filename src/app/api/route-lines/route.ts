@@ -20,6 +20,7 @@
 import { NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
 import { API_ERROR } from "@/lib/http/errors";
+import { lineNameOf } from "@/lib/route-label";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -77,8 +78,12 @@ export async function GET() {
         lines: rows.map((r) => ({
           code: r.code,
           kind: r.kind === "lrt" ? "lrt" : "bus",
-          // 轻轨标签去掉 `LRT-` 前缀（与站点卡口径一致：只显示中文名）
-          label: r.kind === "lrt" ? r.code.replace(/^LRT-/, "") : r.code,
+          // 轻轨标签走统一口径 `lineNameOf()`：剥 `LRT-` 前缀 **并做简→繁转换**
+          // ★ 2026-11-06（Q-1 缺陷修复）：原先是 `r.code.replace(/^LRT-/, "")`，
+          //   只剥前缀不转字 ⇒ 「全部线路」面板的轻轨 chip 显示简体 `氹仔线`，
+          //   而同一屏其它位置（`RouteStack` 走 `lineNameOf`）是繁体 `氹仔線`。
+          //   同一条线两种写法会让用户以为是两条线。**不要再就地写 replace。**
+          label: lineNameOf(r.code),
           color: r.color ?? "#276299",
         })),
       },

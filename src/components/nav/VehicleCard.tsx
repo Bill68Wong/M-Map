@@ -23,6 +23,12 @@
  *   · `nextStop` 传了且**没有精确区间**才画「下一站」行 —— `interval.to` 本身就是下一站，
  *     两者同时画就是同一件事说两遍。
  *
+ * ── ★ 2026-11-06（#6 站序弹窗）：再加两个**可选**槽位（同一条纪律：不传 = 零变化）──
+ *   `company`（运营商：澳巴 / 新福利）· `stopsAwayText`（距终点还有几站，文案由调用方算）。
+ *   · 两者**只有站序弹窗里的巴士卡**会传（负责人要求那张卡给「车牌、运营商、状态、
+ *     还有几站」四件事）；地图车卡（`NavShell`）不传 ⇒ 行结构与 v3.6.1 完全一致。
+ *   · 只复用既有 `.nav-vehicle-card__row / __k / __v` ⇒ **零新增 CSS**。
+ *
  * ── 设计裁定（设计师已论证，务必遵守）────────────────────────────────
  *   「行驶区间」**只表方向**：实心点 →（虚线）→ 空心点。
  *   **不做「已行进进度」填充** —— 接口只给 from→to，画进度是**伪造精度**。
@@ -41,8 +47,7 @@ export interface VehicleStopRef {
   name: string;
 }
 
-export interface VehicleCardProps {
-  vehicle: VehicleLite;
+export interface VehicleCardProps {  vehicle: VehicleLite;
   /** 合并组内车辆数（>1 时提示） */
   count?: number;
   /** 数据取得时间（ISO 字符串，来自响应 `fetchedAt`） */
@@ -59,6 +64,19 @@ export interface VehicleCardProps {
   atStation?: VehicleStopRef | null;
   /** ★ v3.6.1：下一站（**可选**；不传或已有精确区间时不画该行）。 */
   nextStop?: VehicleStopRef | null;
+  /**
+   * ★ 2026-11-06（#6 站序弹窗）：**运营商**（`澳巴` / `新福利`，已由调用方归一成中文）。
+   *   不传 ⇒ 与 v3.6.1 的行结构**逐字节一致**（本卡被地图车卡/站序弹窗共用，
+   *   不能因为一处要补信息就把所有调用方都改成多一行）。
+   *   ⚠️ 只有站序弹窗里的巴士卡传它 —— 负责人明确要求那张卡显示运营商
+   *      （地图车卡自 v2.10.1 起按用户口径「运营商不再显示」，那条口径不变）。
+   */
+  company?: string | null;
+  /**
+   * ★ 2026-11-06（#6 站序弹窗）：**距本方向终点还有几站**的一句话（如「还有 3 站到 氹仔碼頭」）。
+   *   由调用方算好（它才知道站序全长），本卡只负责渲染一行 —— 计算不进展示组件。
+   */
+  stopsAwayText?: string | null;
   onClose: () => void;
 }
 
@@ -88,6 +106,8 @@ export default function VehicleCard({
   lineColor,
   atStation,
   nextStop,
+  company = null,
+  stopsAwayText = null,
   onClose,
 }: VehicleCardProps) {
   const state = vehicle.status;
@@ -181,6 +201,26 @@ export default function VehicleCard({
         </div>
 
         {/* ★ v3.6.0（AC-20）：原「车速 km/h」行已删除 —— 该字段延迟极大、不可信，不再作为任何参考 */}
+
+        {/* ★ 2026-11-06（#6）：运营商（只有站序弹窗的巴士卡传；不传则整行不存在） */}
+        {company && (
+          <div className="nav-vehicle-card__row">
+            <span className="nav-vehicle-card__k nav-vehicle-card__k--nowrap t-label">
+              <Icon name="bus" size={16} /> 运营商
+            </span>
+            <span className="nav-vehicle-card__v">{company}</span>
+          </div>
+        )}
+
+        {/* ★ 2026-11-06（#6）：距终点还有几站（文案由调用方算，见 `stopsAwayText`） */}
+        {stopsAwayText && (
+          <div className="nav-vehicle-card__row">
+            <span className="nav-vehicle-card__k nav-vehicle-card__k--nowrap t-label">
+              <Icon name="destination" size={16} /> 到终点
+            </span>
+            <span className="nav-vehicle-card__v">{stopsAwayText}</span>
+          </div>
+        )}
 
         {/* ★ v3.6.1：当前站（拿不到就不画这一行，绝不显示占位破折号） */}
         {showAt && at && (

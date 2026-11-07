@@ -56,7 +56,53 @@ import { remainFromIdxOf, segRemainSecOf } from "@/lib/nav/track";
 const EMPTY_WALK_STEPS: WalkStep[] = [];
 /** 顶部跟随横幅高度（px）—— 与 `--walkturn-h` 同值，取景中带计算用（改多行须同步上调） */
 const WALKTURN_H = 64;
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ★ 修复批 #10（2026-11-06）：候车期「自动重算赶车档」的三条阈值（R4 裁决）
+   ─────────────────────────────────────────────────────────────────────────
+   三条**同时**满足才自动重算（点刷新那次不看这三条，必算）：
+     ① 位移 ≥ `CATCH_RECALC_MIN_MOVE_M`；
+     ② 距上次重算 ≥ `CATCH_RECALC_MIN_GAP_MS`；
+     ③ 定位精度 ≤ `CATCH_RECALC_MAX_ACC_M`。
+
+   ── 为什么是 40m（依据，不是拍脑袋）─────────────────────────────────────
+     步行段 σ ≈ 10m（`coarse: false`，见本文件 `useUserFix` 调用处的 I0 注释：
+     粗定位 σ ≈ 50m 已全程关闭）⇒ 3σ = 30m 是**噪声下限**，低于它"位移"可能全是抖动。
+     取 40m = 3σ + 余量 ⇒ 一次自动重算至少覆盖 4 个 σ 的真实移动。
+   ── 为什么是 20s ──────────────────────────────────────────────────────
+     与既有节拍对齐：车辆帧 `POLL_MS = 12s`、`/api/station/eta` 服务端微缓存 20s
+     （`route.ts:63`）。取 20s ⇒ 最多 3 次/分，且**不会穿透**服务端缓存（不会白打 DSAT）。
+   ── 为什么是 30m 精度 ─────────────────────────────────────────────────
+     3σ 判据的同一口径：精度差于 30m 时"位移 ≥ 40m"无法与噪声区分 ⇒ 宁可不算
+     （保持上一次结论，比拿噪声重算出一个跳变的档位更诚实）。
+   ══════════════════════════════════════════════════════════════════════════ */
+const CATCH_RECALC_MIN_MOVE_M = 40;
+const CATCH_RECALC_MIN_GAP_MS = 20_000;
+const CATCH_RECALC_MAX_ACC_M = 30;
+
+/** 实时赶车档的空态（稳定引用，避免每次渲染换新对象） */
+const CATCH_LIVE_IDLE: { tier: CatchTier | null; text: string; seq: number } = {
+  tier: null,
+  text: "",
+  seq: 0,
+};
 import RouteLinesSheet from "./RouteLinesSheet";
+import LineStopsSheet from "./LineStopsSheet";
+/** ★ 2026-11-06（修复批 #4/#5a）：澳门巴士 / 轻轨的线路站序三档弹窗（前端 C 产出） */
+import RouteStopsSheet from "./RouteStopsSheet";
+import TqhStationCard from "./TqhStationCard";
+import { loadTqhTripPath, useTqhLines } from "./tqh-lines";
+import {
+  sharedBusMainCodes,
+  stationMapOf,
+  tqhEntriesAtBusStation,
+  tqhEntriesAtStations,
+  tripsOfRouteNo,
+  tripStationIds,
+  type TqhSegment,
+  type TqhStation,
+  type TqhTrip,
+} from "./tqh-model";
 import RoutePanel from "./RoutePanel";
 import RouteSheet from "./RouteSheet";
 import SearchSheet, { type QuickPair } from "./SearchSheet";
@@ -75,24 +121,46 @@ import { useRideTracking, type RidePhase, type RideTrackView } from "./useRideTr
  * ⚠️ 值本身必须由**本文件（会话层）**持有：放 `NavDetailBody` 会随面板重挂载丢状态
  *   （peek → detail 回来标签又出现）。
  */
-import { CatchTagLatchContext } from "./NavDetailBody";
+import { CatchTagLatchContext, BoardingLiveContext, type BoardingLiveValue } from "./NavDetailBody";
 /**
  * ★ 2026-11-05：「人确实在车上」判据（`riding` 语义变更后的唯一判据真源）。
  *   与 `NavDetailBody.infoMode` **必须**共用同一份——两边各写一套必然漂。
  */
 import { gaveUpBusOfRide, ridingRealOfRide } from "./riding-real";
 import { useNavRemaining } from "./useNavRemaining";
+/**
+ * ★ 修复批 #9（2026-11-06）：**候车期**的实时报站通道（未上车时 `/api/nav/remaining` 被刻意排除，
+ *   见 `useNavRemaining.ts` 的 `enabled` 注释 —— 那是正确的排除，本 hook 是**另一条**通道）。
+ */
+import { useBoardingEta } from "./useBoardingEta";
+/** ★ 修复批 #10（2026-11-06）：候车期「怎样走才能赶上」的实时重算（纯函数 + 单点算法） */
+import { catchUpLive } from "@/lib/nav/catch-up-live";
+/** ★ 修复批 #10：档位重算要用的常速步行速度 —— 唯一来源是 `WALK_BASE_M_PER_MIN`（= 84），不许自造 */
+import { WALK_BASE_M_PER_MIN, type CatchTier } from "@/lib/recommend/types";
+/** ★ 修复批 #10：剩余步行米数（未跟随态也能算）—— 与步行横幅/地图三线**同一个**投影函数 */
+import { progressOnPath } from "@/lib/walk/follow";
 import { useUserFix } from "./useUserFix";
-import { useNavFrame } from "./useNavFrame";
+import { useNavFrame, type FrameBox } from "./useNavFrame";
 /* ★ 步行路径重算的防连点冷却（现成常量，勿新写数字） */
 import { COOLDOWN_WALK_SEC, useCooldown } from "./useCooldown";
-import { detentIndex, detentTopsPx, readSafeTopPx, type Detent } from "./sheet-detents";
+import {
+  detentIndex,
+  detentTopsPx,
+  readSafeBottomPx,
+  readSafeTopPx,
+  tqhDetentTopsPx,
+  type Detent,
+} from "./sheet-detents";
 import { unionBox } from "@/lib/nav/route-overview";
 import { mainOf } from "@/lib/nav/track";
+/** ★ 修复批 #7：线路标签统一口径（巴士 `26` / 轻轨官方繁体 `氹仔線`，都不带中文后缀） */
+import { lineNameOf } from "@/lib/route-label";
 import { useCombos } from "@/lib/favorites/useCombos";
 import { endpointOf } from "@/lib/favorites/types";
 import type { RecommendCard } from "@/lib/recommend/types";
 import type { NavPoint } from "@/lib/nav/types";
+/** ★ 2026-11-06（#5a）：站序接口响应类型（纯 type，无 pg 依赖） */
+import type { RouteStopsOk, RouteStopsResp } from "@/lib/line/line-shared";
 
 const MY_LOCATION = "我的位置";
 /**
@@ -100,6 +168,16 @@ const MY_LOCATION = "我的位置";
  * 只有一个消费点：下面 `stage` 的 `useState` 初始化函数（读到即删）。
  */
 const SS_SEARCH_RETURN = "mmap.search.return";
+/**
+ * ★ 2026-11-06（修复批 #3）：**稳定空集** —— 「通琴号标全隐」的白名单值。
+ * 必须是模块级常量：`TqhStationLayer` 的 `plan` 用它做依赖，每次新建 Set 会无谓重建 marker。
+ */
+const EMPTY_ID_SET: ReadonlySet<number> = new Set<number>();
+/**
+ * ★ 2026-11-06（修复批 #6）：**稳定空集**（字符串版）—— 「巴士站全隐」的白名单值。
+ * 同上：`NavMap` 的巴士站点图层把它放进 effect 依赖，必须是模块级常量。
+ */
+const EMPTY_CODE_SET: ReadonlySet<string> = new Set<string>();
 /** 底层舞台：全屏地图 / 全屏搜索 / 半屏可出发 */
 type Stage = "map" | "search" | "panel";
 
@@ -186,6 +264,42 @@ export default function NavShell({
   const rv = useRouteVehicles();
   const favs = useCombos();
 
+  /* ══ 通琴号（TQH）会话状态 ══════════════════════════════════════════════
+     一次只可能"看一班" ⇒ 单个 `tqhTrip` 就够，不需要 tripCode 集合。
+       · `tqhStopsOpen` 与 `tqhTrip` 分开：三档弹窗可被拖到 peek（只留头部一行），
+         但**班次没变**（地图上的线与高亮必须还在）；
+       · `tqhStation` 只装**纯通琴号站**（无关联巴士站）的卡片；关联巴士站走既有
+         `station`（`StationCard`）在其下方追加通琴号块 —— 同一物理站位只开一张卡。
+
+     ⚠️ ★ 2026-11-06（修复批 #6 · P0）：**首屏就拉**（`useTqhLines(true)`，见 :296）。
+        旧口径是「打开选线弹窗 / 已选班次才拉」（`lineSheet || !!tqhTrip`）——
+        后果是**全新打开首页时 `tqh.data.stations` 恒空 ⇒ 地图上一个通琴号站都没有**，
+        必须先开一次路线详情再关掉（触发过一次 `lineSheet`）站点才出现，正是负责人报的现象。
+        负责人裁决「进首页就加载」：46KB 单飞一次 + 模块级缓存，弹窗 / 搜索 / 站卡 / 站序
+        四处共享同一份（切板块 0 请求），代价只落在**首次进入 /nav** 的一次请求。 */
+  const [tqhTrip, setTqhTrip] = useState<TqhTrip | null>(null);
+  const [tqhPath, setTqhPath] = useState<TqhSegment[] | null>(null);
+  const [tqhStopsOpen, setTqhStopsOpen] = useState(false);
+  /**
+   * ★ 2026-11-06（修复批 #1 / R1）：纯通琴号站卡片现在可以代表**同物理点合并组**
+   *   （`same_place_group` 已批 1 组：澳科大南门 ①②，地图只画 1 个标）。
+   *   ⇒ 存「本次点中的一整组站」而不是单个站；弹窗内按原站各自成组。
+   */
+  const [tqhStation, setTqhStation] = useState<{ stations: TqhStation[] } | null>(null);
+  const [safeBottom] = useState(() => readSafeBottomPx());
+  /**
+   * ★ 2026-11-06（修复批 #6 · P0「通琴号站点首页不显示」）：入参恒 `true`。
+   *
+   * 旧写法 `useTqhLines(lineSheet || !!tqhTrip)` 把「数据是否加载」绑在**交互**上
+   * ⇒ 首页从没打开过选线弹窗时 `stations` 为空 ⇒ 地图上没有通琴号站（负责人报的 P0）。
+   * 负责人裁决「进首页就加载」⇒ 恒 true；失败重试一次的策略在 hook 内（见 `tqh-lines.ts`）。
+   */
+  const tqh = useTqhLines(true);
+  const tqhReload = tqh.reload;
+  /** 通琴号站全量镜像（供稳定回调按 id 反查站对象，不进依赖数组） */
+  const tqhStationsRef = useRef<TqhStation[]>([]);
+  tqhStationsRef.current = tqh.data.stations;
+
   /* ── ★ 2026-09-23：单一 RouteSheet 宿主状态 ── */
   const [rsOpen, setRsOpen] = useState(false);
   const [pane, setPane] = useState<"recommend" | "detail">("recommend");
@@ -211,6 +325,68 @@ export default function NavShell({
     };
   }, []);
   const topsPx = useMemo(() => detentTopsPx(winH || 844, safeTop), [winH, safeTop]);
+
+  /* ── 通琴号派生值（全部 useMemo：地图两层的 effect 依赖它们，引用必须稳）── */
+  /** 该班次经过的站 id ⇒ 站点图层「本线白环 / 其余降透明」；null = 不进入高亮态 */
+  const tqhActiveIds = useMemo(() => (tqhTrip ? tripStationIds(tqhTrip) : null), [tqhTrip]);
+  /** 地图站点：数据到位才传，否则 null（图层空转，不画 0 个点也算一次清理） */
+  const tqhMapStations = useMemo(
+    () => (tqh.data.stations.length ? tqh.data.stations : null),
+    [tqh.data.stations],
+  );
+  /** 同标号全部班次（换向在客户端就地选，不额外请求） */
+  const tqhSiblings = useMemo(
+    () => (tqhTrip ? tripsOfRouteNo(tqh.data.trips, tqhTrip.route_no) : []),
+    [tqhTrip, tqh.data.trips],
+  );
+  /**
+   * ★ 2026-11-06（修复批 #1）：**双色巴士标集合**（主码）。
+   *
+   * 带 `bus_station_code` 的通琴号站不再单独画 marker ⇒ 通琴号信息改挂到巴士站标上：
+   * `NavMap` 给命中集合的巴士 marker 染「左蓝右粉」。实测 41 站 → 35 站台码 → **33 主码**
+   * （`/api/stations` 按主码去重，`M172/15`+`/16`、`T551/1`+`/2` 各共用一个蓝点）。
+   * 数据未到位 ⇒ `null` ⇒ 巴士层保持原样（降级安全）。
+   */
+  const tqhSharedCodes = useMemo<ReadonlySet<string> | null>(
+    () => (tqh.data.stations.length ? sharedBusMainCodes(tqh.data.stations) : null),
+    [tqh.data.stations],
+  );
+  /**
+   * 关联巴士站（有 `bus_station_code`）⇒ 在**既有**站卡下方追加的通琴号分组。
+   * ★ 2026-11-06（#2）：改为**按通琴号站逐个成组**（`通琴号-<站名>`），一个主码可能有多个
+   *   通琴号站（`M172` → F/G 两个站台；`T429` → 3 个）⇒ 不再合并成一坨。
+   */
+  const tqhEntriesForStation = useMemo(
+    () => (station ? tqhEntriesAtBusStation(tqh.data.trips, tqh.data.stations, station.code) : []),
+    [station, tqh.data.trips, tqh.data.stations],
+  );
+  /** 纯通琴号站卡片的分组（合并组 ⇒ 组内每个站各自成组，R1）—— 站对象已随 `tqhStation` 带齐 */
+  const tqhEntriesForTqhStation = useMemo(
+    () => (tqhStation ? tqhEntriesAtStations(tqh.data.trips, tqhStation.stations) : []),
+    [tqhStation, tqh.data.trips],
+  );
+
+  /**
+   * 选班次 ⇒ 取该班次逐段几何。
+   * ★ 换班次时**先清空**再取：AC-5 明确「不同站序不得复用同一几何」，
+   *   保留上一班的线会出现"线还是旧的、点已经变了"的错配帧。
+   * ★ 取不到（网络/接口失败）⇒ `null` ⇒ 不画线，但站点高亮与站序列表照常（不阻塞浏览）。
+   */
+  useEffect(() => {
+    if (!tqhTrip) {
+      setTqhPath(null);
+      return;
+    }
+    let alive = true;
+    setTqhPath(null);
+    void loadTqhTripPath(tqhTrip.trip_code).then((p) => {
+      if (!alive) return;
+      setTqhPath(p.segments.length ? p.segments : null);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [tqhTrip]);
 
   /** 面板打开期间隐藏搜索框（200ms 淡出，`prefers-reduced-motion` 瞬切） */
   useEffect(() => {
@@ -349,6 +525,88 @@ export default function NavShell({
     for (const strip of ov.body?.strips ?? []) for (const s of strip.stops) set.add(mainOf(s.code));
     return set.size > 0 ? set : null;
   }, [rsOpen, pane, ov.body]);
+
+  /**
+   * ★ 2026-11-06（修复批 #3 / R2）：**通琴号站点白名单**（与上面 `lineStops` 并列的第二个白名单）。
+   * 优先级（顺序即语义，不要重排）：
+   *   ① **导航态**（`navActive` = rsOpen && pane==='detail'）⇒ `null` = 不过滤 ——
+   *      R2 原话「导航模式现有白名单逻辑不动」，通琴号侧同样**一个字不改**；
+   *   ② 通琴号班次详情（`tqhTrip`）⇒ 本班站点；
+   *   ③ 巴士/轻轨线路详情（`rv.picked`）⇒ **空集** ⇒ 通琴号标全部隐藏
+   *      （R2：其余站点「含其它通琴号站、其它巴士站」一律隐藏）；
+   *   ④ 其余（浏览）⇒ `null`。
+   * ⚠️ 空集必须是**稳定引用**（`EMPTY_ID_SET`）：`TqhStationLayer` 的 `plan` 依赖它，
+   *    每次新建 Set 都会重建 96 个 marker。
+   * ⚠️ 必须放在 `navActive` 之后：`navActive` 是 `const`，提前引用会命中 TDZ。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * ★ 2026-11-06（修复批 #6c）：**已知边界，明示保持现状（负责人裁决）**
+   * ══════════════════════════════════════════════════════════════════════════
+   * 「**导航态 ∧ 已选班次**」（`navActive && tqhTrip`）同时成立时：
+   *   通琴号**不做本班过滤** —— 因为优先级 ① 先命中并返回 `null`（R2 裁决）。
+   *   实际表现 = 96 个通琴号标全画，只有非本班站降 0.42 透明（`tqhActiveIds`）。
+   *
+   * 为什么现在可以接受：
+   *   · `pickTqhTrip` 已加 `navActiveRef` 守卫 ⇒ **导航开始后无法再选班次**，
+   *     该组合只剩「用户导航**之前**就选了班次」这一条路径；
+   *   · 导航态不再绘制班次路径线（`tqhSegments={navActive ? null : tqhPath}`）
+   *     ⇒ 屏幕上不会出现第二条线，最伤人的那半已经消掉。
+   *
+   * ⚠️ **若将来要改（让 `tqhTrip` 优先于 `navActive`），必须由负责人重新裁决** ——
+   *   这不是"顺手调一下顺序"：该优先级同时决定**导航态的整体站点密度**，
+   *   而那是已验收行为（R2）。不要为了让班次模式更"正确"而顺手重排。
+   */
+  const tqhWhitelist = useMemo<ReadonlySet<number> | null>(() => {
+    if (navActive) return null;
+    if (tqhTrip) return tripStationIds(tqhTrip);
+    if (rv.picked) return EMPTY_ID_SET;
+    return null;
+  }, [navActive, tqhTrip, rv.picked]);
+
+  /**
+   * ★ 2026-11-06（#1 配套 / #3）：**本班次经过、但已被吸进巴士双色标的站**（主码）。
+   *
+   * 为什么需要：通琴号班次详情里 7 个站可能有 1 个是「关联巴士站」——它的独立 marker
+   * 已按 #1 取消（改由巴士双色标代表）⇒ 若不给那个巴士标加白环，用户会觉得"这班少了一站"。
+   * `NavMap` 命中该集合的巴士标加 `.nav-map__station--tqh-onroute`（只加环不改色）。
+   * 无班次视图 ⇒ `null`（不加环，与改前一致）。
+   */
+  const tqhActiveBusCodes = useMemo<ReadonlySet<string> | null>(() => {
+    if (!tqhTrip) return null;
+    const byId = new Map(tqh.data.stations.map((s) => [s.id, s]));
+    const set = new Set<string>();
+    for (const st of tqhTrip.stops) {
+      const s = byId.get(st.station_id);
+      const code = String(s?.bus_station_code ?? "").trim();
+      if (code) set.add(/^[A-Za-z]+\d+/.exec(code)?.[0] ?? code);
+    }
+    return set.size ? set : null;
+  }, [tqhTrip, tqh.data.stations]);
+
+  /**
+   * ★ 2026-11-06（修复批 #6 · P0「通琴号路线模式未隐藏其它站点」）：**巴士站点层的白名单**。
+   *
+   * ── 病根 ────────────────────────────────────────────────────────────────
+   *   上面 `tqhWhitelist` 只控制**通琴号图层** ⇒ 进班次查看模式（`tqhTrip` 非空）时，
+   *   通琴号的其它站被过滤掉了，但**巴士站点层完全没有过滤** ⇒ 满屏巴士站还在。
+   *
+   * ── 现口径（负责人裁决「全部隐藏」）──────────────────────────────────────
+   *   · 导航态（`navActive`）⇒ `null` = 不管 —— 巴士层白名单另有其道（`lineStops` /
+   *     本线 `routeStops`），R2 已明确「导航模式既有白名单逻辑不动」，本轮不许改；
+   *   · 非班次模式 ⇒ `null` = 不管（浏览 / 线路详情的既有行为一字不改）；
+   *   · 班次模式 ⇒ **只留本班次关联的巴士主码**（`tqhActiveBusCodes`：本班有站被吸进
+   *     双色标的那些。它们必须留下，否则用户会觉得「这班少了一站」）；
+   *   · 班次模式 + 本班没有任何关联巴士站 ⇒ `EMPTY_CODE_SET`（**空集**）⇒ 巴士站全隐。
+   *   ⇒ 效果：只剩「本班经过的通琴号整圆标 + 关联巴士双色标」，退出即恢复。
+   *
+   * ⚠️ 空集/单例都必须是**稳定引用**（空集走模块级常量）：`NavMap` 把它放进站点图层的
+   *    effect 依赖，每次新建 Set 会把全量巴士 marker 重建一遍。
+   */
+  const tqhBusWhitelist = useMemo<ReadonlySet<string> | null>(() => {
+    if (navActive) return null;
+    if (!tqhTrip) return null;
+    return tqhActiveBusCodes ?? EMPTY_CODE_SET;
+  }, [navActive, tqhTrip, tqhActiveBusCodes]);
 
   /**
    * ★ v3.2.0（需求 4/7 / AC-74/79）：GPS 通道 —— **`enabled` 扩到「地图页常开」**（浏览/选点/选路线/导航
@@ -558,6 +816,14 @@ export default function NavShell({
     nextIdx: remainFromIdxOf(ride.prog),
     frameTs: ride.lastVehicleTs,
   });
+  /**
+   * 稳定引用（`useNavRemaining` 内 `refresh` 是 `useCallback([])`、身份恒定）。
+   * 单独取出来是为了让下面 `reloadRemain` 的依赖数组干净 —— `navRemain` 本体每次渲染都是
+   * 新对象，放进依赖会让回调身份每帧变（本项目 `fix` 死循环那条老教训）。
+   */
+  const navRemainRefresh = navRemain.refresh;
+  /** ★ 修复批 #9：车辆帧刷新（步行段 `track` 为 `null` ⇒ `RouteSheet` 调不到它，见 `reloadRemain`） */
+  const rideRefresh = ride.onRefresh;
 
   /* ══════════════════════════════════════════════════════════════════════
      ★ T1 · 一条导航流（步行出发段 → 乘车 → 步行到达段）
@@ -722,6 +988,43 @@ export default function NavShell({
     setWalkVersion((v) => v + 1);
   }, [userFixR.fix, walkSeg, activeWalk?.phase, walkFollow.phase]);
 
+  /* ══════════════════════════════════════════════════════════════════════
+     ★ 修复批 #9 / #10（2026-11-06）：**候车实时通道**的计数与基线
+     ─────────────────────────────────────────────────────────────────────
+     为什么这几行必须写在 `endWalk` **之前**：收段（到达上车站 / 结束导航）时
+     「本段已重算几次」必须归零 —— 与 `data-walk-recalc` 完全同一个道理
+     （`data-walk-*` 残留会让断言把"已结束"读成"还在走"，本批新增的属性同理）。
+     ══════════════════════════════════════════════════════════════════════ */
+  /** 实时赶车档（`tier === null` / `text === ""` ⇒ `NavDetailBody` 回落规划快照） */
+  const [catchLive, setCatchLive] = useState<{ tier: CatchTier | null; text: string; seq: number }>(
+    CATCH_LIVE_IDLE,
+  );
+  /** 最近一次重算的触发者（观测钩子 `body[data-catch-why]`：`refresh` / `walk`） */
+  const [catchWhy, setCatchWhy] = useState<"refresh" | "walk" | "">("");
+  /** 「要求重算」的意图计数（→1 才开始算；换段/退出归零 ⇒ 在途响应自动作废） */
+  const [catchIntent, setCatchIntent] = useState(0);
+  /** 成功重算计数（渲染必须纯 ⇒ ref 累加，再随结果进 state） */
+  const catchSeqRef = useRef(0);
+  /**
+   * 上一次重算的**基线**（`at` = 发起时刻，`remainM` = 当时的剩余步行米数）。
+   * ⚠️ 基线在**发起时**写，而不是「算完时」写：否则请求失败那条路上 `last` 永远不更新，
+   *   40m 的判据会**每帧成立** ⇒ 变成每帧一次 DSAT 请求（比轮询更糟）。
+   */
+  const lastCatchRef = useRef<{ at: number; remainM: number } | null>(null);
+
+  /** 重算状态归零（唯一出口：收段 / 结束会话） */
+  const resetCatchLive = useCallback(() => {
+    catchSeqRef.current = 0;
+    lastCatchRef.current = null;
+    setCatchLive(CATCH_LIVE_IDLE);
+    setCatchWhy("");
+    setCatchIntent(0);
+    if (typeof document !== "undefined") {
+      document.body.removeAttribute("data-catch-recalc");
+      document.body.removeAttribute("data-catch-why");
+    }
+  }, []);
+
   /**
    * ★ T1：**收步行段**（真出口用）。
    *   必须一次清干净三件：`walkSeg`（横幅/折线/取景）、`donePathRef`（累积轨迹）、
@@ -741,7 +1044,202 @@ export default function NavShell({
     setRecalcKind("");
     setRecalcSeq(0);
     autoRecalcRef.current = false;
-  }, []);
+    /** ★ 修复批 #9/#10：候车实时重算的计数同属「本段」，一起归零（含 DOM 钩子） */
+    resetCatchLive();
+  }, [resetCatchLive]);
+
+  /* ══════════════════════════════════════════════════════════════════════
+     ★ 修复批 #9（2026-11-06）：**候车期实时报站**（未上车时唯一有效的实时通道）
+     ─────────────────────────────────────────────────────────────────────
+     ── 为什么不能复用 `useNavRemaining`（再强调一次，别合并）───────────────
+       服务端 `remaining.ts` 假设「用户已在 `legIndex` 段的车上」
+       （`rides[legIndex].waitMin` 视为已发生、不计入剩余，下游循环从 `legIndex+1` 起）
+       ⇒ 在 boarding 调用会**漏掉当前段候车（典型 3~9 分钟）**，显示比实际偏短。
+       所以 `useNavRemaining` 的 `enabled` 排除 boarding 是**对的**，别改它。
+     ── 本通道只回答一件事：我要坐的这班车，现在还有几站 / 约几分到本站 ──────
+       数据源 = `/api/station/eta`（站点信息卡在用，`fetchStationLive` 与详情页报站同源）。
+     ── 站台码从哪来（方向判定的唯一依据）────────────────────────────────
+       `ov.body.strips[0].stops[0].code` —— 服务端 `buildStrips` 用 `segmentsOf()` 解析出的
+       **本段实际方向**的首站（`lib/nav/strips.ts:65-68`），形如 `M9/2`；
+       两方向站台码不同 ⇒ 与 `items[].platform` 精确比对即可定方向。
+       （只按 `route` 匹配会取到隔壁站台/反向车的「还有 3 站」——`useLazyEta.ts` 踩过。）
+     ══════════════════════════════════════════════════════════════════════ */
+  /** 上车站台码（`null` ⇒ hook 回落 `card.rides[0].board` 主码，方向只能靠唯一命中判） */
+  const boardPlatform = ov.body?.strips?.[0]?.stops?.[0]?.code ?? null;
+  /**
+   * 「还没上车」= 候车/步行去站（`boarding`）或尚未开始（`off`）。
+   * ⚠️ 上车后必须关：那时「到本段下车站」由 `post` 行 + `useNavRemaining` 负责，
+   *   两条通道同时开着必然互相盖（本项目「两个真相」型缺陷的老配方）。
+   */
+  const boardEtaEnabled = !hasEnteredRiding.current && ride.phase !== "riding" && ride.phase !== "done";
+
+  const boardingEta = useBoardingEta({
+    card: pane === "detail" ? detailCard?.card ?? null : null,
+    open: rsOpen && pane === "detail",
+    enabled: boardEtaEnabled,
+    boardPlatform,
+  });
+  const boardingEtaRefresh = boardingEta.refresh;
+  const boardingEtaFetching = boardingEta.fetching;
+  const boardingEtaLive = boardingEta.live;
+  const boardingEtaSeq = boardingEtaLive?.seq ?? 0;
+  const boardingEtaMin = boardingEtaLive?.etaMin ?? null;
+
+  /**
+   * ★ 修复批 #10（2026-11-06）：**剩余步行米数**（从用户实时位置到上车站，沿步行路径）。
+   *
+   * 三档取值（全部复用既有实现，不新造几何）：
+   *   ① 正在跟随出发段 ⇒ `walkFollow.progress.remainM`（与地图三线/横幅同源，带单调 + 死区）；
+   *   ② 其余情况（预览 / 已收段 / 尚未开始）⇒ 用**同一个** `progressOnPath` 现投影一次；
+   *   ③ 连步行几何都没有（导航未取到 `/api/walk-route`）⇒ `null`（判不出来 ⇒ 不重算，保持快照）。
+   *
+   * ⚠️ 为什么不用「用户到站台的直线距离」：直线 ≤ 路径 ⇒ 剩余步行时间被**低估** ⇒
+   *   档位偏乐观（乘客被告知"慢慢走也能赶上"而实际要跑）。宁可 `null` 走回落。
+   * ⚠️ `progressOnPath` 在无定位/低精度时返回**全程米数**（保守侧）—— 正是想要的：
+   *   定不到位置就当作"还没开始走"，不会凭空乐观。
+   */
+  const walkOutSteps = walkRoute.out.steps;
+  const walkOutTotalM = walkRoute.out.stepsTotalM;
+  const followingOut = walkSeg === "out" && walkFollow.phase === "following";
+  const followingRemainM = walkFollow.progress.remainM;
+  const followingLowAcc = walkFollow.progress.lowAccuracy;
+  const walkRemainM = useMemo(() => {
+    if (!walkOutSteps.length || !(walkOutTotalM > 0)) return null;
+    if (followingOut && !followingLowAcc) return Math.max(0, followingRemainM);
+    return Math.max(0, progressOnPath(walkOutSteps, walkOutTotalM, walkFix, null).remainM);
+  }, [walkOutSteps, walkOutTotalM, followingOut, followingLowAcc, followingRemainM, walkFix]);
+  /** 供回调/effect 读取最新剩余米数（它们不能把每帧变化的数放进依赖） */
+  const walkRemainRef = useRef<number | null>(walkRemainM);
+  walkRemainRef.current = walkRemainM;
+
+  /** 重算门（与 `boardEtaEnabled` 同源；`catchGateRef` 供稳定回调读取） */
+  const catchGate = boardEtaEnabled && (detailCard?.card.rides[0]?.kind ?? "bus") === "bus";
+  const catchGateRef = useRef(catchGate);
+  catchGateRef.current = catchGate;
+
+  /**
+   * **唯一**的重算入口（点刷新 / R4 位移触发共用）。
+   *
+   * 做三件事（顺序有意义）：
+   *   ① 写基线（`lastCatchRef`）—— 必须在**发起时**写，见 `lastCatchRef` 注释；
+   *   ② 意图 +1 —— 让「等报站回来」的那次 effect 知道这次刷新要算；
+   *   ③ 触发一次报站请求 —— 重算必须吃**新的**到站分钟，否则等于用旧数据换个说法。
+   */
+  const triggerCatch = useCallback(
+    (why: "refresh" | "walk") => {
+      if (!catchGateRef.current) return;
+      lastCatchRef.current = { at: Date.now(), remainM: walkRemainRef.current ?? -1 };
+      setCatchWhy(why);
+      setCatchIntent((n) => n + 1);
+      boardingEtaRefresh();
+    },
+    [boardingEtaRefresh],
+  );
+
+  /**
+   * 重算执行点（**唯一**）：等报站落地（或确认这次没拿到新值）后再算。
+   *
+   * 为什么不在 `triggerCatch` 里直接算：`triggerCatch` 里只有**上一轮**的到站分钟，
+   * 拿它算出来的档位与刷新前同源 ⇒ 又变成「刷新前后一字未变」（本批要修的就是这个）。
+   * `boardingEtaFetching` 在依赖里：请求在飞时不算，落地/flip 之后各算一次。
+   *   · 成功 ⇒ `etaSeq` 变 ⇒ 用新到站分钟算；
+   *   · 失败 ⇒ `fetching` 变 false、`etaSeq` 不变 ⇒ 用最近一次有效值 + 当前剩余距离算
+   *     （「点刷新必算一次」的兜底，档位仍随走得越近而变）。
+   */
+  useEffect(() => {
+    if (catchIntent === 0) return;
+    if (boardingEtaFetching) return;
+    if (!catchGate) return;
+    if (boardingEtaMin == null) return; // 无报站 ⇒ 保持现状（回落规划快照），不硬算
+    const remainM = walkRemainRef.current;
+    if (remainM == null) return; // 无步行几何 ⇒ 同上
+    const r = catchUpLive({
+      remainWalkM: remainM,
+      walkSpeedMPerMin: WALK_BASE_M_PER_MIN,
+      etaMin: boardingEtaMin,
+    });
+    catchSeqRef.current += 1;
+    setCatchLive({ tier: r.tier, text: r.text, seq: catchSeqRef.current });
+  }, [catchIntent, boardingEtaSeq, boardingEtaFetching, boardingEtaMin, catchGate]);
+
+  /**
+   * R4 自动重算：**位移 ≥ 40m ∧ 距上次 ≥ 20s ∧ accuracy ≤ 30m**（三条阈值见文件头常量）。
+   * 依赖里刻意放每帧都会变的 `walkRemainM` / `accuracy` —— 三条守卫都很便宜，
+   *   且**真正发起**的那一步（`triggerCatch`）会写基线 + 立刻把 `fetching` 置真
+   *   ⇒ 不会在同一段位移里重复触发。
+   */
+  const fixAccuracy = userFixR.fix?.accuracy ?? null;
+  useEffect(() => {
+    if (!catchGate) return;
+    if (boardingEtaFetching) return; // 在飞 ⇒ 等这一轮（也防重复触发）
+    if (walkSeg !== "out") return; // 只有「走向上车站」这段有意义
+    if (walkFollow.phase !== "following") return; // 预览态没有可信位移
+    const last = lastCatchRef.current;
+    if (!last) return; // 基线由「点刷新」建立：没刷过就不自动算（不发无谓请求）
+    const remainM = walkRemainM;
+    if (remainM == null) return;
+    if (fixAccuracy == null || fixAccuracy > CATCH_RECALC_MAX_ACC_M) return; // ③
+    if (Date.now() - last.at < CATCH_RECALC_MIN_GAP_MS) return; // ②
+    if (Math.abs(last.remainM - remainM) < CATCH_RECALC_MIN_MOVE_M) return; // ①
+    triggerCatch("walk");
+  }, [
+    catchGate,
+    boardingEtaFetching,
+    walkSeg,
+    walkFollow.phase,
+    walkRemainM,
+    fixAccuracy,
+    triggerCatch,
+  ]);
+
+  /**
+   * 观测钩子 `body[data-catch-recalc="<N>"]` / `body[data-catch-why="refresh|walk"]`。
+   *
+   * ── 为什么**同名双写** `data-walk-recalc`（兼容层，读完再改）────────────────
+   *   验收脚本（`.verify/qa-w22-refresh9.mjs` 等）目前按 `body[data-walk-recalc]` 读「有没有重算」，
+   *   本批要修的 #10 就是「刷新前后标签一字未变，`data-walk-recalc` 也没出现」。
+   *   但那个属性**已被另一个语义占用**：`/api/walk-route` 的**路径重算额度**
+   *   （本文件上方 `data-walk-recalc` 写入点，格式 `auto|manual:N`）。
+   *   ⇒ 折中且不破坏原义的做法：
+   *     · **原义优先**：属性已是 `auto…` / `manual…` ⇒ 本 effect **不写**（那次路径重算才是它的本义）；
+   *     · 其余情况（本段没发生过路径重算）⇒ 写入本批的重算次数，供既有脚本读到值；
+   *     · 无论哪种情况，`data-catch-recalc` 都是本批次数的**权威**来源。
+   *   ⚠️ 不要改成「无条件覆盖」：那会让「自动/手动各 1 次」的额度断言读到赶车次数。
+   */
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (catchLive.seq <= 0) return;
+    document.body.setAttribute("data-catch-recalc", String(catchLive.seq));
+    if (catchWhy) document.body.setAttribute("data-catch-why", catchWhy);
+    const budget = document.body.getAttribute("data-walk-recalc");
+    if (!budget || (!budget.startsWith("auto") && !budget.startsWith("manual"))) {
+      document.body.setAttribute("data-walk-recalc", String(catchLive.seq));
+    }
+  }, [catchLive.seq, catchWhy]);
+
+  /**
+   * ★ 修复批 #9 / #10（2026-11-06）：**「刷新巴士数据」= 四条通道一起取**（缺一条就是旧缺陷）。
+   *
+   *   ① `navRemainRefresh()` —— `POST /api/nav/remaining`（全程剩余 / 到达时刻 / 纵条）；
+   *      ⚠️ 该通道在 `boarding` **不取数**（服务端算法假设已上车），这是**正确**的，
+   *      所以候车期点刷新时它安静地什么也不做 —— 由 ②③④ 补上「这一屏到底刷新了什么」。
+   *   ② `rideRefresh()` —— 车辆帧（`/api/route-vehicles`）。
+   *      ⚠️ 缺它的时候（**本次 QA 现场**）：步行段给详情面板传的是 `track: null`
+   *      （见下方渲染处 `track: walkActive ? null : trackView`），而 `RouteSheet` 的刷新只调
+   *      `detail.track?.onRefresh` ⇒ 步行段点刷新**从不拉车辆帧** ⇒ 地图上 0 个 `.vbus-wrap`。
+   *      这里显式补一次（内部 5s 冷却门控 + 轻轨段早退，连点在 `cooling` 处被拦，不会双发：
+   *      乘车态下 `RouteSheet` 先调 `track.onRefresh` 起冷却，本次调用随即返回 false）。
+   *   ③④ 见 `triggerCatch`：候车报站（`/api/station/eta`，本批 #9 的修复点）+ 赶车档重算（#10）。
+   *      它自带门（`catchGate`）：已在车上 ⇒ 直接返回，不会多发一个请求。
+   *
+   * 为什么包一层而不是直接把 `navRemain.refresh` 传下去：`RouteSheet` 的 `reloadRemain`
+   *   是**唯一**的点击出口（`RouteSheet.tsx:363`），且它不在本批改动范围 ⇒ 只能在这层合流。
+   */
+  const reloadRemain = useCallback(() => {
+    navRemainRefresh();
+    rideRefresh();
+    triggerCatch("refresh");
+  }, [navRemainRefresh, rideRefresh, triggerCatch]);
 
   /**
    * ★ 本批（QA 钩子 · 负责人已批准）：**跳过步行段**的自动化入口。
@@ -1229,13 +1727,129 @@ export default function NavShell({
    *   **不清空面板**；非导航态保持原行为（同 Google Maps，卡片 z90 > 面板 z70）。
    */
   const onStationClick = useCallback((s: StationCardStation) => {
+    setTqhStation(null); // 两个浮层互斥：同屏两张卡会互相遮挡
     setStation(s);
     if (rsOpenRef.current && !navActiveRef.current) {
       setRsOpen(false);
       setStage("map");
     }
   }, []);
-  const onMapClick = useCallback(() => setStation(null), []);
+
+  /**
+   * ★ 2026-11-05（通琴号 R4）：点地图上的通琴号站点。
+   *
+   * ★ 2026-11-06（#1 / R1）口径变更：
+   *   · 带 `bus_station_code` 的 41 个通琴号站**已经没有自己的 marker** ——
+   *     它们由巴士层的**双色标**代表，点那个标走的是 `onStationClick`（巴士卡 + 底部通琴号分组）。
+   *   · 本回调现在只服务**纯通琴号站**（97 个，合并组后 96 个标），可能是
+   *     `same_place_group` 合并组（`ids.length > 1`，当前只有澳科大南门 ①②）
+   *     ⇒ 卡片里按原站各自成组。
+   * 两条路径都**不进入导航/路线态**，只关掉公交路线弹窗（否则卡片被 z70 面板压住）。
+   */
+  const onTqhStationClick = useCallback((s: TqhStation, ids: number[]) => {
+    const all = tqhStationsRef.current;
+    const list = ids
+      .map((id) => all.find((x) => x.id === id))
+      .filter((x): x is TqhStation => !!x);
+    setStation(null);
+    setTqhStation({ stations: list.length ? list : [s] });
+    if (rsOpenRef.current && !navActiveRef.current) {
+      setRsOpen(false);
+      setStage("map");
+    }
+  }, []);
+
+  /**
+   * ★ 2026-11-05（通琴号 R3）：选一张班次卡。
+   * 顺序即验收口径（AC-5）：**关弹窗 → 地图出线**。同时退出「巴士线路查看模式」，
+   * 两套路径同屏会被读成"这班车也走那条巴士线"。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * ★ 2026-11-06（修复批 #6c · 互斥 bug）：**导航进行中禁止跳班次视图**
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ── 病根（已核实可达，不是理论问题）──────────────────────────────────────
+   *   下面这个守卫此前**只有** `onPickLineFromCard` 有，`pickTqhTrip` 没有 ——
+   *   而两者出现在**同一张站点卡**上（`StationCard` 的线路行 / 底部的通琴号分组）
+   *   ⇒ 用户体验是「导航中点『巴士 26』没反应（有意设计），点『通琴号 A1』直接跳走」。
+   *   不报错、不崩，只是**同一张卡片里一行禁用、另一行不禁用** ——
+   *   这正是「沉默逻辑错误」的教科书形态：行为不一致，且没有任何视觉暗示。
+   *
+   * ── 为什么这条路真的走得通（三条入口逐一验过）──────────────────────────
+   *   · 品牌栏「查看路线」→ 选线弹窗：`NavBrandBar` 在 `navMode` 时整块不渲染 ⇒ 不可达；
+   *   · 顶部搜索条 → 通琴号板块：面板打开时 `body[data-sheet="open"] .nav-searchbar`
+   *     是 `pointer-events:none` ⇒ 不可达；
+   *   · **地图站点标 → 卡片 → 班次行：可达**。站点卡挂在 `.nav-card-overlay`（z90），
+   *     高于导航面板 `RouteSheet`（z70）⇒ 导航中点半屏地图带上的站点标，卡片照常弹出；
+   *     而导航态下 `onStationClick` / `onTqhStationClick` 的守卫是
+   *     「`rsOpen && !navActive` 才关面板」⇒ 导航态**故意保持面板**，卡片与面板同屏。
+   *   ⇒ 且这条路**极易误触**：导航态 `tqhWhitelist` 返回 `null`（R2 裁决）⇒
+   *     地图上本来就画着全部通琴号标，随手点一个就进卡片。
+   *
+   * ── 选中后本来会发生什么（四件事，两处与 #2 相反）──────────────────────
+   *   ① 通琴号层反转成「全画」：`tqhWhitelist` 的 `navActive` 分支先命中 ⇒ 96 个标全留、
+   *      只有非本班站降透明（#2 要的是「只剩本班站」）；
+   *   ② `TqhPathLayer`（z73）把班次线画在导航彩段（z72）**之上** ⇒ 屏幕上两条线，
+   *      用户会以为那是他正在坐的车；
+   *   ③ `LineStopsSheet`（z76）整屏盖住导航面板（z70）⇒ 「还要几站 / 下车提醒」全被埋掉；
+   *   ④ 巴士层不受影响（`tqhBusWhitelist` 的 `navActive` 分支也返回 `null`）。
+   *
+   * ── 现口径 ──────────────────────────────────────────────────────────────
+   *   与 `onPickLineFromCard` **逐字同形**：同一个裁决（导航中禁止跳另一套线路视图）
+   *   就该用同一个守卫，审查时一眼可比。
+   *   ⚠️ **只加守卫不够** —— 视觉禁用（`pickTripDisabled`）必须一起给，否则问题从
+   *     「跳走」变成「点了没反应」，只是换了个形态（同样是沉默逻辑错误）。
+   *     禁用位由 `StationCard` / `TqhStationCard` 的 `pickTripDisabled` 承载。
+   */
+  const pickTqhTrip = useCallback(
+    (t: TqhTrip) => {
+      if (navActiveRef.current) return;
+      setLineSheet(false);
+      setStation(null);
+      setTqhStation(null);
+      rv.exitLine();
+      setTqhTrip(t);
+      setTqhStopsOpen(true);
+    },
+    [rv],
+  );
+
+  /** 关闭站序弹窗 = 退出该班次的线路视图（清地图路径 + 站点高亮） */
+  const closeTqhStops = useCallback(() => {
+    setTqhStopsOpen(false);
+    setTqhTrip(null);
+  }, []);
+
+  /**
+   * ★ 2026-11-06（修复批 #4 / R3）：**站点卡里的线路行 → 进该线路的查看模式**。
+   *
+   * 只做「触发与传参」，弹窗本体由前端 C 的 `RouteStopsSheet` 提供：
+   * 打开它所需的唯一状态就是 `rv.picked`（`{code, kind, label, color, dir}`），
+   * 所以这里**不新增宿主 state** —— C 的组件用 `open={!!rv.picked}` + `line={rv.picked}` 即可。
+   *
+   * 三条纪律：
+   *   ① **导航进行中禁止跳走**（与「导航态点击不中断」一致）；`StationCard` 侧同时给视觉禁用态，
+   *      这里再兜一道，保证「点击无跳转、无报错」；
+   *   ② 与通琴号班次视图互斥（两套路径同屏会被读成"这班车也走那条巴士线"）；
+   *   ③ `label` 走 `lineNameOf()`：巴士 `26`（无「路」）/ 轻轨 `氹仔線`（官方繁体专名，R7）。
+   */
+  const onPickLineFromCard = useCallback(
+    (code: string, kind: "bus" | "lrt") => {
+      if (navActiveRef.current) return;
+      setStation(null);
+      setTqhStation(null);
+      setLineSheet(false);
+      setTqhStopsOpen(false);
+      setTqhTrip(null);
+      rv.pickLine({ code, kind, label: lineNameOf(code), color: colors[code] ?? "" });
+    },
+    [rv, colors],
+  );
+
+  const onMapClick = useCallback(() => {
+    setStation(null);
+    setTqhStation(null);
+  }, []);
 
   /** 车辆点击：打开车辆卡 + 收起面板（导航态不清面板） */
   const onVehicleClick = useCallback(
@@ -1298,12 +1912,283 @@ export default function NavShell({
     const leg = detailCard?.card.rides[ride.legIndex] ?? null;
     if (!leg) return null;
     return {
-      label: leg.kind === "lrt" ? `轻轨 ${leg.route.replace(/^LRT-/, "")}` : `${leg.route} 路`,
+      /**
+       * ★ 修复批 #7（R5/R7）：**线路标签只显示线号** —— 去掉「路」后缀。
+       * 统一走 `lineNameOf()`：巴士 `26` / `25B`（无「路」）、轻轨 `氹仔線`（官方繁体专名）。
+       * ⚠️ R5 的靶子是「`26 路` 这种码 + 量词后缀」；`氹仔線` 是不可拆的官方专名 ⇒ 合规。
+       *   （本行原来轻轨分支是 `轻轨 氹仔线`：多了中文前缀 + 简体「线」，与 `RouteStack`
+       *     的 `氹仔線` 两种写法并存 —— 一并按 R7 收敛成 `lineNameOf`。）
+       */
+      label: lineNameOf(leg.route),
       color: colors[leg.route],
       // ★ v3.7.0 S2（D5）：车辆卡上的「数据时间」只能取**车辆帧**时刻
       fetchedAt: ride.lastVehicleTs > 0 ? new Date(ride.lastVehicleTs).toISOString() : null,
     };
   }, [detailActive, detailCard, ride.legIndex, ride.lastVehicleTs, colors]);
+
+  /* ══ ★ 2026-11-06（修复批 #4 / #5a）：线路站序弹窗的**宿主取数** ══════════
+     `RouteStopsSheet`（前端 C）是**纯受控无请求**组件：它只吃 `stops / 线号 / 方向 / 档位`。
+     ⇒ 站序由本文件取（`GET /api/route-stops?code&dir`，静态数据 `s-maxage=3600`）。
+
+     三条口径：
+       ① `rv.picked.dir` 由 `NavMap` 读 `/api/route-shapes` 后回报，**首帧可能为空** ⇒
+          先按「无 dir」取（服务端选第一方向），dir 到位后自动重取一次（换了方向必须重取，
+          **禁止 `stops.reverse()`** —— 两方向站数与站台码都不同）；
+       ② 失败就空列表（弹窗只剩顶部行），不给假数据；
+       ③ 与导航面板 / 选线弹窗**互斥**（见下方挂载点的 `open` 条件）。
+
+     ★ 为什么用「快照 + open 开关」而不是条件渲染（前端 C 的明确要求）：
+       `useSnapSheet` 关闭态把 `translateY` 推到 `100dvh`（`useSnapSheet.ts:354`）+
+       `globals.css:9651` 的 `transform` 过渡 ⇒ **元素留在 DOM 才有收起动画**；
+       卸载 = 硬闪一下消失。安全性也已核过：关闭态整体移出视口 + `inert`
+       ⇒ 不占命中区、不可聚焦，不会与导航面板抢点击。
+     ⚠️ 因此快照**关闭时不清空**（要留最后一帧给动画），换线时才整体替换。 */
+  const [stopsSheet, setStopsSheet] = useState<{
+    kind: "bus" | "lrt";
+    code: string;
+    color: string | null;
+    directionLabel: string;
+    stops: RouteStopsOk["stops"];
+  } | null>(null);
+  const [stopsDetent, setStopsDetent] = useState<Detent>("half");
+  const pickedCode = rv.picked?.code ?? null;
+  const pickedDir = rv.picked?.dir ?? null;
+
+  /**
+   * ★ 2026-11-06（同线换向实测）：**「换向」不是「换线」，档位不得回弹**。
+   *
+   * `useRouteVehicles.reverse()` 的实现是 `setPicked({ ...cur, dir: other })`（`useRouteVehicles.ts:208`）
+   * ⇒ **对象身份变了、`code` 不变**，而本 effect 的依赖正是 `[rv.picked]` ⇒ 换向也会跑一遍。
+   * 若在此无条件 `setStopsDetent("half")`，用户在全屏看站序、点一下「换向」，
+   * 面板会**自己缩回半屏**（`useSnapSheet` 按 half 顶边重绘 translateY，260ms 可见下坠）。
+   * ⇒ 只有「身份键（kind+code）变化」或「关掉再打开同一个站序」才回 `half`；
+   *    单纯换向（身份键不变）保留用户当前的档位。
+   *
+   * ⚠️ 站序**仍清空**（换向后旧方向的站不允许留在屏上 —— 那才是真正的错配），
+   *    方向文案同步回「方向待定」，由 ② 取回新方向的站序后再落定。
+   *
+   * 🚩🚩 **为什么用「身份键」而不是 `dir`（后来者必看，否则极可能把人改回去）** 🚩🚩
+   *   本 effect 的整个存在理由 = 「换了一条线 ⇒ 身份字段要换成新的」。
+   *   而 **`dir` 变化恰恰是唯一「不该重置档位」的场景**（同一条线换向，用户还在看同一张站表）。
+   *   ⇒ 判据必须是 `kind:code`（身份），**绝不能**把 `dir` 算进去：
+   *     · 把 `dir` 加进比较键 ⇒ 换向也判为"换线" ⇒ 面板下坠回 half（就是本轮修掉的 bug，复发）；
+   *     · 把 `dir` 加进依赖数组（`[rv.picked, pickedDir]`）⇒ 换向多跑一次本 effect ⇒ 同上，
+   *       且会额外再清空一次站序（多闪一次空态）。
+   *   ⇒ `dir` 只归 ②（取数 effect）管。**两个 effect 的分工就是这么切的，别合并。**
+   */
+  const stopsKeyRef = useRef<string | null>(null);
+
+  /** ① 打开 / 换线：立刻换掉身份字段（站序先清空，等 ② 填），档位回 `half` */
+  useEffect(() => {
+    const p = rv.picked;
+    const key = p ? `${p.kind}:${p.code}` : null;
+    const prevKey = stopsKeyRef.current;
+    stopsKeyRef.current = key; // 关闭也要记账（否则「关掉再开同一条线」不会被判为重开）
+    if (!p) return; // 关闭 ⇒ 保留最后一帧（收起动画要元素在位）
+    setStopsSheet({
+      kind: p.kind,
+      code: p.code,
+      color: p.color || null,
+      directionLabel: "方向待定",
+      stops: [],
+    });
+    if (prevKey !== key) setStopsDetent("half"); // 换线 / 重开 ⇒ 回默认档；同线换向 ⇒ 不动档位
+  }, [rv.picked]);
+
+  /** ② 取站序（`dir` 到位后重取一次；只写回仍属于当前线路的快照，防串台） */
+  useEffect(() => {
+    if (!pickedCode) return;
+    let alive = true;
+    const qs = new URLSearchParams({ code: pickedCode });
+    if (pickedDir) qs.set("dir", pickedDir);
+    fetch(`/api/route-stops?${qs}`)
+      .then(async (r) => {
+        if (r.status === 404) return null; // 线路已不存在 ⇒ 不给假站序
+        if (!r.ok) return null;
+        return (await r.json()) as RouteStopsResp;
+      })
+      .then((j) => {
+        if (!alive) return;
+        const ok = j && j.ok ? j : null;
+        setStopsSheet((prev) =>
+          prev && prev.code === pickedCode
+            ? {
+                ...prev,
+                directionLabel: ok?.label ? `往 ${ok.label.to}` : "方向待定",
+                stops: ok?.stops ?? [],
+              }
+            : prev,
+        );
+      })
+      .catch(() => {
+        /* 静默：弹窗只剩顶部行（不编造假站序） */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [pickedCode, pickedDir]);
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   * ★ 2026-11-06（#5a 收尾）：**给地图的取景避让**
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * `stopsSheetOn` = 站序弹窗「应当打开」的唯一口径（选着线 + 无导航态 + 无选线弹窗）。
+   *   与挂载条件**有意不同**：挂载还要多一个 `stopsSheet` 快照（它由 effect 在下一批建立，
+   *   会晚一帧）。取景若等快照就会漏掉第一次 —— 而「第一次打开」正是必须取景的那次。
+   *   ⇒ 挂载用 `stopsSheet && stopsSheetOn`，取景用 `stopsSheetOn`（早一帧，正好）。
+   *
+   * `stopsSheetTopsPx`：三档顶边，**与弹窗自己算顶边用同一个函数**
+   *   （`tqhDetentTopsPx`，peek 档是 `winH−(96+safeBottom)` 而非导航口径的 80vh）。
+   *   ⇒ 弹窗画在哪，取景槽就避到哪。本文件因此**不出现任何档位像素常量**。
+   */
+  const stopsSheetOn = !!rv.picked && !navActive && !lineSheet;
+  const stopsSheetTopsPx = useMemo(
+    () => tqhDetentTopsPx(winH || 844, safeTop, safeBottom),
+    [winH, safeTop, safeBottom],
+  );
+  /**
+   * ⚠️ 只在**打开**时给值；其余场景 `null` ⇒ `NavMap` 走原 `setBounds` 路径（观感零变化）。
+   *   值随档位变化，但 `NavMap` 只读进 ref、**不进取景 effect 依赖** ⇒ 拖档不重新取景
+   *   （取景时机仍是 打开 / 换线 / 换向，见 `NavMap.tsx` 的 `stopsInsetTopRef`）。
+   */
+  const stopsInsetTop = stopsSheetOn
+    ? (stopsSheetTopsPx[detentIndex(stopsDetent)] ?? null)
+    : null;
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   * ★ 2026-11-06（修复批 #6b · #2 的需求补完）：**选中班次 ⇒ 视野装下整条班次线**
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * ── 为什么必须有（这不是新增需求）──────────────────────────────────────
+   *   #2 的原话是「选中一条路线时，该路线以外的所有站点隐藏，**仅展示该线途径的站点**」。
+   *   而首屏视野 ≈ 12.4 级、定位后 ≈ 14.47 级，都**低于**站点显示阈值
+   *   （`STATION_MIN_ZOOM = 15`）⇒ 选班次后只看到一条路径线、**一个站点都没有**，
+   *   「仅展示该线途径的站点」当场不成立（用户读到的是"这班车没有站"）。
+   *   ⇒ 取景是 #2 的组成部分，不是可选项。
+   *
+   * ── 怎么复用既有取景（**不新写算法**）──────────────────────────────────
+   *   走 `useNavFrame()` 的 `frame({ mode:"fit-box", box, slotTopPx })` —— 与
+   *   `RoutePanel` / 详情 pane 取景**同一条**已验证路径（`NavMap.applyView` 自算 zoom +
+   *   `panBy`，禁 `setBounds`/`setFitView`，见 `NavMap.tsx:944-1000`）。
+   *   ⇒ 本文件不出现任何 zoom 公式、也不碰相机。
+   *
+   * ── 槽位（遮挡）口径 ───────────────────────────────────────────────────
+   *   `slotTopPx` 取 `tqhDetentTopsPx(...)[detentIndex("half")]` —— 与 `LineStopsSheet`
+   *   **同一个函数**算顶边（该弹窗的初始档就是 `half`），与线路查看的 `stopsInsetTop`
+   *   完全同源。
+   *   ★ 为什么固定用 `half` 而不是弹窗当前档：`LineStopsSheet` 的 `detent` 是它**内部**
+   *     state，宿主读不到；而三档像素是**升序**（full 96~128 < half 50vh < peek 80vh），
+   *     `half` 的槽比 `peek` 更小 ⇒ 按 `half` 装下的内容在 `peek` 档**必然仍在可见区**，
+   *     绝不会被压住。宁可多缩一点，也不为了"刚好"去读一个跨组件的内部状态。
+   *
+   * ── 只在「刚选中」fit 一次（不许反复纠正）──────────────────────────────
+   *   `tqhFitRef` 记「本会话这一班已经装过的框」，两条闸门：
+   *     ① `code` 变了（选了**另一班** / 换向）⇒ 该 fit；
+   *     ② 同一班但**新框超出了已装框** ⇒ 该 fit 一次（真实原因只有一个：路径几何比站点
+   *        包围盒更大——站先到、逐段几何后到，这是数据到位的补正，不是抖动）。
+   *   ⇒ 用户自己拖地图 / 缩放**永不触发** refit（与 `useNavFrame` 的既有纪律一致）。
+   *
+   * ── 退出班次模式不强制复位 ─────────────────────────────────────────────
+   *   只把 ref 清空（下次选班重新计），**不下任何取景指令** —— 用户拖到哪就是哪，
+   *   与 `contextClose` / `exitLine` 的既有约定一致。
+   */
+  const tqhFitBox = useMemo<FrameBox | null>(() => {
+    const trip = tqhTrip;
+    if (!trip) return null;
+    const byId = stationMapOf(tqh.data.stations);
+    let minLng = Infinity;
+    let minLat = Infinity;
+    let maxLng = -Infinity;
+    let maxLat = -Infinity;
+    const push = (lng: number, lat: number) => {
+      if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
+      if (lng < minLng) minLng = lng;
+      if (lat < minLat) minLat = lat;
+      if (lng > maxLng) maxLng = lng;
+      if (lat > maxLat) maxLat = lat;
+    };
+    // ① 站点（先到；数据已随首屏加载，所以第一次 fit 就有框）
+    for (const st of trip.stops) {
+      const s = byId.get(st.station_id);
+      if (s) push(s.lng, s.lat);
+    }
+    // ② 逐段几何（后到；比站点包围盒更贴真实走向，用于「补正」那一次 refit）
+    for (const seg of tqhPath ?? []) for (const p of seg.polyline ?? []) push(p[0], p[1]);
+    if (!Number.isFinite(minLng)) return null;
+    return { minLng, minLat, maxLng, maxLat };
+  }, [tqhTrip, tqhPath, tqh.data.stations]);
+
+  /** 班次弹窗 `half` 档顶边（px）—— 取景槽的上边界，与弹窗自己算顶边同一个函数 */
+  const tqhFitSlotTop = useMemo(
+    () => tqhDetentTopsPx(winH || 844, safeTop, safeBottom)[detentIndex("half")],
+    [winH, safeTop, safeBottom],
+  );
+
+  /** 已装过的框（`code` + box）；退出班次模式即清空 */
+  const tqhFitRef = useRef<{ code: string; box: FrameBox } | null>(null);
+
+  useEffect(() => {
+    const code = tqhTrip?.trip_code ?? null;
+    if (!code) {
+      tqhFitRef.current = null; // 退出班次模式：清闸门，**不下取景指令**（不复位）
+      return;
+    }
+    /**
+     * ★ 导航态**不取景**：面板打开期间镜头归 `frameBox` / `stopsInsetTop` 那条链
+     *   （`RouteSheet` 的档位取景是已验收行为）。这里若也插一手，会出现
+     *   「进详情的同时地图又跳一次」——两个意图抢镜头，谁后跑谁生效，结果不可预测。
+     *   为什么这个分支真实可达：导航前就选了班次时 `tqhTrip` 仍在，而该班次的
+     *   逐段几何可能在导航**开始之后**才返回 ⇒ `tqhFitBox` 变引用 ⇒ 本 effect 重跑。
+     *   ⚠️ 不清 `tqhFitRef`：退出导航后若框仍未被覆盖，应当补装一次（闸门语义不变）。
+     */
+    if (navActiveRef.current) return;
+    if (!tqhFitBox) return; // 站与几何都还没有 ⇒ 等数据，不乱取景
+    const last = tqhFitRef.current;
+    const covered =
+      !!last &&
+      last.code === code &&
+      last.box.minLng <= tqhFitBox.minLng &&
+      last.box.minLat <= tqhFitBox.minLat &&
+      last.box.maxLng >= tqhFitBox.maxLng &&
+      last.box.maxLat >= tqhFitBox.maxLat;
+    if (covered) return; // 已经装下 ⇒ 不再纠正（用户拖动后更不会被打断）
+    tqhFitRef.current = { code, box: tqhFitBox };
+    /**
+     * `force: true` —— 选中班次是**显式意图**，必须解除让位锁（`followState="free"`）。
+     * 不加的话：真实路径是「先缩放/拖动地图找车 → 再点班次」，此时锁必然为 `free`
+     * ⇒ 取景被静默跳过、视野不动、零提示（需求未实现却无任何信号）。
+     * 语义与定位键（`locateTick` → `setFollowState("follow")`）一致；
+     * 线路查看模式本来就是直接走相机、不受锁约束 ⇒ 两者同权才谈得上「同一配方」。
+     */
+    frame({ mode: "fit-box", box: tqhFitBox, slotTopPx: tqhFitSlotTop, force: true });
+    /* 依赖用 `navActive`（布尔原值）而不是 `navActiveRef`（ref 变了不触发 effect）——
+       导航**结束**时要重新评估一次，否则「导航期间攒下的未装框」永远等不到补装。 */
+  }, [tqhTrip?.trip_code, tqhFitBox, tqhFitSlotTop, frame, navActive]);
+
+  /**
+   * ★ 修复批 #9 / #10（2026-11-06）：下发给 `NavDetailBody` 的**候车实时值**。
+   *   `eta` = 候车报站（`null` ⇒ 该组件回落 `card.rides[0].liveText`）；
+   *   `catch*` = 实时赶车档（`null` / `""` ⇒ 回落 `card.rides[0].tierText`）。
+   * 值只在「报站落地 / 重算完成」时换引用 ⇒ 不会因为每帧 GPS 抖动让详情层跟着重渲染。
+   */
+  const boardingLiveValue = useMemo<BoardingLiveValue>(
+    () => ({
+      eta: boardingEtaLive
+        ? {
+            text: boardingEtaLive.text,
+            stopsAway: boardingEtaLive.stopsAway,
+            etaMin: boardingEtaLive.etaMin,
+            seq: boardingEtaLive.seq,
+          }
+        : null,
+      catchTier: catchLive.tier,
+      catchText: catchLive.text,
+      catchSeq: catchLive.seq,
+    }),
+    [boardingEtaLive, catchLive],
+  );
 
   return (
     /**
@@ -1312,8 +2197,13 @@ export default function NavShell({
      *   中间还隔着 `RouteDetailPane`，Context 不受中间层传参写法影响。
      *   ⚠️ 值在渲染期读取（`hasEnteredRiding.current`）——它与「进入 riding 的那次 commit」
      *     同帧，故标签在**同一次 commit** 里就已从 DOM 移除。
+     *
+     * ★ 修复批 #9/#10：里面再包一层 `BoardingLiveContext`（候车实时值的下发通道）。
+     *   同一种模式、同一层挂载点 —— 中间两层（`RouteSheet` / `RouteDetailPane`）不在本批范围，
+     *   加 prop 要改它们，走 Context 只依赖 React 树。
      */
     <CatchTagLatchContext.Provider value={hasEnteredRiding.current}>
+    <BoardingLiveContext.Provider value={boardingLiveValue}>
     {/* ⚠️ 下面这段 `<section>` 及其子树的缩进**刻意保持原样**（不给 Provider 再加一级）——
         包一层 Provider 若要全局重排缩进，会把整块 300 行 JSX 变成"全文件改动"，
         审查时看不出真正的语义改动。结构仍以标签为准：Provider > section > … */}
@@ -1333,6 +2223,8 @@ export default function NavShell({
           /* ★ v2.10.0：路线查看模式 + 实时车辆；★ 2026-09-23：detail pane 打开时让位给总览 */
           routeLine={detailActive ? null : rv.picked}
           onRouteDirs={rv.reportDirs}
+          /* ★ 2026-11-06（#5a 收尾）：站序弹窗打开时，取景避开它盖住的那半屏（关闭 ⇒ null = 原行为） */
+          stopsInsetTop={stopsInsetTop}
           /**
            * ★ v3.6.0 S4（需求 R3 · 候车态地图车辆实时化）：
            *   detail pane 一律用 `ride.mapVehicles` —— 它由 12s 车辆帧驱动，
@@ -1374,6 +2266,36 @@ export default function NavShell({
           lineStops={detailActive ? lineStops : null}
           /* ★ v3.2.0（需求 7 / AC-80）：蓝点移动插值时长 = 采样间隔；仅 ≤5s 才插值（浏览 10s ⇒ 0） */
           userDotSmoothMs={gpsIntervalMs <= 5_000 ? gpsIntervalMs : 0}
+          /* ★ 2026-11-05（通琴号 R3/R4）：站点层 + 路径层。
+             三者同源（`useTqhLines` 的模块级缓存）⇒ 切板块/点站点 0 请求。
+             `tqhSegments` 为 null ⇒ 路径层清空（关站序弹窗时即刻收线，不留残影）。
+             ══════════════════════════════════════════════════════════════════
+             ★ 2026-11-06（修复批 #6c）：**导航态一律不画班次路径线**（`navActive` ⇒ null）
+             ══════════════════════════════════════════════════════════════════
+             为什么：`TqhPathLayer` 的 z73 **高于**导航彩段（`overview` z72）⇒ 若两者同屏，
+               班次线会压在「我这次行程要坐的那几段」之上，用户会以为那就是他正在坐的车。
+               屏幕上不该有第二条路径线。
+             为什么必须在这里关（而不是指望上游不产生 `tqhPath`）：`tqhPath` 是
+               `tqhTrip` 的派生数据，而「导航前就选了班次」这条路径**合法存在**
+               （`tqhTrip` 在导航开始时不被清，见 R2「导航态通琴号一个字不改」）
+               ⇒ 只能在这一处按 `navActive` 掐掉渲染，不动数据、不动状态。
+             ⚠️ 只掐 `tqhSegments`（视觉层）；`tqhPath` 本体仍保留 —— 取景包围盒要用它
+               （见 `tqhFitBox`），且退出导航后线要能立刻回来，不需要重新请求。
+             ⚠️ 渲染层只认 `navActive`（`rsOpen && pane==='detail'`）；`detailActive` 与之同义，
+               但本文件既有约定以 `navActive` 为准，别为了"统一"改成另一个。 */
+          tqhStations={tqhMapStations}
+          tqhActiveIds={tqhActiveIds}
+          tqhSegments={navActive ? null : tqhPath}
+          /* ★ 2026-11-06（修复批 #1）：双色巴士标集合（通琴号关联站不再单独成标） */
+          tqhSharedBusCodes={tqhSharedCodes}
+          /* ★ 2026-11-06（#1 配套）：本班次经过、但已并入巴士标的站 ⇒ 巴士标加白环 */
+          tqhActiveBusCodes={tqhActiveBusCodes}
+          /* ★ 2026-11-06（修复批 #6 · P0）：班次模式下**巴士站点层**的白名单
+             （只留关联巴士主码；空集 = 巴士站全隐；`null` = 不管，导航态/浏览态行为不变） */
+          tqhBusWhitelist={tqhBusWhitelist}
+          /* ★ 2026-11-06（修复批 #3 / R2）：通琴号站点白名单（null = 不过滤） */
+          tqhWhitelist={tqhWhitelist}
+          onTqhStationClick={onTqhStationClick}
         />
 
         {/* 品牌栏（三栏网格）：左=空 · 中=换向键+线路标签 · 右=竖排按钮组（导航态右列隐藏，AC-84） */}
@@ -1434,7 +2356,7 @@ export default function NavShell({
 
       {/* ★ 卡片浮层（车卡/站卡）—— 挂在 wrap **之外**，`.nav-card-overlay`（fixed z90）
           ⇒ 面板打开时点地图带上的车/站，卡片不被面板（z70）压住。 */}
-      {(station || rv.selected) && (
+      {(station || rv.selected || tqhStation) && (
         <div className="nav-card-overlay">
           {station && (
             <StationCard
@@ -1451,6 +2373,40 @@ export default function NavShell({
                 setStation(null);
                 setStage("panel");
               }}
+              /**
+               * ★ 通琴号 R4：**只在该站位确实有通琴号班次时**传。
+               *   传空数组会渲染一句「本站暂无通琴号班次」——对纯巴士站是噪音。
+               * ★ 2026-11-06（#2）：改为按通琴号站逐个成组（组名 `通琴号-<站名>`）。
+               */
+              tqh={
+                tqhEntriesForStation.length
+                  ? {
+                      entries: tqhEntriesForStation,
+                      phase: tqh.phase,
+                      activeTripCode: tqhTrip?.trip_code ?? null,
+                      onPickTrip: pickTqhTrip,
+                      /* ★ 2026-11-06（#6c）：与 `pickLineDisabled` 同源同值 ——
+                         同一张卡片上两套「跳走」入口必须同步禁用，否则一行禁一行不禁 = 沉默逻辑错误 */
+                      pickTripDisabled: navActive,
+                    }
+                  : null
+              }
+              /* ★ 2026-11-06（#4）：点线路行 → 进该线路查看；导航进行中禁用 */
+              onPickLine={onPickLineFromCard}
+              pickLineDisabled={navActive}
+            />
+          )}
+          {/* ★ 通琴号 R4：纯通琴号站的独立卡片（合并组 ⇒ 一组站，R1）；做完即返回地图 */}
+          {tqhStation && (
+            <TqhStationCard
+              stations={tqhStation.stations}
+              entries={tqhEntriesForTqhStation}
+              phase={tqh.phase}
+              activeTripCode={tqhTrip?.trip_code ?? null}
+              onPickTrip={pickTqhTrip}
+              /* ★ 2026-11-06（#6c）：导航态禁用班次行（与 `StationCard` / 线路行同一口径） */
+              pickTripDisabled={navActive}
+              onClose={() => setTqhStation(null)}
             />
           )}
           {rv.selected && (
@@ -1535,7 +2491,116 @@ export default function NavShell({
             rv.pickLine(l);
             setLineSheet(false);
           }}
+          onPickTrip={pickTqhTrip}
+          activeTripCode={tqhTrip?.trip_code ?? null}
+          /* 已在地图上查看某班次时再打开弹窗 ⇒ 直接落回通琴号板块（不用重找标号） */
+          defaultBoard={tqhTrip ? "tqh" : "bus"}
           onClose={() => setLineSheet(false)}
+        />
+      )}
+
+      {/*
+        ★ 2026-11-05（通琴号 R5）：站序三档弹窗。
+        必须挂在 `.nav-map-wrap` **之外** —— 与 `RouteSheet` 同理：wrap 是固定定位的
+        层叠上下文，挂进去会被底部 chrome 压住（项目为这个先后踩过两次）。
+        `winH / safeTop / safeBottom` 由宿主给：档位顶边一律运行时现算，不写死 px。
+      */}
+      {tqhTrip && (
+        <LineStopsSheet
+          open={tqhStopsOpen}
+          trip={tqhTrip}
+          stations={tqh.data.stations}
+          siblings={tqhSiblings}
+          onSwitchTrip={setTqhTrip}
+          onClose={closeTqhStops}
+          onRefresh={tqhReload}
+          winH={winH}
+          safeTop={safeTop}
+          safeBottom={safeBottom}
+        />
+      )}
+
+      {/*
+        ════════════════════════════════════════════════════════════════════════
+        ★ 2026-11-06（修复批 #4/#5 · R3）**前端 C 的接入点** —— `RouteStopsSheet`
+        ════════════════════════════════════════════════════════════════════════
+
+        【触发链路（已完成，不要改）】
+          `StationCard` 的线路行 → `onPickLineFromCard(code, kind)`
+            → `rv.pickLine({ code, kind, label: lineNameOf(code), color })`
+            → 地图画该线走向 + 顶部线路 chip + `rv.picked` 非空
+          ⇒ **宿主不新增任何 state**：C 的弹窗以 `rv.picked` 为唯一打开依据（导航态已被
+            `StationCard`/`onPickLineFromCard` 双向拦住，不会跳走）。
+
+        【props 契约（已按前端 C 的 `RouteStopsSheet.tsx` 落地，见下方真实挂载）】
+          `open`            = `!!rv.picked`（**只管收合动画**；「是否在 DOM 里」由 `stopsSheet` 存在 +
+                              `!navActive && !lineSheet` 决定 —— 两者分工见挂载点注释）
+          `kind`            = `rv.picked.kind`（`bus` | `lrt`；通琴号仍走 `LineStopsSheet`）
+          `lineCode`        = `rv.picked.code`（巴士 `26` / 轻轨 `LRT-氹仔线`）
+          `directionLabel`  = `往 <终点站>`（来自 `/api/route-stops` 的 `label.to`）
+          `firstTime`       = `null` —— `/api/route-stops` **不下发首班时刻**，该项自动不渲染
+          `stops`           = 宿主取好的站序（`RouteStopsOk.stops`）
+          `detent`/`onDetentChange` = 宿主持有的三档（换线重置 `half`）
+          `onClose`         = `rv.exitLine`（清线 / 清车 / 清 chip）
+          `onRefresh`       = `rv.refresh`（轻轨内部早退，无实时）
+          `onFlipDirection` = `rv.canReverse ? rv.reverse : null`（null ⇒ `aria-disabled` + toast）
+          `color`/`winH`/`safeTop`/`safeBottom` = 线路色 + 现算几何
+
+        ⚠️ **TODO（已知缺口 · 已报负责人 2026-11-06，本轮不修）「方向加载中」被说成「无对向方向」**
+          `rv.canReverse = dirs.length > 1`，而 `dirs` 由 `NavMap` 读 `/api/route-shapes` 后
+          **异步**回报（`useRouteVehicles.ts:256` + `reportDirs`）。⇒ shapes 到达前的窗口期
+          `dirs = []` ⇒ `canReverse = false` ⇒ 若用户此刻点「换向」，弹窗会 toast
+          **「這條線暫無對向方向」**——这句话是**假的**（只是还没加载完）。
+          窗口 = 一次 route-shapes 请求（本地缓存命中时几乎为零，冷启可达数百毫秒）。
+          根治要动组件契约（把「未知」与「单向」分开：例如 `onFlipDirection` 允许 `undefined`
+          = 加载中，另出一句「方向加载中」）⇒ **收口前不引入契约变更**，只登记。
+          ⚠️ 将来若改为「加载中禁用按钮」，仍然**不得隐藏**换向键（隐藏会让关闭键左移，
+             这是"点不到关闭"的经典复发路径，见 `RouteStopsSheet.tsx:47-48`）。
+
+        【三条硬约束（源自 Spec §5 与既有事故记录）】
+          ① 必须挂在 `.nav-map-wrap` **之外**（wrap 是层叠上下文，挂进去会被底部 chrome 压住）；
+          ② 拖拽一律走 `useSnapSheet`（`--sheet-y-anim` 命令式写入），不要自写 pointer 逻辑；
+          ③ 报站（第二阶段 #5b）必须继承 `useLazyEta` 六条硬约束（视口 ±1 屏 / 并发 ≤3 /
+             静默 250ms / 队列 ≤8 / 硬闸 ≤30 / **轻轨零请求**）—— 整线预取会打穿 DSAT。
+
+        ⚠️ 还有一处**取景**要一并处理：`NavMap` 在 `routeLine` effect 里用了
+          `map.setBounds(...)`（与「取景禁用 setBounds」铁律的既有例外），
+          加了半屏弹窗后它会盖住线的下半段 ⇒ 需要改用带 inset 的 fit（参考 `useNavFrame`）。
+          ⇒ 该处属 `NavMap.tsx`（我的文件），C 提需求、我改。
+
+        互斥判定：三者同屏会互相压（站序弹窗 z77 vs 导航面板 z70 vs 选线弹窗全屏）⇒
+          导航态（`navActive`）与选线弹窗（`lineSheet`）打开时**不渲染**本站序弹窗的元素
+          （不是只加 `open=false`：`useSnapSheet` 关闭态仍占 DOM，仍会吃 pointer 事件）。
+        ════════════════════════════════════════════════════════════════════════ */}
+      {/*
+        【挂载条件 = 两条约束的交集（不是二选一）】
+          ① 快照 `stopsSheet` 存在 ⇒ 至少打开过一次 ⇒ **元素留在 DOM**（收起动画要 `open` 驱动，
+             不能靠卸载 —— `useSnapSheet` 关闭态把 translateY 推到 100dvh，见 `:1556-1561`）；
+          ② `!navActive && !lineSheet` ⇒ 导航态 / 选线弹窗打开时**根本不挂**（不是 `open=false`：
+             关闭态仍占 DOM，靠 `inert` 挡命中不挡层叠，见 `:1956-1958`）。
+        ⇒ 组合后语义：`open` 只表示「用户是否还选着这条线」，收合交给 `useSnapSheet`；
+          「是否存在于 DOM」由互斥条件决定。二者不重叠、也不互相削弱。
+        【全部读快照】`kind / code / color / directionLabel / stops` 一律取自 `stopsSheet`，
+          不再读 `rv.picked`（换线瞬间 `rv.picked` 已变而站序还是上一帧 ⇒ 会错配）。
+      */}
+      {stopsSheet && stopsSheetOn && (
+        <RouteStopsSheet
+          /* ← 收起动画交给 open，不再用外部 `&&` 当开关 */
+          open={!!rv.picked}
+          kind={stopsSheet.kind}
+          lineCode={stopsSheet.code}
+          directionLabel={stopsSheet.directionLabel}
+          firstTime={null}
+          stops={stopsSheet.stops}
+          detent={stopsDetent}
+          onDetentChange={setStopsDetent}
+          onClose={rv.exitLine}
+          onRefresh={stopsSheet.kind === "bus" ? () => rv.refresh() : undefined}
+          onFlipDirection={rv.canReverse ? () => rv.reverse() : null}
+          color={stopsSheet.color}
+          winH={winH}
+          safeTop={safeTop}
+          safeBottom={safeBottom}
         />
       )}
 
@@ -1614,7 +2679,15 @@ export default function NavShell({
                 liveRemain: navRemain.liveRemain,
                 liveStrips: navRemain.liveStrips,
                 liveRemainFail: navRemain.lastFail,
-                reloadRemain: navRemain.refresh,
+                /**
+                 * ★ 修复批 #9 / #10（2026-11-06）：**点刷新 = 四条通道一起取**
+                 *   （剩余行程 / 车辆帧 / 候车报站 / 赶车档重算 —— 见 `reloadRemain` 的块注释）。
+                 *   改前这里只传 `navRemain.refresh`，而它在候车期（boarding）**不取数**
+                 *   ⇒ QA 实测「点了刷新只有 detail-body + route-shapes 两个请求」，
+                 *      屏上「还有 3 站 · 约 10 分」24 次采样恒定不变、地图 0 个车辆标。
+                 *   现在由 `reloadRemain`（本文件）合流。
+                 */
+                reloadRemain,
               }
             : null
         }
@@ -1648,6 +2721,16 @@ export default function NavShell({
            */
           lineOpen={!!rv.picked}
           onOpenLine={rv.pickLine}
+          /**
+           * ★ 2026-11-05（通琴号 R7）：搜索结果里点一条班次 ⇒ 关搜索层 → 回地图看该班次。
+           * `setStage("map")` 必须在 pick 之前：搜索层是 `stage==="search"` 的挂载条件，
+           * 不切走它就一直盖着地图（与 `onOpenLine` 的 `lineOpen` 机制不同，
+           * 通琴号没有"线路视图"这一层中间态，直接给最终形态）。
+           */
+          onOpenTqhTrip={(t) => {
+            setStage("map");
+            pickTqhTrip(t);
+          }}
         />
       )}
 
@@ -1677,6 +2760,7 @@ export default function NavShell({
       {/* ★ v3.3.0（AC-93 · ADR-102）：`?diag=pin` 起终点钉诊断浮层 —— **生产默认不渲染** */}
       {diagPin && <PinDiag />}
     </section>
+    </BoardingLiveContext.Provider>
     </CatchTagLatchContext.Provider>
   );
 }

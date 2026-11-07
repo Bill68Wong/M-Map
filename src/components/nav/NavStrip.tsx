@@ -86,17 +86,18 @@ export default function NavStrip({
   const board = stops[0];
   const alight = stops[stops.length - 1];
   const est = stops.some((s) => s.role === "mid" && s.level >= 3);
-  /**
-   * ★ T5：本段「车上约 N 分」。
-   *   数据源 = `SegmentStrip.rideMin`（轻轨段优先用时刻表口径 `rideSecText`），**只用现有字段**。
-   *   为什么必须单独抽一行：这句话原来只藏在**折叠键**里（`!open` 才渲染），
-   *   而导航态强制 `open = true`（要逐站可见）⇒ 一进导航就再也看不到"这趟车要坐多久"。
-   *   现在折叠/展开两态都有：收起时在折叠键上（原有），展开/导航时在本行。
+  /*
+   * ★ 2026-11-06（P0 · 删导航冗余行）：**原 `rideText` / `passedCount` 已随「车上约 N 分 · 已过 n 站」
+   *   整行删除**（负责人明确：不做替代文案、不区分模式）。
+   *
+   *   ── 为什么删（不要照旧稿加回来）────────────────────────────────────
+   *   该行与**紧邻的站行**重复表达同一件事，且在导航态（`open` 强制 true）里永远显示 ⇒
+   *   变成一条恒定噪音：`已过 n 站` 是站行本色的复述（`is-passed` 已用灰 + 对勾表达），
+   *   `车上约 N 分` 是折叠键上已有的信息（见下方 `rc-strip__toggle` —— **那一条保留**）。
+   *   ⚠️ 折叠键的「途经 N 站 · 车上约 X 分」**不属于本行**，不要顺手删。
+   *
+   *   `SegmentStrip.rideMin` / `rideSecText` 仍是折叠键与详情层的输入，未被移除。
    */
-  const rideText =
-    strip.kind === "lrt" && strip.rideSecText ? strip.rideSecText : `${Math.round(strip.rideMin)} 分`;
-  /** 已过站数（导航态才显示；`passedIdx` = 已完全驶过的最后一站） */
-  const passedCount = nav ? Math.max(0, nav.passedIdx + 1) : 0;
 
   /** 追踪态 class（附在各站节点上） */
   const stateCls = (k: number): string => {
@@ -166,13 +167,7 @@ export default function NavStrip({
       /* ★ 本批：观测钩子 H5 —— 仅当前乘车段（有 nav）写 data-nav-leg */
       data-nav-leg={nav && nav.legIndex != null ? String(nav.legIndex) : undefined}
     >
-      {/* ★ T5：展开态（导航强制展开 / 手动展开）也保留「车上约 N 分」——见 `rideText` 注释 */}
-      {open && (
-        <p className="navstrip__ride" data-ride-min={Math.round(strip.rideMin)}>
-          车上约 <b>{rideText}</b>
-          {nav && <span className="navstrip__ride-sub">· 已过 {passedCount} 站</span>}
-        </p>
-      )}
+      {/* ★ 2026-11-06：原「车上约 N 分 · 已过 n 站」整行已按负责人要求删除（见上方 `est` 后的注释） */}
 
       {board && row(0, true)}      {/* 中间站：静态时默认收起；导航中强制展开 */}
       {mids > 0 && !open && (

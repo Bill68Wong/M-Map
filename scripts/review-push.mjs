@@ -30,6 +30,7 @@ import {
   ALLOW_DOCS,
   ALLOW_PREFIX,
   BLOCK_EXT,
+  BLOCK_EXT_ALLOW,
   SENSITIVE,
   SELF_EXEMPT,
 } from "./lib/push-guard-rules.mjs";
@@ -105,7 +106,7 @@ function classify(file) {
   const deny = HARD_DENY.find((r) => r.re.test(file) && !(r.allow && r.allow.test(file)));
   if (deny) return { cat: "禁止入库", necessity: deny.why, level: "block" };
 
-  const ext = BLOCK_EXT.find((e) => file.toLowerCase().endsWith(e));
+  const ext = BLOCK_EXT_ALLOW.has(file) ? null : BLOCK_EXT.find((e) => file.toLowerCase().endsWith(e));
   if (ext) return { cat: "禁止入库", necessity: `禁止的扩展名 ${ext}（二进制/备份）`, level: "block" };
 
   if (ALLOW_FILES.has(file)) return { cat: "配置", necessity: "构建/依赖/仓库配置", level: "ok" };
@@ -182,7 +183,7 @@ for (const row of rows) {
         ? "删除：清理本不该入库的文件（正向）"
         : "删除：需说明清理理由，并确认本地副本是否保留";
   } else if (level !== "block") {
-    const text = readIfText(row.path);
+    const text = SELF_EXEMPT.has(row.path) ? null : readIfText(row.path);
     if (text) {
       for (const { re, why } of SENSITIVE) {
         if (re.test(text)) {

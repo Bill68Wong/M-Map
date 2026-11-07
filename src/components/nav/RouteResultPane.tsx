@@ -12,6 +12,7 @@ import BrandRouteLoader from "@/components/brand/BrandRouteLoader";
 import RecommendCards from "@/components/RecommendCards";
 import { lrtPromotedOf } from "@/components/RoutePieces";
 import type { RecommendCard } from "@/lib/recommend/types";
+import type { CSSProperties } from "react";
 import type { RecommendData } from "./useRecommend";
 
 /**
@@ -35,8 +36,55 @@ export interface RouteResultPaneProps {
   onCardOpen: (card: RecommendCard, degraded: boolean) => void;
 }
 
+/**
+ * ★ 2026-11-06（问题 #6 收尾）：「数据时刻」那一行的样式。
+ *
+ * 为什么是内联而不是新类：本批**只允许**在 `globals.css` 的 `.lp-stop__veh` 段新增两条
+ * 图标字色规则（别人的成果不能顺手改），故这一行的视觉全部走 **Token 变量**内联声明
+ * （`--text-2xs` / `--meta` / `--space-2` 均已存在）⇒ 零新增全局选择器、零硬编码色值（P0-2）。
+ *
+ * 三条硬约束（对应本批验收）：
+ *   · 只占**一行**、11px（`--text-2xs`）、`--meta` 灰 ⇒ 不许抢主体；
+ *   · 数字用 `tabular-nums` ⇒ 秒位跳动时不左右抖（否则每次刷新整行字宽在变）；
+ *   · `lineHeight: 1.4` 定死 ⇒ 有无这一行都不改变卡片起点节奏（避免"提示消失后卡片上跳"）。
+ */
+const FRESH_STYLE: CSSProperties = {
+  margin: "0 0 var(--space-2)",
+  fontSize: "var(--text-2xs)",
+  lineHeight: 1.4,
+  letterSpacing: "0.01em",
+  color: "var(--meta)",
+  fontVariantNumeric: "tabular-nums",
+};
+
+/**
+ * ISO 8601 → 本地时区「HH:MM:SS」（24 小时制，补零）。
+ *
+ * ⚠️ **不要**改成 `toLocaleTimeString()`：① 它随 locale 变 12/24 小时制（会出现「上午 9:41:07」，
+ *   与本批"一行、11px"的版面互斥）；② 服务端渲染与客户端 locale/TZ 可能不同 ⇒ hydration 报错。
+ *   手写 `getHours/getMinutes/getSeconds` + `padStart` 只依赖本地时区，输出恒定。
+ * ⚠️ 非法 / 空值 ⇒ `null`（调用方据此**整行不渲染**，而不是渲染「数据时刻 --:--:--」占位）。
+ */
+function fmtClock(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return null;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 export default function RouteResultPane({ phase, data, err, onRetry, onCardOpen }: RouteResultPaneProps) {
   const empty = data && data.cards.length === 0 ? EMPTY_TEXT[data.emptyReason ?? "no_candidate"] : null;
+  /**
+   * ★ 2026-11-06：两种"时间相关"状态，**同一行槽位**互斥渲染（永远不会两行 / 不会留空位）：
+   *   · `refreshing`：有旧数据 + 正在重拉 ⇒ 「正在更新…」。
+   *     ⚠️ 关键：卡片区渲染条件 `{data && …}` **与 phase 无关** ⇒ 重拉期间旧卡一直可见。
+   *        所以这里**只加一行提示**，**不要**改用骨架（骨架条件是 `loading && !data`）——
+   *        拿骨架替换旧卡会让整屏闪空，用户反而以为数据丢了。
+   *   · 否则显示这批数据的取数时刻（`generatedAt` 缺失 ⇒ 整行不渲染）。
+   */
+  const refreshing = phase === "loading" && data !== null;
+  const clock = fmtClock(data?.generatedAt);
 
   return (
     <div className="route-pane route-pane--recommend">
@@ -65,6 +113,30 @@ export default function RouteResultPane({ phase, data, err, onRetry, onCardOpen 
 
       {data && (
         <>
+          {/* ★ 2026-11-06（问题 #6 收尾）：**一行**「正在更新… / 数据时刻 HH:MM:SS」。
+              · 位置在卡片区**上方**、`degraded` 提示之前 ⇒ 扫读顺序 = 先"这批数是什么时候的"，再看方案；
+              · `role="status"` 只给「正在更新…」（一次性状态，值得播报）；
+                「数据时刻」**不给** live region —— 每次刷新都播报时间戳会打断读屏；
+              · `data-fresh` / `data-generated-at` 是 QA 断言钩子（与 `data-pane` / `data-veh` 同风格），
+                `data-generated-at` 存**原始 ISO**（不清洗）⇒ 可断言"屏上时刻 = 服务端返回的时刻"；
+              · ⚠️ `className="nav-fresh"` 是**语义钩子，刻意没有 CSS 规则**（样式全走 `FRESH_STYLE`
+                的 Token 内联）。将来若要收编成类，在 `.nav-result__progress` 那一段旁边加即可；
+              · 文案纪律：不写「实时」（隐含秒级推送）、不写「缓存/已过期」（技术词）。 */}
+          {refreshing ? (
+            <p className="nav-fresh" role="status" data-fresh="updating" style={FRESH_STYLE}>
+              正在更新…
+            </p>
+          ) : clock ? (
+            <p
+              className="nav-fresh"
+              data-fresh="stamp"
+              data-generated-at={data.generatedAt ?? undefined}
+              style={FRESH_STYLE}
+            >
+              数据时刻 {clock}
+            </p>
+          ) : null}
+
           {data.degraded && (
             <div className="nav-degraded t-label">路网数据暂时不可用，以下为估算结果</div>
           )}

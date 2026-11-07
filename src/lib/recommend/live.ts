@@ -29,8 +29,12 @@
  * 把相应方案排除（记入剔除计数器）→ 卡片少几张，但**绝不显示假数据**。
  * ⚠️ 轻轨桶走**预载内存**（`LrtPreload`）→ 0 次 DB 往返 → 不再有超时风险。
  *
- * ⚠️ 本模块**不做结果缓存**：缓存统一放在 `service.ts`（key=`from|to|zone`，TTL 10s），
- *    避免两套 TTL 互相打架、保证「刷新」语义清晰（force 一次穿透到底）。
+ * ⚠️ 本模块**不做结果缓存**（原注释「缓存统一放在 `service.ts`，key=`from|to|zone`，TTL 10s」
+ *    已失效：`service.ts` 早已删除）。现存的三层缓存各有明确边界：
+ *      · 高德 OD 方案（`transit_cache`，≤60s）→ **每次请求都真实调用**，仅在调用彻底失败时兜底读
+ *        （`nav-service.ts` ③ 段，问题 #6 · C1）；
+ *      · DSAT 报站（`dsat/eta.ts` 进程内 5s）→ 本模块用 `force=true` **穿透**（见 `queryBusBucket`）；
+ *      · 静态索引（`recommend/query.ts` 60s）→ 只含站序/段时长/步行/换乘/轻轨时刻表，**无实时字段**。
  */
 import type { Pool } from "pg";
 import { queryEta, type EtaBus } from "@/lib/dsat/eta";
@@ -645,14 +649,34 @@ export async function fetchLive(
   };
 }
 
-/** 巴士桶查询：一次问该站在同一方向的 ≤6 条线（注入站序索引 → 0 次 per-route DB 往返） */
+/**
+ * 巴士桶查询：一次问该站在同一方向的 ≤6 条线（注入站序索引 → 0 次 per-route DB 往返）
+ *
+ * ★ 2026-11-06（问题 #6 · C5 复查结论）：第 5 个实参 `force` 由 `false` → **`true`**。
+ *
+ * `queryEta` 内部有一层**进程内 5s 缓存**（`dsat/eta.ts` 的 `g.__etaCache`，
+ * 键 = `站|线路组|dir|dest`）—— 这是全链路里**唯一直接缓存「还有 N 站」原始数值**的地方。
+ * 旧实现传 `false`，后果：
+ *   · 用户点刷新（`reload({nocache:true})`）跳过的是**高德 OD 缓存**，
+ *     而 DSAT 那层 5s 缓存**照读** ⇒ 5 秒内连点两次刷新，卡面数字**一个字节都不变**
+ *     ⇒ 用户合理地认为「刷新没用 / 走的是缓存」。
+ *   · 两个入口（推荐首屏 与 卡片详情）在 5s 内互相命中对方的缓存，
+ *     明明是两次独立请求，却拿到同一份车辆位置。
+ *
+ * `force=true` 的语义（`dsat/eta.ts` 既有实现）：**跳过读取、仍然写回**。
+ *   ⇒ 本次一定真实调 DSAT；同时把结果写回缓存供**其它**调用方（站卡 / 计时器）复用，
+ *     不会把他们的防抖窗口一起打掉。
+ *
+ * 成本：`/api/nav` 的 DSAT 调用数不变（本来就是桶数 ≈ 9~13 次/请求，实测
+ *   `dsat_call_logs` 里 `purpose='recommend'` 的节奏）。变的只是「不再命中 5s 旧值」。
+ */
 async function queryBusBucket(
   idx: RouteIndex,
   b: BusBucket,
 ): Promise<
   { route: string; ok: boolean; dir?: string; nearest?: EtaBus; second?: EtaBus; rest?: EtaBus[] }[]
 > {
-  const res = await queryEta(b.station, b.routes, "0", b.dest, false, undefined, idx, "recommend");
+  const res = await queryEta(b.station, b.routes, "0", b.dest, true, undefined, idx, "recommend");
   return res.results as { route: string; ok: boolean; dir?: string; nearest?: EtaBus; second?: EtaBus; rest?: EtaBus[] }[];
 }
 

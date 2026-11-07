@@ -11,6 +11,7 @@
  */
 import type { Pool } from "pg";
 import { SPEED_RATIO, WALK_BASE_M_PER_MIN } from "@/lib/recommend/types";
+import { PLACE_ID_BY_SLUG, WALK_OD_PAIRS } from "@/lib/recommend/place-ids";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 🚨 防「双重缩档」断言（v1.2.0 · 三层防线的第 1 层）
@@ -172,11 +173,12 @@ function gapMinutes(
  * 口径（v0.24.0 定稿）：
  *   起点步行 = wait_start(首站) − depart(起点)
  *   到点步行 = arrive(终点) − alight(末站)
- *   站归属按 plan_legs 的 walk 段位置判定（首段 walk 的 to_station = 起点侧；
- *   末段 walk 的 from_station = 到点侧），不盲取首尾事件。
- *   ⚠️ v0.26.2：「首段/末段 walk」只比较 leg_kind='walk' 的腿的 seq 极值 ——
- *   不能用「所有腿」的极值（跨境方案的 cross_border 腿会插在步行腿之后/之前，
- *   把到点步行、起点步行挤出极值位而被静默跳过）。
+ *   站归属按「方案所属 OD 对」判定（起点侧候选站集 / 到点侧候选站集，
+ *   命中即接受），不盲取首尾事件。
+ *   ★ 2026-11-06（Spec §6.2）：`commute_plans` / `plan_legs` 两表已删，上述「方案属性」不再读库推导，
+ *   改为 `place-ids.ts#WALK_OD_PAIRS`——其 `start` / `end` 就是当年「三处候选源并集」的固化值（落库前逐值复核过）。
+ *   ⚠️ 原 v0.26.2 那条「只比较 walk 腿 seq 极值」的约束已随上两表消失：现在根本不存在「腿」可比，
+ *   候选集直接按地点给全（因此不会再犯「跨境腿挤掉步行腿」那个错）。
  *   ★ v0.28.0：站点匹配改为**候选集合 + 主码归一**，不再要求与 walk 腿写死的站码逐字相等 ——
  *   方案摘要里的「到站後任選」「動態下車」在实际打点时会在不同站停靠，
  *   旧逻辑把这些真实样本全部丢弃（详见 mainCode 上方注释）。
@@ -189,111 +191,41 @@ function gapMinutes(
 export async function rebuildWalkTimes(pool: Pool, opts: { dry?: boolean } = {}): Promise<WalkRebuildResult> {
   const dry = !!opts.dry;
 
-  const places = (await pool.query(`SELECT id, slug FROM places`)).rows as { id: number; slug: string }[];
-  const placeIdOf = new Map<string, number>();
-  for (const p of places) placeIdOf.set(p.slug, p.id);
-  const schoolId = placeIdOf.get("school")!;
-
-  // ── 各方案的上下车候选点（v0.28.0）──────────────────────────────────
-  // 🚨 min/max 必须只统计 leg_kind='walk' 的腿（v0.26.2 修）：
-  // 跨境方案末尾还有 cross_border 腿（如「關閘（拱北口岸）」卡的出境段），若按「所有腿」取极值，
-  // 出境的到点步行与入境的起点步行就都不在极值位上 → 被静默跳过，
-  // 导致關閘／橫琴口岸侧的步行样本从未回写（实测 14 个方案受影响）。
-  //
-  // 🚨🚨 v0.28.0 修「动态上下车点丢样本」：方案的 walk 腿只写死**一个**站码，但摘要常声明
-  // 「到站後任選」「動態下車」—— 例：家（C653 金峰南岸）→ 澳門科技大學，50/26/26A/25 任選，
-  // 实际可在 T400 路氹東／新濠天地、T367 望德聖母灣馬路、T363 連貫公路／威尼斯人 任一站下车；
-  // 轻轨线更明显：石排灣 → 科大，摘要写明「科大 或 路氹東（動態下車）」。
-  // 原逻辑 `g.station === sp.station` 要求实测站码与写死值**逐字相等**，不符即丢弃 →
-  // 已实测过的 T367 望德聖母灣馬路、T363 連貫公路／威尼斯人、LRT-LDE 路氹東、
-  // C688 和諧廣場、M1/13 關閘總站、M9/2 關閘廣場 等站点样本**全部静默丢失**（事件仍在库）。
-  // 现改为「候选集合命中即接受」，候选来自三处：
-  //   ① walk 腿自身的 to_station（起点侧）/ from_station（到点侧）
-  //   ② veh 腿的 board_candidates / alight_candidates 两列（方案数据里已存在）
-  //   ③ veh 腿 route_meta 中每条备选线路的 board / alight / to
-  // 比较时按主码归一 —— 同台多线站台视为同一站、步行时长一致
-  // （C688 ≡ C688/1 ≡ C688/2、M9/2 ≡ M9/3 ≡ M9/4、C690 ≡ C690/1 ≡ C690/2 ≡ C690/3）。
-  const allLegs = (
-    await pool.query(`
-    SELECT p.id AS plan_id, p.from_place, p.to_place,
-           l.seq, l.leg_kind, l.from_station, l.to_station,
-           l.board_candidates, l.alight_candidates, l.route_meta
-      FROM commute_plans p
-      JOIN plan_legs l ON l.plan_id = p.id
-     ORDER BY p.id, l.seq
-  `)
-  ).rows as {
-    plan_id: number;
-    from_place: number;
-    to_place: number;
-    seq: number;
-    leg_kind: string;
-    from_station: string | null;
-    to_station: string | null;
-    board_candidates: string[] | null;
-    alight_candidates: string[] | null;
-    route_meta: Record<string, { board?: string[]; alight?: string[]; to?: string }> | null;
-  }[];
+  // ★ 2026-11-06：`places` / `commute_plans` / `plan_legs` 三表已删（Spec §6.2）。
+  //   地点 id 与「每个方案所属的起终点 + 候选站集合」全部来自 `./place-ids` 常量
+  //   （`PLACE_ID_BY_SLUG` / `WALK_OD_PAIRS`，逐值对应删表前的真实数据）。
+  const schoolId = PLACE_ID_BY_SLUG.school;
 
   /** 站码主码归一：剥掉站台号后缀（C690/3 → C690、M9/2 → M9、T376/1 → T376） */
   const mainCode = (c: string) => /^[A-Za-z]+\d+/.exec(c)?.[0] ?? c;
 
+  /** 一侧步行段的归属：哪个地点 + 主码归一后的候选站集合 */
   interface WalkSide {
     /** 该步行段所属地点（起点侧 = 出发地，到点侧 = 目的地） */
     place: number;
-    /** walk 腿里写死的站码（报告用） */
-    declared: string;
     /** 主码归一后的候选站码集合（命中即接受） */
     cands: Set<string>;
   }
   const startByPlan = new Map<number, WalkSide>();
   const endByPlan = new Map<number, WalkSide>();
 
-  {
-    const byPlan = new Map<number, typeof allLegs>();
-    for (const r of allLegs) {
-      const arr = byPlan.get(r.plan_id);
-      if (arr) arr.push(r);
-      else byPlan.set(r.plan_id, [r]);
-    }
-    for (const [pid, ls] of byPlan) {
-      const ws = ls.filter((l) => l.leg_kind === "walk");
-      if (!ws.length) continue;
-      const mn = Math.min(...ws.map((x) => x.seq));
-      const mx = Math.max(...ws.map((x) => x.seq));
-      const boards = new Set<string>();
-      const alights = new Set<string>();
-      for (const v of ls) {
-        if (v.leg_kind !== "bus" && v.leg_kind !== "lrt") continue;
-        for (const c of v.board_candidates ?? []) boards.add(c);
-        for (const c of v.alight_candidates ?? []) alights.add(c);
-        const m = v.route_meta;
-        if (m) {
-          for (const k of Object.keys(m)) {
-            for (const c of m[k]?.board ?? []) boards.add(c);
-            for (const c of m[k]?.alight ?? []) alights.add(c);
-            if (m[k]?.to) alights.add(m[k].to);
-          }
-        }
-      }
-      const sLeg = ws.find((x) => x.seq === mn);
-      if (sLeg?.to_station) {
-        boards.add(sLeg.to_station);
-        startByPlan.set(pid, {
-          place: sLeg.from_place,
-          declared: sLeg.to_station,
-          cands: new Set([...boards].map(mainCode)),
-        });
-      }
-      const eLeg = ws.find((x) => x.seq === mx);
-      if (eLeg?.from_station) {
-        alights.add(eLeg.from_station);
-        endByPlan.set(pid, {
-          place: eLeg.to_place,
-          declared: eLeg.from_station,
-          cands: new Set([...alights].map(mainCode)),
-        });
-      }
+  // ── 各方案的上下车候选点 ───────────────────────────────
+  // 判据来源（原为读库推导，现已固化成常量）：
+  //   ① walk 腿自身的 to_station（起点侧）/ from_station（到点侧）
+  //   ② veh 腿的 board_candidates / alight_candidates 两列
+  //   ③ veh 腿 route_meta 中每条备选线路的 board / alight / to
+  // 三处并集 → 主码归一 → 命中即接受。原实现是「与写死站码逐字相等」，
+  // 会把「到站後任選 / 動態下車」的实际下车点样本**静默丢弃**（v0.28.0 修）。
+  //
+  // ⚠️ 不再区分「首段/末段 walk」的 seq 极值：`WALK_OD_PAIRS[].start / end`
+  //    就是该 OD 对起点侧、到点侧的候选站全集 —— 极值判定本来只是挑出这两个
+  //    集合的手段。**别**把它当「只剩一个写死站码」而收窄成单值：那会重新丢样本。
+  for (const pair of WALK_OD_PAIRS) {
+    const side: WalkSide = { place: pair.from, cands: new Set(pair.start.map(mainCode)) };
+    const endSide: WalkSide = { place: pair.to, cands: new Set(pair.end.map(mainCode)) };
+    for (const planId of pair.planIds) {
+      startByPlan.set(planId, side);
+      endByPlan.set(planId, endSide);
     }
   }
 

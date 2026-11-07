@@ -40,7 +40,7 @@ import { useRouter } from "next/navigation";
 import { LrtEtaInline } from "./LrtEta";
 import RouteStack from "./RouteStack";
 import { catchHintOf, directionNameOf, EtaText, macauClock, Row, TierBadge } from "./RoutePieces";
-import { buildCardHref } from "@/lib/recommend/card-link";
+import { buildCardHref } from "@/lib/recommend/card-href";
 import { RECOMMEND_LIMIT_DEFAULT } from "@/lib/recommend/limits";
 import { TRANSFER_SAFETY_MIN } from "@/lib/recommend/score";
 import { usePressGuard } from "@/lib/use-press-guard";

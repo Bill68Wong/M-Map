@@ -34,8 +34,8 @@
  * ── ★ v3.6.1：结果行的类型标签结构 ────────────────────────────────────────
  *   行首标签 = **类型**（「巴士线路」/「轻轨线路」/「公交站」/「地点」），与既有站点/地点
  *   行用的是**同一个** `ResultTag` 组件、同一个 `.ssheet__type` class（不为线路另造一套）；
- *   线路号则是紧跟其后的**线路色圆角标签**（`.linechip` + `chipInkOf` ⇒ 底色取 `routes.color`，
- *   字色按对比度自适应）。即：`[巴士线路] [50] 在地图查看走向`。
+ *   线路号则是紧跟其后的**线路色圆角标签**（`.linechip` ⇒ 底色取 `routes.color` 原值，
+ *   字色**恒为白字**，见 R6）。即：`[巴士线路] [50] 在地图查看走向`。
  *
  * ── 与旧 `PoiSearchBox` 的差别 ────────────────────────────────────────
  *   旧组件是「输入框 + **下拉浮层**」，适合嵌在抽屉里；
@@ -49,8 +49,11 @@ import { useRouter } from "next/navigation";
 import Icon from "@/components/ui/Icon";
 import RouteStack from "@/components/RouteStack";
 import { chipInkOf } from "@/lib/ui/chip-ink";
+import { lineNameOf } from "@/lib/route-label";
 import type { NavPoint, PoiKind, PoiSearchResult, PoiSuggestResponse, RouteSuggestion } from "@/lib/nav/types";
 import type { RouteLineItem } from "./RouteLinesSheet";
+import { useTqhLines } from "./tqh-lines";
+import { hhmm, searchTrips, type TqhTrip } from "./tqh-model";
 
 const DEBOUNCE_MS = 300;
 
@@ -122,7 +125,7 @@ function writeSaved(editing: "dest" | "from", q: string, resp: PoiSuggestRespons
  * 合在一个联合类型里，是为了让**五种标签共用同一个组件、同一个 class** ——
  * 「巴士线路」既不是新标签体系，也不是新视觉语言，它就是既有「公交站 / 地点」标签的第五个取值。
  */
-type ResultTagKind = PoiKind | "bus_route" | "lrt_route";
+type ResultTagKind = PoiKind | "bus_route" | "lrt_route" | "tqh_trip";
 
 /**
  * 类型标签文案（**唯一文案源** —— 行内标签只从这里取，杜绝两处各写一份）。
@@ -135,6 +138,8 @@ const TAG_TEXT: Record<ResultTagKind, string> = {
   poi: "地点",
   bus_route: "巴士线路",
   lrt_route: "轻轨线路",
+  /** ★ 2026-11-05（通琴号 R7）：第三类交通方式的标签，与其余五种**同一个组件、同一个 class** */
+  tqh_trip: "通琴号",
 };
 
 /**
@@ -156,8 +161,45 @@ function ResultTag({ kind }: { kind: ResultTagKind }) {
       ? " ssheet__type--station"
       : kind === "lrt_station"
         ? " ssheet__type--lrt_station"
-        : "";
+        : kind === "tqh_trip"
+          ? " ssheet__type--tqh"
+          : "";
   return <span className={`ssheet__type${variant}`}>{TAG_TEXT[kind]}</span>;
+}
+
+/**
+ * ★ 2026-11-05（通琴号 R7 / AC-9）：**通琴号班次结果行**。
+ *
+ * 行内结构：`[通琴号][B6] 全称` + 副行 `往澳门 · 08:30 发车`。
+ * · 标签走**同一个** `ResultTag`（不另造标签体系）；
+ * · 标号 chip 用主题色底 + **白字**（负责人 §17-R1 裁决；`text-shadow` 与 `.rl-chip` 同值）；
+ * · 动作是「在地图上查看这一班的走线」，与站点行的「设为目的地」完全不同 ⇒
+ *   不与站点/地点混排（沿用线路分区的既有纪律）。
+ */
+function TqhResultRow({ trip, onOpen }: { trip: TqhTrip; onOpen: (t: TqhTrip) => void }) {
+  const dep = hhmm(trip.departure_time);
+  return (
+    <button
+      type="button"
+      className="ssheet__item"
+      data-tqh-trip={trip.trip_code}
+      aria-label={`通琴号 ${trip.route_no}，${trip.direction}，${dep} 发车，${trip.line_full_name}，在地图上查看走向`}
+      onClick={() => onOpen(trip)}
+    >
+      <ResultTag kind="tqh_trip" />
+      <span className="tqh-no" aria-hidden="true">
+        {trip.route_no}
+      </span>
+      <span className="ssheet__main">
+        <span className="ssheet__name">{trip.line_full_name}</span>
+        <span className="ssheet__addr t-muted">
+          {trip.direction}
+          {dep ? ` · ${dep} 发车` : ""}
+        </span>
+      </span>
+      <Icon name="forward" size={16} />
+    </button>
+  );
 }
 
 /**
@@ -244,6 +286,11 @@ export interface SearchSheetProps {
    *   只能靠这条注释留给下一个人。
    */
   lineOpen?: boolean;
+  /**
+   * ★ 2026-11-05（通琴号 R7）：点通琴号班次结果 ⇒ 宿主关搜索层、地图画该班次路径。
+   *   未接线时该分区**不渲染**（不给出点了没反应的假按钮）。
+   */
+  onOpenTqhTrip?: (trip: TqhTrip) => void;
   /** 左上角返回（关闭全屏、回到半屏或地图） */
   onBack: () => void;
 }
@@ -257,11 +304,16 @@ const MACAU_ZONE_RE = new RegExp(`^(${MACAU_ZONE_WORDS})[·\\s]*`);
 
 /**
  * 徽章文本（AC-40 / 设计 §2.4）：巴士显示线路码原文（`26` / `51A`）；
- * 轻轨**去掉 `LRT-` 前缀只留中文名**（`氹仔線`）—— `LRT-` 对用户是噪音。
+ * 轻轨走统一口径 `lineNameOf()` —— 剥 `LRT-` 前缀 **并做简→繁转换**（`LRT-氹仔线` → `氹仔線`）。
+ *
+ * ★ 2026-11-06（D-3 缺陷修复）：原先是 `raw.replace(/^LRT-/, "")`，只剥前缀不转字
+ *   ⇒ 搜索结果里显示简体 `氹仔线`，与「全部线路」面板、`/line/*` 顶栏的繁体不一致。
+ *   本函数还被 `rowLabel`（`aria-label`）复用 ⇒ 读屏也会念简体。
+ *   **不要再就地写 replace**，一律走 `lineNameOf`（它对巴士码恒等，无副作用）。
  */
 function chipTextOf(r: RouteSuggestion): string {
   const raw = (r.code ?? r.name ?? "").trim();
-  return r.kind === "lrt" ? raw.replace(/^LRT-/, "") : raw;
+  return r.kind === "lrt" ? lineNameOf(raw) : raw;
 }
 
 /** 地址清洗：剥离区划前缀（最多 3 层）；清洗后为空 ⇒ 返回空串（该条目不显示地址行） */
@@ -294,15 +346,19 @@ function distMeters(a: { lng: number; lat: number }, b: { lng: number; lat: numb
  *      会把线路号挤离左侧、每行也更啰嗦 ⇒ 该句只作为 `aria-label` 给读屏。
  *
  * ── 颜色口径（留痕，防"以为需求漏做"）──────────────────────────────────
- *   ★ 主人原话为「圆角**白字**」标签；此处按设计 §2.4 走 `chipInkOf()` **对比度自适应**
- *     —— 深底白字、浅底转深字。纯白字在浅绿（如 `#93d50a`）上只有 1.x:1 不可读，
- *     那才是缺陷；且 P0 明令复用既有取值函数、不得自造色表。
+ *   ★ 主人原话为「圆角**白字**」标签 —— **R6 裁决（2026-11-06）回到这里**：
+ *     线路标签**一律白字 + 官方线路色底（不加深）**。
+ *   ⚠️ 中间版本曾按设计 §2.4 走 `chipInkOf()` 对比度自适应（深底白字 / 浅底转深字），
+ *     该方案已被 R6 **明确否决**：全库 59/95 条线路色按白字低于 AA，
+ *     属**负责人已知并接受的登记偏差**，不得以「可读性」为由改回深字。
+ *     补偿只允许加粗字重 + `text-shadow`（写在 `.linechip` 里，勿在 TSX 另加）。
  *
  * ── 为什么复用 `.ssheet__item` 而不是另建行样式 ──────────────────────────
  *   主人要求「样式与现有『公交站』『地点』一致（字号、颜色、**间距、分隔线**）」。
  *   `.ssheet__item` 就是站点/地点行的本体（min-height 52 / padding 10 14 / gap 8 /
  *   border-bottom 分隔线 / :active 反馈）⇒ 直接用它，分隔线天然对齐，零新增 CSS。
- *   ⚠️ **不能**再叠 `.line-result`：它的 `border: 0` 会把分隔线抹掉。
+ *   ⚠️ **不能**再叠 `.line-result`（该类的 `border: 0` 曾把分隔线抹掉；本类已按
+ *     M16 作为死代码删除，此句仅留作历史原因记录）。
  *
  * ── 无障碍 ──────────────────────────────────────────────────────────────
  *   整行是 `<button>`；行内已无说明文字 ⇒ `aria-label` 必须自带完整语意
@@ -324,27 +380,43 @@ function LineResultRow({
   color: string | undefined;
   onOpen: (r: RouteSuggestion) => void;
 }) {
+  /**
+   * ★★ R6 裁决（2026-11-06）：线路标签**字色一律白字**（`globals.css` 的 `.linechip`），
+   *   ⇒ 这里**不再内联注入 `color`**，也不再使用 `chipInkOf()` 的「浅底转深字 / 死带加深底色」。
+   *   `chipInkOf()` 在本处只剩**一个用途**：判断底色是不是脏数据（非 6 位 hex）——
+   *   是则 `tone === "fallback"`，交给 CSS 走「中性底 `--surface-2` + 深字 + 线路色小圆点」，
+   *   那是**唯一**允许出现非白字的情形（底色已不是线路色）。
+   *   ⚠️ 底色一律用 `routes.color` **原值**（`color` 变量），**不加深**（`chipInkOf` 的 bg 字段
+   *      在死带分支会加深 14%，R6 明令禁止）。所以下面故意不写那个 bg 字段。
+   *   ⚠️ 不要给这里补内联字色（`ink` 的 ink 字段）：内联会盖掉 CSS 的白字，浅底线路立刻退回深字。
+   */
   const ink = chipInkOf(color);
   const chip = chipTextOf(r);
   const tagKind: ResultTagKind = r.kind === "lrt" ? "lrt_route" : "bus_route";
   const tagText = TAG_TEXT[tagKind];
-  /** 读屏整句：巴士说「50 路巴士线路」，轻轨不能套「路」（「氹仔线路轻轨线路」不通） */
-  const rowLabel = r.kind === "lrt" ? `${chip} 轻轨线路，在地图上查看走向` : `${chip} 路巴士线路，在地图上查看走向`;
+  /**
+   * 读屏整句：**线号本身不带「路」**（R5：线路标识只显示码本身）。
+   *   ⚠️ 旧文案是「线号 + ` 路巴士线路`」拼接 —— 读屏会念「50 路巴士线路」，属全站第 4 处
+   *   「XX路」残留（审计 §3-C5，不可见但可闻）。轻轨分支本来就不套「路」
+   *   （「氹仔線路轻轨线路」不通），此处两边都收敛到「码 + 类型」。
+   */
+  const rowLabel =
+    r.kind === "lrt" ? `${chip} 轻轨线路，在地图上查看走向` : `${chip} 巴士线路，在地图上查看走向`;
   return (
     <button type="button" className="ssheet__item" onClick={() => onOpen(r)} aria-label={rowLabel}>
       <ResultTag kind={tagKind} />
       <span
         className="linechip"
         style={{
-          background: ink.bg,
-          color: ink.ink,
+          /* R6：底色 = 官方线路色原值（不加深）；脏底色 ⇒ undefined ⇒ 走 CSS 兜底分支 */
+          background: ink.tone === "fallback" ? undefined : color,
           /**
            * ★ v3.6.1：`globals.css` 里 `.linechip` 的 **72px 固定列宽**是为**旧布局**服务的
            *   —— 那时线路号右边还有一列「线路名」，固定宽度才能保证名称左缘对齐。
            *   新布局中线路号是**紧跟类型标签的同行小标签**（`[巴士线路][50]`），
            *   行内已无名称列 ⇒ 固定列宽失去意义，改按内容撑开（34px 与设计的下限一致）；
            *   `marginRight:auto` 把行尾的箭头推到右边，避免整行挤在左侧。
-           *   ⚠️ 只覆盖尺寸，圆角/字重/`data-chip-ink` 描边一律沿用既有 `.linechip`。
+           *   ⚠️ 只覆盖尺寸，圆角/字重/字色（白字 R6）/`data-chip-ink` 描边一律沿用既有 `.linechip`。
            */
           flex: "0 0 auto",
           width: "auto",
@@ -374,6 +446,7 @@ export default function SearchSheet({
   onPickQuick,
   onOpenLine,
   lineOpen,
+  onOpenTqhTrip,
   onBack,
 }: SearchSheetProps) {
   const router = useRouter();
@@ -535,6 +608,15 @@ export default function SearchSheet({
   /** 分组直接用后端给的 `kind`（不从前缀猜 —— 后端 `RouteSuggestion.kind` 已是权威判定） */
   const busRoutes = routeHits.filter((r) => r.kind === "bus");
   const lrtRoutes = routeHits.filter((r) => r.kind === "lrt");
+
+  /**
+   * ★ 2026-11-05（通琴号 R7 / AC-9）：**本地过滤**出通琴号班次（按班次逐条，上限 80）。
+   *   · 数据来自模块级缓存的 `/api/tqh/lines`（弹窗已经拉过 ⇒ 这里 0 请求）；
+   *   · **不接** `/api/poi/suggest`（高德月配额 5,000 次），只在内存里过滤；
+   *   · 未接线 `onOpenTqhTrip` ⇒ 分区不渲染（不给假按钮）。
+   */
+  const tqh = useTqhLines();
+  const tqhHits = onOpenTqhTrip && q.trim() ? searchTrips(tqh.data.trips, q) : [];
 
   /**
    * ★ v3.6.1：线路结果 **不填起终点**（AC-41：不得把一条线路当成目的地塞进导航），
@@ -737,10 +819,28 @@ export default function SearchSheet({
             )}
 
             {/*
+              ★ 2026-11-05（通琴号 R7 / AC-9）：**通琴号分区** —— 按班次逐条，上限 80 条，
+                不做聚合折叠（负责人裁决 4）。与线路分区并列、同样不与地点/站点混排：
+                本区行的动作是「在地图上看这一班的走线」。
+            */}
+            {tqhHits.length > 0 && onOpenTqhTrip && (
+              <div
+                className="ssheet__sect ssheet__sect--routes"
+                data-route-sect="tqh"
+                data-tqh-count={tqhHits.length}
+              >
+                {tqhHits.map((t) => (
+                  <TqhResultRow key={`t-${t.trip_code}`} trip={t} onOpen={onOpenTqhTrip} />
+                ))}
+              </div>
+            )}
+
+            {/*
               线路区 ⇄ 地点/站点区 的分界线（既有 class，未新增样式）。
               ★ v3.6.1：文案保持「地点 / 站点」不变 —— 它同时承担"另一类结果开始了"的分隔职责。
+              ★ 2026-11-05：通琴号分区也计入（它同样是"非地点/站点"的结果）。
             */}
-            {(routeHits.length > 0 && (results.length > 0 || pending.length > 0)) && (
+            {((routeHits.length > 0 || tqhHits.length > 0) && (results.length > 0 || pending.length > 0)) && (
               <p className="ssheet__sect-title ssheet__sect-title--split t-label" role="heading" aria-level={3}>
                 地点 / 站点
               </p>
@@ -780,7 +880,8 @@ export default function SearchSheet({
               </button>
             ))}
 
-            {!loading && !results.length && !pending.length && (
+            {/* ★ 2026-11-05：有通琴号命中时也不算"找不到"（否则同一屏同时显示结果与空态） */}
+            {!loading && !results.length && !pending.length && !tqhHits.length && (
               <p className="ssheet__empty t-muted">{hint ?? (err || "找不到这个地点 · 试试换个说法")}</p>
             )}
             {!!results.length && hint && <p className="ssheet__empty t-muted">{hint}</p>}

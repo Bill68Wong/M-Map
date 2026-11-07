@@ -4,7 +4,9 @@
  * ── 一条完整链路（设计 §1.1 / §2.B / §2.C）────────────────────────────
  *   ① 静态装载 `loadStatics()`（复用旧推荐域：站序/段统计/步行/换乘/轻轨预载）；
  *   ② 站码映射表 `loadStationMap()`（人工确认优先）；
- *   ③ **高德 transit**（`fetchTransitPlans`，`AlternativeRoute=10`，带 `transit_cache`）；
+ *   ③ **高德 transit**（`fetchTransitPlans`，`AlternativeRoute=10`）——
+ *      ★ 2026-11-06（问题 #6）：**每次请求都真实调用**；`transit_cache` 退化为
+ *      「真实调用彻底失败时的拓扑兜底」（`stats.transitCacheFallback` 可观测）。
  *   ④ 解析 → 过滤（穿梭巴士/在建）→ **桥接**（高德站→我们主码 + 逐跳站序）；
  *   ⑤ **本地图枚举**（补漏来源；**请求期现场跑**，失败即降级引擎）→ 候选；
  *   ⑥ `fetchLive`（DSAT 巴士 + 本库轻轨时刻表，**两来源共用一次**）；
@@ -32,7 +34,14 @@ import type { Pool } from "pg";
 import { gcj02ToWgs84, haversineM } from "@/lib/amap/coord";
 import { nowBucketOfHolidayAware } from "@/lib/rebuild/holidays";
 import { fixWalkDistance, walkMinutes } from "@/lib/amap/walk-fix";
-import { fetchTransitPlans, type RawPlan, type TransitCacheIo, type AmapTransitRawResponse } from "@/lib/amap/transit";
+import {
+  fetchTransitPlans,
+  odKeyOf,
+  TRANSIT_CACHE_TTL_SEC,
+  type RawPlan,
+  type TransitCacheIo,
+  type AmapTransitRawResponse,
+} from "@/lib/amap/transit";
 import { convergeByAlight } from "@/lib/recommend/converge";
 import { fetchLive } from "@/lib/recommend/live";
 import { ALT_BUSES_MAX, NAV_LIMIT_DEFAULT } from "@/lib/recommend/limits";
@@ -67,7 +76,11 @@ export interface NavInput {
   limit?: number;
   /** 时间基准（默认 `Date.now()`；测试可注入） */
   nowMs?: number;
-  /** 绕过 `transit_cache`（强制真实调用） */
+  /**
+   * ★ 2026-11-06（问题 #6 · C1）语义已收窄：主调用**恒不读** `transit_cache`，
+   *   本参数现在只控制**失败兜底**要不要读缓存（`true` ⇒ 连兜底也不要，宁失败不给旧拓扑）。
+   *   `/api/nav?nocache=1`（用户手动刷新）正是这个语义。
+   */
   noCache?: boolean;
   /**
    * @deprecated 自 2026-09-19 起**本地枚举每次请求现场执行**（见文件头「请求期现场枚举」），
@@ -114,7 +127,17 @@ export interface NavStats {
    */
   multiStrategyMs: number;
   transitOk: boolean;
+  /** true = 本次的 `rawPlans` 来自 `transit_cache`（见下方 `transitCacheFallback`，正常路径恒 false） */
   transitFromCache: boolean;
+  /**
+   * ★ 2026-11-06（问题 #6 · C1）：**高德真实调用彻底失败**，本次读的是 60s 内最近一次
+   *   成功结果（兜底）。正常路径恒 `false` —— 因为主调用已强制 `noCache`。
+   *
+   * 为什么必须单独可观测：把缓存从「默认复用」改成「仅失败兜底」以后，
+   *   `transitFromCache=true` 的含义从「省了一次调用」变成「**高德此刻不可用**」。
+   *   两者的运维处置完全不同（前者是常态，后者要查配额/网络），混用一个字段就分不清。
+   */
+  transitCacheFallback: boolean;
   amapPlans: number;
   bridged: number;
   /**
@@ -415,6 +438,8 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
   const tTransit = Date.now();
   let transitOk = false;
   let fromCache = false;
+  /** ★ 2026-11-06（问题 #6 · C1）：本次是否是「真实调用失败 → 读缓存兜底」 */
+  let cacheFallback = false;
   let rawPlans: AmapTransitRawResponse = { status: "1", route: { transits: [] } };
   let bridgedSeeds: AmapPlanSeed[] = [];
   let dropped: { index: number; reason: string }[] = [];
@@ -430,18 +455,58 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
       transitOk = amapTotal > 0;
       if (transitOk) strategiesUsed.push(0);
     } else {
-      const callOnce = () =>
+      /**
+       * ══════════════════════════════════════════════════════════════════
+       * ★ 2026-11-06（问题 #6 · C1 · 负责人要求「从根源上杜绝实时巴士导航数据走缓存」）
+       *
+       * **口径变更：`transit_cache` 从「默认先读缓存」→「只在真实调用失败时兜底读」。**
+       *
+       * 改动前（v3.8.x）：
+       *   首屏打开**不带** `nocache=1` ⇒ 先读 `transit_cache`；
+       *   只有用户手动点刷新才带 `nocache=1`。实测命中时 `stats.transitFromCache=true`、
+       *   `transitMs` 掉到 ~0ms。**这就是「首屏与刷新结果不一致」的唯一行为差异**
+       *   —— 手动刷新比首屏只多做了「跳缓存」这一件事。
+       *
+       * 取证结论（`.verify/_be-cache-probe.ts` 读线上表实测，见 `04-缓存排查.md` C1）：
+       *   `plans_json` 的结构只有「拓扑 + 高德自己的规划时长」——
+       *     `cost.duration` / `distance` / `segments[].walking.distance` /
+       *     `buslines[].{name,departure_stop,arrival_stop,via_stops,cost.duration,
+       *                 station_start_time,station_end_time}`
+       *   而 `start_time` / `end_time` / `bus_time_tips` **实测全为空串**，
+       *   **没有任何 `eta` / 到站时刻 / 车牌 / 在途车辆数** ⇒ 缓存里不存在实时巴士数据。
+       *
+       * 但「不含实时数字」不等于「可以缓存」：
+       *   ① `buslines[].cost.duration` 会在**桥接失败**时被 `patchAmapFallback` 当成
+       *      `ride.minutes` 用（`recompute.ts:216`）；60s 内复用等于让乘客看到 60s 前的规划时长；
+       *   ② 缓存命中的是**整份方案集合**，方案集变化（高德随时重算）会直接改变出卡与排序，
+       *      用户看到的「第一条推荐路线」可能就是上一次的旧方案；
+       *   ③ 行为上无法向用户解释「为什么首屏和刷新不一样」。
+       *
+       * 成本实测与估算（配额账见 `04-缓存排查.md` §5）：
+       *   去缓存后每次打开 = 1 次真实调用（候选偏少时 +最多 2 次补查）。
+       *   `transit_cache` 现有 888 个不同 od_key / 约 7 周 —— 说明真实调用量极小，
+       *   相对高德「路径规划」类 ~15 万/月 的额度不构成风险；3 QPS 由令牌桶守住
+       *   （取不到令牌 ⇒ 降级或下面这条兜底，不会打穿）。
+       *
+       * ⚠️ 兜底只在**真实调用两次都失败**时生效，且**必须**同时置 `transitCacheFallback`
+       *   —— 否则「高德此刻不可用」会被误读成「一切正常」。
+       *   `?nocache=1`（用户手动刷新）连兜底也不要：那是「我宁可失败也别给我旧数据」的语义。
+       * ══════════════════════════════════════════════════════════════════
+       */
+      const cacheIo = makeTransitCacheIo(pool);
+      const callReal = () =>
         fetchTransitPlans(
           { lng: origin.lng, lat: origin.lat },
           { lng: dest.lng, lat: dest.lat },
           {
-            cache: makeTransitCacheIo(pool),
-            noCache: input.noCache,
+            cache: cacheIo,
+            // ★ 恒 true：主调用**永不读** `transit_cache`（见上方长注释）
+            noCache: true,
             nowMs,
             strategy: 0,
           },
         );
-      let r = await callOnce();
+      let r = await callReal();
       // ★ 2026-09-21 新增：高德失败 / 返回 0 方案时，**自动重试一次**。
       //   实测（黑沙海滩 → 十月初五马路，22:2x）：**同一查询在几十秒内时好时坏** ——
       //   连测三次分别得到「infocode=10000 正常 / 直接 0 方案 / 又一次正常」，
@@ -450,7 +515,7 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
       //   ⚠️ 只重试**一次**：第二次仍失败就照旧降级，避免把请求时长拖爆（Serverless 有 maxDuration）。
       if (!r.ok) {
         await new Promise((res) => setTimeout(res, TRANSIT_RETRY_DELAY_MS));
-        r = await callOnce();
+        r = await callReal();
       }
       if (r.ok) {
         transitOk = true;
@@ -458,6 +523,20 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
         rawPlans = { status: "1", route: { transits: r.raw } };
         amapTotal = r.raw.length;
         strategiesUsed.push(0);
+      } else if (!input.noCache) {
+        // ★ 真实调用两次都失败 ⇒ 读 60s 内最近一次成功结果（**仅拓扑/规划时长**，见长注释）
+        const cached = await cacheIo.get(
+          `${odKeyOf({ lng: origin.lng, lat: origin.lat }, { lng: dest.lng, lat: dest.lat }, nowMs)}|s0`,
+          TRANSIT_CACHE_TTL_SEC,
+        );
+        if (cached && cached.length > 0) {
+          transitOk = true;
+          fromCache = true;
+          cacheFallback = true;
+          rawPlans = { status: "1", route: { transits: cached } };
+          amapTotal = cached.length;
+          strategiesUsed.push(0);
+        }
       }
     }
   }
@@ -475,7 +554,11 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
     if (!input.transitFixture && bridgedSeeds.length < MULTI_STRATEGY_WHEN_BELOW) {
       // ★ v3.7.0（C13）：这段 2 次额外高德调用此前落在所有埋点之外（不可见）
       const tMulti = Date.now();
-      const extra = await fetchMultiStrategySeeds(pool, origin, dest, bridgeCtx, nowMs, input.noCache);
+      // ★ 2026-11-06（问题 #6 · C1）：补查同样**恒真实调用**。
+      //   补查的语义是「主调用方案太少 ⇒ 再问两个策略」；若补查读缓存，
+      //   它拿到的可能是 s=0 之外**上个月的**方案集合，与主调用不是同一时刻的快照
+      //   ⇒ 合并进候选池会出「新旧混排」的卡。宁可少几条候选，也不要混时刻。
+      const extra = await fetchMultiStrategySeeds(pool, origin, dest, bridgeCtx, nowMs, true);
       multiStrategyMs = Date.now() - tMulti;
       bridgedSeeds = mergeSeedsByFingerprint(bridgedSeeds, extra.seeds);
       dropped = [...dropped, ...extra.dropped];
@@ -683,6 +766,7 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
       multiStrategyMs,
       transitOk,
       transitFromCache: fromCache,
+      transitCacheFallback: cacheFallback,
       amapPlans: amapTotal,
       bridged: bridgedSeeds.length,
       // ★ v3.3.0（AC-119）：高德解析丢弃 + 本地闸门丢弃（mergeSources）**合并**上报

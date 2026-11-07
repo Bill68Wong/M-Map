@@ -394,10 +394,12 @@ export interface WalkTimeRow {
 }
 
 /**
- * ★ station_walk_distance 行（v1.2.0）
- * 与 `walk_times` **分层**存储：距离是「外部事实」（慢变、可增量抓），
- * minutes 是「派生值」。读端分开索引 —— 即使某组还没有实测样本，
- * 只要抓过距离，档 1 的衰减就能算 ✓
+ * ★ 高德步行距离行（v1.2.0 原为 `station_walk_distance` 表的读取结构）
+ *
+ * ⚠️ ★ 2026-11-06：该表已删（Spec §6.2，距离管线整条下线），
+ *    仓库内**不再有任何写入点**，`buildWalkIndex` 的第二参数恒为空数组。
+ *    类型与参数保留为将来接新距离源时不必改签名；
+ *    **别**再往本类型填数据并以为它会生效 —— 没有读取链接了。
  */
 export interface StationWalkDistanceRow {
   place_id: number;
@@ -533,8 +535,10 @@ export interface WalkLegView {
   samples: number;
   /**
    * ★ v1.2.0：该段步行路径距离（米）；`null` = 未知。
-   * 来源 `station_walk_distance`（高德步行路径规划）。**仅用于档 1 的随距离衰减**，
-   * 不参与 minutes 的计算（minutes 仍是实测均值 / 距离推算值）。
+   * **仅用于档 1 的随距离衰减**，不参与 minutes 的计算。
+   *
+   * ⚠️ 2026-11-06 起**恒为 null**：原数据源 `station_walk_distance` 已删（Spec §6.2），
+   *    档 1 因此退回线性速度比。字段保留以维持读端契约形状不变。
    */
   distanceM?: number | null;
 }

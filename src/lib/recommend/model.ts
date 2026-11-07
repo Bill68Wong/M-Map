@@ -114,7 +114,12 @@ export interface WalkIndex {
   byKey: Map<string, WalkTimeRow>;
   /**
    * ★ v1.2.0：`placeId|main|zone` → 高德步行距离（米）
-   * 与 byKey **独立** —— 来自 station_walk_distance；即使该组没有实测样本也能有距离 ✓
+   * 与 byKey **独立** —— 即使该组没有实测样本也能有距离 ✓
+   *
+   * ⚠️ ★ 2026-11-06：数据源 `station_walk_distance` 表已删（Spec §6.2），
+   *    且 `walk_times.distance_m` 实测 20 行全为 NULL ⇒ **本索引当前恒为空**（`query.ts` 不传第二参数）。
+   *    档 1（「全力冲刺能赶上」）因此退回线性速度比（`tier1EffRatio` 的无值分支）——
+   *    这是 Spec 已接受的降级，**不是静默失败**。保留本字段与查询链为了将来接新距离源时不必改签名。
    */
   distByKey: Map<string, number>;
   /** placeId → 该地点全行样本加权均值 */
@@ -170,7 +175,8 @@ export function lookupWalk(
 ): WalkLookup {
   const main = mainCodeOf(station);
   // ★ v1.2.0：距离独立于 minutes 的回退链 —— 先精确（含座区），再退回不分座区
-  //   （距离来自 station_walk_distance，即使该组没有实测样本也可能有 ✓）
+  //   ⚠️ 2026-11-06 起该索引恒为空（数据源表已删）⇒ 下面两次 get 都拿不到，
+  //   distanceM 恒为 null。链路保留原因见 `WalkIndex.distByKey` 注释。
   const distanceM =
     idx.distByKey.get(`${placeId}|${main}|${zone ?? ""}`) ?? idx.distByKey.get(`${placeId}|${main}|`) ?? null;
 
@@ -813,7 +819,8 @@ export function modelOption(seed: OptionSeed, ctx: ModelContext): ModeledOption 
          * · 档 ③ 取 `SLACK_NO_DATA`（而非 `null`）：若取 `null` 会**比档 ② 更宽松**，
          *   属「数据越少越不告警」的逻辑倒挂；其唯一托底是上面那句卡面文案
          *   `liveTextNext = "等车时间暂无数据"`，文案一旦被删/改渲染，静默乐观就回来了。
-         * ⚠️ 档 ③ 的 `SLACK_NO_DATA` **取值待测量**（`scripts/compare-slack-impact.ts`），
+         * ⚠️ 档 ③ 的 `SLACK_NO_DATA` **取值待测量**（原测量入口 `scripts/compare-slack-impact.ts`；
+         *    ★ 2026-11-06 该脚本已删，**复测入口已移除** —— 如需重测请参考 git 历史），
          *    不是定稿值，改它属调参（会改 cost 与排序）。
          * · 同场换乘**必须保持 `undefined`**（不是 `0`）：`0` 会走 `slack < 3 ⇒ tight`，
          *   把澳门最常见的同站台换乘全染红；而 A4 断言要靠 `undefined` 区分
