@@ -1,14 +1,22 @@
 /**
- * 卡片张数同源断言（scripts/test-limits.ts · 2026-11-04 · 需求 U10）
+ * 卡片张数同源断言（scripts/test-limits.ts · 2026-11-04 需求 U10 · 2026-11-06 通琴号迭代瘦身）
  *
  * ── 守的是什么 ────────────────────────────────────────────────────────
- *   「取几张卡」是**跨 9 处**共用的同一个数字。只要有一处漏改，就会出现
- *   「首屏 6 张、刷新掉回 5 张」或「第 6 张卡点进去 `route_changed`（点了没反应）」。
+ *   「取几张卡」是跨多处共用的同一个数字。只要有一处漏改，就会出现
+ *   「首屏 6 张、刷新掉回 5 张」或「第 N 张卡点进去 `route_changed`（点了没反应）」。
  *   本脚本用两种手段守住：
  *     A. **常量值**：`RECOMMEND_LIMIT_DEFAULT` / `NAV_LIMIT_DEFAULT` 都必须 = 6，
  *        且**并存不合并**（两条链路是两个独立产品面，未来单方调参不应牵连对方）；
- *     B. **无残留字面量**：9 个引用点逐处按「该引用的常量」判定，并用 `git grep`
+ *     B. **无残留字面量**：每个存活引用点逐处按「该引用的常量」判定，并用 `git grep`
  *        扫全 `src/` 找 `?? 5` / `limit: 5` / `limit: "5"` 之类残留。
+ *
+ * ── 2026-11-06 瘦身（旧推荐链下线）────────────────────────────────────
+ *   原 10 处引用点里，`/recommend` 链路（`service.ts` / `card.ts` / `card-link.ts` /
+ *   `app/recommend/page.tsx` / `RecommendClient.tsx` / `api/recommend/route.ts`）随
+ *   Spec §6.2.2 整体删除 ⇒ 对应断言改为**删除**，而不是放宽成「文件不存在也算过」。
+ *   留一个「文件不在就跳过」的分支等于给门禁开洞：将来误删任何一处都静默变绿。
+ *   现存活 6 处：`/nav` 三处（接口 / 服务 / URL 解析）+ 卡片侧三处（`card-href` /
+ *   `RecommendCard` / `RecommendCards`）。
  *
  * ⚠️ 断言里的「预期」是产品口径（用户拍板 5 → 6），**禁止**为变绿改预期。
  *
@@ -37,7 +45,7 @@ function assertEq<T>(got: T, want: T, msg: string) {
 const ROOT = process.cwd();
 const read = (rel: string): string => fs.readFileSync(path.join(ROOT, rel), "utf8");
 
-console.log("卡片张数同源断言（limits.ts · 9 处引用）\n");
+console.log("卡片张数同源断言（limits.ts · 6 处引用）\n");
 
 // ── A. 常量值 + 并存不合并 ──
 console.log("① 常量");
@@ -53,52 +61,10 @@ assertEq(NAV_LIMIT_DEFAULT, 6, "/nav 链路默认张数 = 6");
   );
 }
 
-// ── B. 9 处引用逐处判定 ──
-console.log("② 9 处引用（逐处给文件:常量）");
+// ── B. 6 处引用逐处判定 ──
+console.log("② 6 处引用（逐处给文件:常量）");
 type Site = { file: string; must: string; mustNot?: RegExp; label: string };
 const SITES: Site[] = [
-  {
-    file: "src/lib/recommend/service.ts",
-    must: "input.limit ?? RECOMMEND_LIMIT_DEFAULT",
-    mustNot: /input\.limit \?\? 5\b/,
-    label: "service.ts（/recommend 编排默认值）",
-  },
-  {
-    file: "src/lib/recommend/card.ts",
-    must: "input.limit ?? RECOMMEND_LIMIT_DEFAULT",
-    mustNot: /input\.limit \?\? 5\b/,
-    label: "card.ts（详情页回查默认值）",
-  },
-  {
-    file: "src/lib/recommend/card-link.ts",
-    must: "p.limit ?? RECOMMEND_LIMIT_DEFAULT",
-    mustNot: /p\.limit \?\? 5\b/,
-    label: "card-link.ts（拼 href 默认值）",
-  },
-  {
-    file: "src/lib/recommend/card-link.ts",
-    must: ": RECOMMEND_LIMIT_DEFAULT;",
-    mustNot: /const limit = limitRaw[^\n]*: 5;/,
-    label: "card-link.ts（解析 href 默认值）",
-  },
-  {
-    file: "src/app/recommend/page.tsx",
-    must: "limit: RECOMMEND_LIMIT_DEFAULT",
-    mustNot: /limit: 5\b/,
-    label: "app/recommend/page.tsx（SSR 首屏）",
-  },
-  {
-    file: "src/components/RecommendClient.tsx",
-    must: "limit: String(RECOMMEND_LIMIT_DEFAULT)",
-    mustNot: /limit: "5"/,
-    label: "RecommendClient.tsx（刷新请求，**必须与 SSR 成对**）",
-  },
-  {
-    file: "src/app/api/recommend/route.ts",
-    must: ": RECOMMEND_LIMIT_DEFAULT;",
-    mustNot: /: 5;/,
-    label: "api/recommend/route.ts（接口默认值）",
-  },
   {
     file: "src/app/api/nav/route.ts",
     must: ": NAV_LIMIT_DEFAULT;",
@@ -111,7 +77,7 @@ const SITES: Site[] = [
     mustNot: /input\.limit \?\? 5\b/,
     label: "nav-service.ts（高德链路默认值，走 NAV 常量）",
   },
-  // ⚠️ 第 10 处（原任务清单只列了 9 处）：`/nav` 的 **URL 参数解析**里也有同一份默认值，
+  // ⚠️ 容易被当成「第 9 处之外」而漏掉：`/nav` 的 **URL 参数解析**里也有同一份默认值，
   //   而且多一个「偏离默认值才写进查询串」的比较 —— 漏改这里会让页面按 5 张请求、
   //   接口按 6 张出卡（张数在这里被**悄悄压回** 5）。
   {
@@ -119,6 +85,24 @@ const SITES: Site[] = [
     must: ": NAV_LIMIT_DEFAULT;",
     mustNot: /: 5;|!== 5\)/,
     label: "nav-params.ts（/nav URL 默认值 + 「偏离默认值才写」判断）",
+  },
+  {
+    file: "src/lib/recommend/card-href.ts",
+    must: "p.limit ?? RECOMMEND_LIMIT_DEFAULT",
+    mustNot: /p\.limit \?\? 5\b/,
+    label: "card-href.ts（拼 href 默认值）",
+  },
+  {
+    file: "src/components/RecommendCard.tsx",
+    must: "limit = RECOMMEND_LIMIT_DEFAULT",
+    mustNot: /limit = 5\b/,
+    label: "RecommendCard.tsx（单卡 limit 缺省值）",
+  },
+  {
+    file: "src/components/RecommendCards.tsx",
+    must: "limit = RECOMMEND_LIMIT_DEFAULT",
+    mustNot: /limit = 5\b/,
+    label: "RecommendCards.tsx（列表 limit 缺省值）",
   },
 ];
 
@@ -132,12 +116,12 @@ for (const s of SITES) {
 console.log("③ P0：卡片链接带 limit（否则第 N 张卡点了没反应）");
 {
   const cardSrc = read("src/components/RecommendCard.tsx");
-  const call = cardSrc.slice(cardSrc.indexOf("buildCardHref({"), cardSrc.indexOf("});", cardSrc.indexOf("buildCardHref({")));
+  const at = cardSrc.indexOf("buildCardHref({");
+  assert(at >= 0, "RecommendCard 仍调用 buildCardHref（兜底跳转）");
+  const call = at >= 0 ? cardSrc.slice(at, cardSrc.indexOf("});", at)) : "";
   assert(call.includes("limit"), "RecommendCard 的 buildCardHref 调用带 limit（P0 修复）");
-  assert(/limit = RECOMMEND_LIMIT_DEFAULT/.test(cardSrc), "RecommendCard 的 limit 缺省 = RECOMMEND_LIMIT_DEFAULT");
   const listSrc = read("src/components/RecommendCards.tsx");
   assert(/limit=\{limit\}/.test(listSrc), "RecommendCards 把 limit 透传给每张卡");
-  assert(/limit=\{RECOMMEND_LIMIT_DEFAULT\}/.test(read("src/components/RecommendClient.tsx")), "RecommendClient 下传 limit");
 }
 
 // ── D. git grep：全 src/ 无残留字面量 ──
@@ -157,7 +141,6 @@ console.log("④ git grep：全 src/ 残留扫描");
     }
     // 保守做法：`?? 5` 这类写法本身是合法的 JS（只是不该用在「张数」上），
     // 故只对「同一行同时出现 limit/LIMIT」的命中判红（避免误伤 `x ?? 5` 的其它语义）。
-    // 只关心「与张数有关」的命中行（`?? 5` 也可能出现在别的语义里）
     const lines = hits
       .split("\n")
       .filter((l) => l.trim())

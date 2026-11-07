@@ -37,6 +37,19 @@ export const ALLOW_FILES = new Set([
 /** 扩展名硬拦截：二进制大件 / 备份 / 环境文件 */
 export const BLOCK_EXT = [".pptx", ".mp4", ".mov", ".dump", ".sql", ".gz", ".zip"];
 
+/**
+ * `BLOCK_EXT` 的显式豁免（**必须由门禁侧枚举，不得由被检文件自证**）。
+ *
+ * 只有一条，理由必须写清：`db/schema.sql` 是**建表结构单一真源**，自仓库建立起就是
+ * 已跟踪的纯文本文件，且**必须与迁移脚本同批提交**（新增表不更新 schema.sql 会在换机器
+ * 跑 `db:schema` 时缺表）。`.sql` 进 BLOCK_EXT 的初衷是拦 `backups/` 下的**数据 dump**
+ * （含真实数据、体积大），与该文件无关 —— 若不豁免，等于要求提交迁移却不许提交结构定义，
+ * 长期结果是 schema.sql 与库悄悄分叉。
+ *
+ * ⚠️ 新增条目前先问：它是不是「已跟踪的纯文本结构/契约文件」？是数据快照一律不加。
+ */
+export const BLOCK_EXT_ALLOW = new Set(["db/schema.sql"]);
+
 /** 敏感内容特征：命中即硬拦（这些是「绕过访问控制」的说明书特征） */
 export const SENSITIVE = [
   { re: /macauweb/i, why: "DSAT 内部接口路径" },

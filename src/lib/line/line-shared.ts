@@ -18,6 +18,12 @@
  *   ⇒ **null 时不得参与任何计算**（排序/进度/比例都不行），只能当可选展示。
  */
 
+/**
+ *   线路名统一口径（剥 `LRT-` + 简→繁）。纯展示层、零依赖 ⇒ 不违反本文件「只允许 type 与零依赖常量」。
+ *   ⚠️ 引入它是为了消灭「就地写 replace」造成的简繁分裂（见 `chipLabelOf` 注释）。
+ */
+import { lineNameOf } from "@/lib/route-label";
+
 /** 线路种类 */
 export type LineKind = "bus" | "lrt";
 
@@ -149,7 +155,14 @@ export function mainOf(code: string): string {
   return /^[A-Za-z]+\d+/.exec(code)?.[0] ?? code;
 }
 
-/** 徽章文案：轻轨去掉 `LRT-` 前缀只留中文名（`LRT-氹仔线` → `氹仔线`） */
+/**
+ * 徽章文案：轻轨走统一口径 `lineNameOf()` —— 剥 `LRT-` 前缀 **并做简→繁转换**
+ *
+ * ★ 2026-11-06（D-1 缺陷修复）：原先是 `code.replace(/^LRT-/, "")`，只剥前缀不转字
+ *   ⇒ `/line/LRT-氹仔线` 顶栏显示简体 `氹仔线`，而「全部线路」面板与 `RouteStack`
+ *   都走 `lineNameOf` 显示繁体 `氹仔線` ⇒ **同一条线两种写法**，用户会以为是两条线。
+ *   **不要再就地写 replace**，一律走本函数。
+ */
 export function chipLabelOf(code: string, kind: LineKind): string {
-  return kind === "lrt" ? code.replace(/^LRT-/, "") : code;
+  return kind === "lrt" ? lineNameOf(code) : code;
 }

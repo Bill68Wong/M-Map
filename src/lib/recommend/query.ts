@@ -16,6 +16,20 @@
  *   实测反证链：v1.0.2 把连接池上限 5→12（无效）、v1.0.3 把 route_stations 传输量
  *   压掉 9 成（仍无效，staticMs 2283ms 几乎不动）→ **传输量与连接数都不是瓶颈，
  *   固定建连成本才是**。走 Data Cache 后，冷启动直接读边缘缓存 → 完全不碰数据库。
+ *
+ * ★ 2026-11-06（问题 #6 · C4）**「本层不缓存任何实时字段」的结构性保证** ——
+ *   60s 内复用的是**派生表的原始行**，逐字段核对（`fetchStaticRowsUncached` 的 10 条 SELECT）：
+ *     routeStops/stations（站序·站名·坐标）· seg（`segment_stats` 逐跳时长统计）
+ *     · walk（`walk_times` 步行均值）· transfer（`transfer_walks`）· colors（`routes.color`）
+ *     · lrtApi（站码映射）· lrtHol（法定假期日）· lrtTt（`lrt_timetables` **表定班次**）
+ *     · lrtBias / lrtLineParams（时刻偏差校准值）
+ *   ⇒ 全部是「已入库的历史统计 / 表定数据」，**没有任何一项随车辆位置或到站时刻变化**。
+ *   实时部分（DSAT 报站 / 轻轨下一班）**不经过本层**：
+ *     · 巴士 → `live.ts` 每次请求现查 DSAT（2026-11-06 起 `force=true` 穿透其 5s 进程缓存）；
+ *     · 轻轨 → `lrtPre` 只装**时刻表行**，`queryLrtDepartures(pre, { nowMs })` 每次按 `nowMs`
+ *       现算「下一班」（`buildLrtPreload` 是纯函数，不落任何 `now` 快照）。
+ *   ⇒ 本层 60s 缓存**不会**让「还有 N 站 / 约 X 分」变旧。改本文件时若往 `StaticRows` 加字段，
+ *     必须先回答「它会不会过期」——会过期的**不许进这里**。
  */
 import type { Pool } from "pg";
 import { unstable_cache } from "next/cache";
@@ -27,8 +41,6 @@ import {
   type StationRow,
 } from "@/lib/dsat/route-index";
 import { buildLrtPreload, type LrtPreload } from "@/lib/lrt/next-departures";
-import type { PlanLegLite } from "@/lib/timer-flow";
-import { enumerateOptions, type PlanLite } from "./enumerate";
 import { buildSegmentIndex, type SegmentIndex } from "./segment-lookup";
 import {
   buildTransferIndex,
@@ -37,14 +49,13 @@ import {
   type TransferIndex,
   type WalkIndex,
 } from "./model";
+import { PLACE_ID_BY_SLUG } from "./place-ids";
 import type {
-  OptionSeed,
   RouteIndex,
   SchoolZone,
   SegmentStatRow,
   TransferWalkRow,
   WalkTimeRow,
-  StationWalkDistanceRow,
 } from "./types";
 
 export interface RecStatic {
@@ -58,9 +69,8 @@ export interface RecStatic {
    * 详见 `src/lib/lrt/next-departures.ts#LrtPreload`。
    */
   lrtPre: LrtPreload;
+  /** slug → place_id（★ 2026-11-06 起来自 `./place-ids` 常量，不再查 `places` 表） */
   placeIds: Record<string, number>;
-  /** 全部在用方案的幂等数据（plan + legs） */
-  planRows: { plan: PlanLite; legs: PlanLegLite[] }[];
   /** 线路码 → 主题色 */
   routeColors: Record<string, string>;
 }
@@ -108,12 +118,7 @@ interface StaticRows {
   /** ★ v3.6.1：**数组编码**形态（消费前必须 `decodeSegRows`，见 loadStaticsUncached） */
   seg: SegRowEncoded[];
   walk: WalkTimeRow[];
-  /** ★ v1.2.0：高德步行距离（独立缓存表） */
-  walkDist: StationWalkDistanceRow[];
   transfer: TransferWalkRow[];
-  places: { id: number; slug: string }[];
-  plans: PlanLite[];
-  legs: Record<string, unknown>[];
   colors: { code: string; color: string }[];
   lrtApi: { db_code: string; api_id: string; name_tc: string | null }[];
   lrtHol: { d: string }[];
@@ -130,11 +135,7 @@ async function fetchStaticRowsUncached(pool: Pool): Promise<StaticRows> {
     routeIdxRows,
     segRes,
     walkRes,
-    walkDistRes,
     transferRes,
-    placeRes,
-    planRes,
-    legRes,
     colorRes,
     lrtApiRes,
     lrtHolRes,
@@ -148,33 +149,10 @@ async function fetchStaticRowsUncached(pool: Pool): Promise<StaticRows> {
               avg_minutes, p50_minutes, samples FROM segment_stats`,
     ),
     pool.query(`SELECT place_id, station_code, zone, minutes, samples, distance_m FROM walk_times`),
-    // ★ v1.2.0：高德步行距离（与 walk_times 分层的独立缓存表）
-    //   即使某组还没有实测样本，只要抓过距离，档 1 的随距离衰减就能算 ✓
-    //   表尚未建时容错为空（不阻塞推荐）
-    pool
-      .query(`SELECT place_id, station_main, zone, distance_m FROM station_walk_distance`)
-      .catch(() => ({ rows: [] as unknown[] })),
     // transfer_walks 在 v1.0.0 新建；表尚未建时容错为空（不阻塞推荐）
     pool
       .query(`SELECT from_station, to_station, minutes, samples, source FROM transfer_walks`)
       .catch(() => ({ rows: [] as unknown[] })),
-    pool.query(`SELECT id, slug FROM places`),
-    pool.query(
-      `SELECT p.id, p.summary, pf.slug AS from_slug, pt.slug AS to_slug
-         FROM commute_plans p
-         JOIN places pf ON pf.id = p.from_place
-         JOIN places pt ON pt.id = p.to_place
-        WHERE p.is_active
-        ORDER BY p.id`,
-    ),
-    pool.query(
-      `SELECT l.plan_id, l.seq, l.leg_kind, l.route_options, l.from_station, l.to_station,
-              l.board_candidates, l.alight_candidates, l.route_meta, l.border_label
-         FROM plan_legs l
-         JOIN commute_plans p ON p.id = l.plan_id
-        WHERE p.is_active
-        ORDER BY l.plan_id, l.seq`,
-    ),
     pool.query(`SELECT code, color FROM routes WHERE color IS NOT NULL`),
     // ── 轻轨预载三件套（v1.0.0 性能修复；都是极小静态表）──
     pool
@@ -204,11 +182,7 @@ async function fetchStaticRowsUncached(pool: Pool): Promise<StaticRows> {
     stations,
     seg: encodeSegRows(segRes.rows as unknown as SegmentStatRow[]),
     walk: walkRes.rows as unknown as WalkTimeRow[],
-    walkDist: walkDistRes.rows as unknown as StationWalkDistanceRow[],
     transfer: transferRes.rows as unknown as TransferWalkRow[],
-    places: placeRes.rows as { id: number; slug: string }[],
-    plans: planRes.rows as unknown as PlanLite[],
-    legs: legRes.rows as Record<string, unknown>[],
     colors: colorRes.rows as { code: string; color: string }[],
     lrtApi: lrtApiRes.rows as { db_code: string; api_id: string; name_tc: string | null }[],
     lrtHol: lrtHolRes.rows as { d: string }[],
@@ -396,36 +370,13 @@ async function loadStaticsUncached(): Promise<RecStatic> {
     at: Date.now(),
   };
 
-  const placeIds: Record<string, number> = {};
-  for (const r of rows.places) placeIds[r.slug] = r.id;
+  // ★ 2026-11-06：`places` 表已删，slug ↔ id 关系固定在 `./place-ids` 常量里。
+  //   方向是 slug → id（`nav-service.ts#slugOf` 用 `Object.keys(st.placeIds)` 判断
+  //   「起终点是不是预设四地点」，键必须是 slug）。
+  const placeIds: Record<string, number> = { ...PLACE_ID_BY_SLUG };
 
   const routeColors: Record<string, string> = {};
   for (const r of rows.colors) routeColors[r.code] = r.color;
-
-  const legsByPlan = new Map<number, PlanLegLite[]>();
-  for (const r of rows.legs) {
-    const pid = r.plan_id as number;
-    if (!legsByPlan.has(pid)) legsByPlan.set(pid, []);
-    const opts = r.route_options ? (JSON.parse(r.route_options as string) as string[]) : null;
-    legsByPlan.get(pid)!.push({
-      seq: r.seq as number,
-      leg_kind: r.leg_kind as PlanLegLite["leg_kind"],
-      route_options: opts,
-      from_station: (r.from_station as string) ?? null,
-      to_station: (r.to_station as string) ?? null,
-      board_candidates: (r.board_candidates as string[]) ?? null,
-      alight_candidates: (r.alight_candidates as string[]) ?? null,
-      route_meta: (r.route_meta as PlanLegLite["route_meta"]) ?? null,
-      border_label: (r.border_label as string) ?? null,
-      // plan_legs 无 color 列 → 按默认线路（route_options[0]）取线路主题色（口径同 home-plans.ts）
-      color: opts?.[0] ? (routeColors[opts[0]] ?? null) : null,
-    });
-  }
-
-  const planRows = rows.plans.map((plan) => ({
-    plan,
-    legs: legsByPlan.get(plan.id) ?? [],
-  }));
 
   const routeIdx = buildRouteIndexFromRows(rows.routeStops, rows.stations);
 
@@ -433,7 +384,10 @@ async function loadStaticsUncached(): Promise<RecStatic> {
     routeIdx,
     // ★ v3.6.1：seg 在缓存里是数组编码 → 消费前解码回对象（仅 cache-miss 路径，~15k 次 map 可忽略）
     segIdx: buildSegmentIndex(decodeSegRows(rows.seg)),
-    walkIdx: buildWalkIndex(rows.walk, rows.walkDist),
+    // ★ 2026-11-06：`station_walk_distance` 已删。`walk_times.distance_m` 实测 20 行全为 NULL
+    //   ⇒ 距离索引为空，档 1（「全力冲刺能赶上」）退回线性速度比（`tier1EffRatio` 的既有无值分支）。
+    //   这是 Spec §6.2 已接受的降级，**不是静默失败**：不传第二参数，索引内 distByKey 恒空。
+    walkIdx: buildWalkIndex(rows.walk),
     transferIdx: buildTransferIndex(rows.transfer),
     // 站序直接复用刚构建的 routeIdx.dirStops（不再单独查 route_stations）
     lrtPre: buildLrtPreload({
@@ -445,17 +399,8 @@ async function loadStaticsUncached(): Promise<RecStatic> {
       lineParamRows: rows.lrtLineParams,
     }),
     placeIds,
-    planRows,
     routeColors,
   };
-}
-
-/** 枚举某方向（from→to）的全部候选路线方案 */
-export function optionsFor(st: RecStatic, fromSlug: string, toSlug: string): OptionSeed[] {
-  const rows = st.planRows.filter((r) => r.plan.from_slug === fromSlug && r.plan.to_slug === toSlug);
-  const out: OptionSeed[] = [];
-  for (const r of rows) out.push(...enumerateOptions(r.plan, r.legs, st.routeIdx));
-  return out;
 }
 
 /** 组装模型上下文（live 由调用方注入；nowBucket 由调用方用 `nowBucketOfHolidayAware` 算好） */
@@ -482,11 +427,4 @@ export function contextFor(
     skippedBySchedule: [],
     nowBucket,
   };
-}
-
-/** 候选方案需要的全部线路码（去重） */
-export function routesOf(options: OptionSeed[]): string[] {
-  const s = new Set<string>();
-  for (const o of options) for (const seg of o.segments) s.add(seg.route);
-  return [...s];
 }

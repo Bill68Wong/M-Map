@@ -251,6 +251,19 @@ export default function PoiSearchBox({
               <span className={`nav-sbox__type nav-sbox__type--${p.targetKind}`}>
                 {TYPE_LABEL[p.targetKind as PoiKind] ?? "站点"}
               </span>
+              {/*
+                * ⚠️ **本分支不可达**（2026-11-06 实证，勿据此排工期）：
+                *   `poi-search.ts:159-174` 把 `targetKind === "route"` 的命中**先分流到独立分区
+                *   `routes`**，随后 `continue`；`:183` 又只放行 `station` / `lrt_station` 进 `pending`。
+                *   ⇒ `pending[].targetKind` 的值域**不含 `route`**，这里永远不会渲染。
+                *
+                *   保留原因（两条，缺一不可）：
+                *   ① **类型收窄**：`pending` 的元素类型仍含 `route`，删掉分支 `tsc` 会报可能为 undefined；
+                *   ② **防将来可达**：若哪天 `poi-search` 改回把 route 放进 `pending`，此处必须能显示线号。
+                *
+                *   与 `SearchSheet.tsx:213/218` 的同类防御**同一口径** —— 那边有「不可达」说明，
+                *   这边此前没有，看代码的人会以为可达并「修」出一个假 bug。
+                */}
               {p.targetKind === "route" ? (
                 <RouteStack codes={[p.name]} colorOf={(c) => colors?.[c] ?? null} />
               ) : (

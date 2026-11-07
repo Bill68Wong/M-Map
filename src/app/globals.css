@@ -1046,25 +1046,10 @@ button[aria-disabled="true"] {
 /* 样本数小标签（实色底上以半透同色 pill 呈现，颜色随文字对比色） */
 
 
-/* 乘车界面线路徽章（v0.7.0 主题色点缀）
-   ★ 2026-09-26（AC-38）：全站线路标签统一到 v2.4.1 规范 ⇒ 圆角由胶囊 `--r-pill` 收敛到
-      `--radius-chip`（6px 圆角矩形）；规则**保留**（回滚安全 / 未来复用）。 */
-.route-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 22px;
-  padding: 0 10px;
-  border-radius: var(--radius-chip);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-  white-space: nowrap;
-  /* ★ v1.1.7：深色下暗色线路标签会与卡片背景融成一块污渍（实测 #276299 on #1c1e24 = 2.61:1）
-     → 加细内描边把它「拎」出来。 */
-  box-shadow: var(--hairline-inset);
-}
+/* ★ 2026-11-06（M15 / 死代码门禁）：原 v0.7.0 的 `.route-chip` 徽章（12px/600、`letter-spacing:.3px`、
+   胶囊→6px 圆角的过渡形态）**已删除** —— 全仓 JSX 零引用，只被这段 CSS 与注释自己提到。
+   现行唯一出口：`.route-stack__seg`（组内分段）/ `.rl-chip`（选线网格）/ `.nav-linechip`（品牌栏）/
+   `.nav-vehicle-card__line`（车辆卡）/ `.linechip`（搜索行与线页头）。别再从旧稿抄回来。 */
 
 /* 乘车界面顶部行程进度条（v0.12.2 需求 6：按项目等分 + 载具主题色渐变，替代 phase-band） */
 .jp {
@@ -1110,11 +1095,9 @@ button[aria-disabled="true"] {
   display: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  .route-chip {
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
-  }
-}
+/* ★ 2026-11-06（M15）：原 `@media (prefers-color-scheme: dark) { .route-chip { … } }` 已随
+   `.route-chip` 一并删除（该类全仓零引用）。深色下线路标签的内描边现由 `.linechip` 族
+   的 `data-chip-ink` 分支 + `--chip-ring` / `--chip-ring-dark` 承担。 */
 
 /* ★ v3.2.0（需求 13）：v0.19.1「谷歌地图风格」线路标签**回归** —— 现行规范见本文件下方
    B2 段（组级裁剪 + 块平行四边形切角 + 「/」形负空间留白缝 + 白字）。此处不再重复定义。 */
@@ -2505,6 +2488,16 @@ button[aria-disabled="true"] {
 .nav-map__canvas {
   position: absolute;
   inset: 0;
+  /* ★ 2026-11-05（f.e. 实测修复，非本迭代功能改动）：
+     高德 2.0 初始化时会**运行时注入** `<style>.amap-container{position:relative}</style>`，
+     它排在 `globals.css` 之后且与 `.nav-map__canvas` **同权重** ⇒ 后者胜出，
+     `inset:0` 随之失效；而容器内只有绝对定位子节点 ⇒ 计算高度塌成 **0px**
+     （实测 `.nav-map__canvas` 390×0、`<canvas>` 780×0 ⇒ 全部 marker 被压到顶部一条，
+      地图既不能点也不能拖）。
+     `height:100%` 是**与 position 取值无关**的兜底：absolute + inset:0 时同值无害，
+     relative 时立刻拿到父级高度。父级（`.nav-map--full` fixed / `.nav-map` aspect-ratio）
+     高度都是确定的，百分比可解析。 */
+  height: 100%;
 }
 .nav-map__cover {
   position: absolute;
@@ -3711,7 +3704,11 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   overflow: hidden; /* ◆ 只裁本组 ⇒ 单一圆角外框；组与组互不影响 */
 }
 
-/* ③ 块（右倾平行四边形） */
+/* ③ 块（右倾平行四边形）
+   ★★ R6（2026-11-06）：白字 + 官方线路色底（不加深）。5 族统一补偿 = 700 + 双层 text-shadow。
+   为什么必须双层：单层只向下偏移 ⇒ 字**顶**与左右在浅底上没有暗边，氹仔线 `#93d50a` 上
+   白字 1.79:1 会「飘」出底色。第 2 层是暗色内收（`0 0 1.5px`），不是外发光，不违反 R6。
+   ⚠️ 阴影**不改变** WCAG 对比度数值 ⇒ 不得据此宣称已满足 AA（59/95 条属登记偏差）。 */
 .route-stack__group .route-stack__seg {
   display: inline-flex;
   align-items: center;
@@ -3723,6 +3720,9 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   letter-spacing: 0.2px;
   padding: 4px 14px; /* 14 ≥ 斜切 8 ⇒ 文字不被斜边切 */
   white-space: nowrap;
+  text-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.28),
+    0 0 1.5px rgba(0, 0, 0, 0.32);
   box-shadow: var(--hairline-inset);
   clip-path: polygon(8px 0, 100% 0, calc(100% - 8px) 100%, 0 100%);
   margin-right: -5px; /* 咬合 ⇒ 缝宽 = 8 − 5 = 3px */
@@ -5370,7 +5370,10 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   color: var(--muted);
 }
 
-/* 卡片通用：方形 + 主题色底 + 白字 + **绝不换行** */
+/* 卡片通用：方形 + 主题色底 + 白字 + **绝不换行**
+   ★★ R6（2026-11-06）：补偿统一为 **700 + 双层 text-shadow**（原 600 + 单层 `.18`）。
+   双层原因见 `.route-stack__group .route-stack__seg` 上方注释（单层缺字顶/左右暗边）。
+   ⚠️ 阴影不改变对比度数值，不得宣称已满足 AA。 */
 .rl-chip {
   box-sizing: border-box;
   display: flex;
@@ -5379,11 +5382,13 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   border: 0;
   border-radius: 8px;
   color: #fff;
-  font-weight: 600;
+  font-weight: var(--fw-announce);
   white-space: nowrap;
   overflow: hidden;
   cursor: pointer;
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.18);
+  text-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.28),
+    0 0 1.5px rgba(0, 0, 0, 0.32);
   box-shadow: 0 1px 2px rgba(15, 23, 32, 0.2);
 }
 /* ★ U11：T6 chip 档 —— 1.00 不缩放（`rl-chip` 是线路色块，缩放会与相邻块串味） */
@@ -5391,39 +5396,26 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   transform: none;
 }
 
-/* 轻轨行：3 张较宽卡片（名字较长） */
-.rl-sheet__lrt {
-  flex: none;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-}
+/* 轻轨行：3 张较宽卡片（名字较长）
+   ★ 2026-11-06（M17 / 死代码门禁）：`.rl-sheet__lrt`（旧 3 列容器）已删除 —— 已被
+   `.rl-board--lrt` 取代，全仓 JSX 零引用。`.rl-chip--lrt` **保留**（`RouteLinesSheet.tsx:167`
+   仍用 `rl-chip rl-chip--lrt`）。 */
 .rl-chip--lrt {
   height: 44px;
   font-size: 14px;
   letter-spacing: 0.02em;
 }
 
-/* 巴士：7 列网格（390px 宽下每格约 52px，够放 25AX / 701X 这种 4 字符） */
-.rl-sheet__bus {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  /* 行高自适应：14 行正好铺满剩余高度（不滚动） */
-  grid-auto-rows: 1fr;
-  gap: 6px;
-}
-.rl-chip--bus {
-  font-size: 12px;
-  height: 100%;
-  min-height: 28px;
-}
+/* ★ 2026-11-06（M17）：`.rl-sheet__bus`（旧 7 列容器）与 `.rl-chip--bus` 一并删除 ——
+   两者的容器/芯片形态已由 `.rl-board--bus` + `.rl-chip--board` 取代，全仓 JSX 零引用。
+   ⚠️ 别再按旧稿写 `grid-template-columns: repeat(7,…)` 容器：现行网格定义在 `.rl-board--bus`。 */
 
 /* ── 底部「路线查看中」标签（M Map 与定位按钮那一行中间）──
    ★ 2026-09-26（AC-38 / 07 §j.2）：由「999px 胶囊」收敛到既有 v2.4.1 规范 ——
       圆角 `--radius-chip`(6px)、高 32→30px、padding `0 6px 0 10px`、
-      `box-shadow` 改用 `--hairline-inset`（与 RouteStack 同款细描边，辨识一致）。 */
+      `box-shadow` 改用 `--hairline-inset`（与 RouteStack 同款细描边，辨识一致）。
+   ★★ R6（2026-11-06）：补偿统一为 **700 + 双层 text-shadow**（原 600 + 无阴影）。
+   ⚠️ 这里没有 `text-shadow` 时，浅底线路（氹仔线 1.79:1）白字会与底色糊成一片。 */
 .nav-linechip {
   display: inline-flex;
   align-items: center;
@@ -5433,7 +5425,10 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   border-radius: var(--radius-chip);
   color: #fff;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: var(--fw-announce);
+  text-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.28),
+    0 0 1.5px rgba(0, 0, 0, 0.32);
   box-shadow: var(--hairline-inset);
   white-space: nowrap;
 }
@@ -5472,15 +5467,26 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
 }
 
 /* ── 路线查看模式的站点区分（产品口径「一眼分辨」）──
-   · `--onroute`：本线站点 —— 放大（保留原填充：巴士=青花蓝实心 / 轻轨=线路色方）
-   · `--dim`    ：其他站点 —— 缩小 + 转灰 + 半透明（环境参照还在，但不抢镜）
-   ★ v2.10.0：形状与填充改由基础类承载，这里只负责「放大/缩小/转灰」。 */
-.nav-map__station--onroute {
-  width: 16px;
-  height: 16px;
-  border-width: 2px;
-  box-shadow: 0 0 0 1.5px rgba(15, 23, 32, 0.4);
-}
+   · 本线站点：**与常态站标完全一致**（不放大、不加粗白边、无额外外圈）
+   · `--dim`  ：其他站点 —— 缩小 + 转灰 + 半透明（环境参照还在，但不抢镜）
+   ★ v2.10.0：形状与填充由基础类承载，本段只负责「缩小/转灰」。
+   ★ 2026-11-06 修复（用户口径：「路线查看模式下指定线路的经停站站标与正常站标不同，
+     会有一层白色粗边」）—— `.nav-map__station--onroute` 与
+     `.nav-map__station--lrt.nav-map__station--onroute` **两个规则块整块删除**（空块不留）：
+     ⚠️ 这两个类名在 **TSX 侧已不再输出**（全仓 CSS/TSX 零引用）⇒ 不存在「还有元素带这个类、
+        等着补样式」的情况，**不要**按本节历史说明把规则加回来。
+       改前：本线站 11→**16px**（轻轨 13→**18px**）、`border-width` 1.5→**2px**、
+             `box-shadow` 1→**1.5px**  ⇒ 白圈整体厚 1.5px、点还大 45%，与常态站标「长得不一样」✗
+       改后：尺寸/白边/外圈**全部继承基础类** —— 巴士 `.nav-map__station` = 11px +
+             1.5px 白描边 + 1px 深外圈；轻轨 `.nav-map__station--lrt` = 13px r3 同款描边
+             ⇒ 与常态站标**像素级一致**。
+     去掉放大/粗边后「本线 vs 其它」仍可分辨：路线模式下 marker 白名单直接按本线站点
+     建点（`NavMap.tsx` 的 `white = routeStopsRef`），屏幕上本来就只有本线站；
+     `--dim` 继续承担「同主码不同站台」的降级态。
+   ⚠️ TSX 侧已改为输出 `data-on-route="1"` 属性（`NavMap.tsx`，不再追加 `--onroute` 类名）。
+     视觉上本线站与常态站标**像素级一致** —— 不要再为此类（或任何"本线站"钩子）补任何样式：
+     一旦补上尺寸/描边/外圈，就立刻重新制造出「两套站标规格」，正是本次 #3 的病根。
+     要观测或调试「本线站」，请查 `[data-on-route="1"]`，不要复活 `--onroute` 类名。 */
 .nav-map__station--dim {
   width: 8px;
   height: 8px;
@@ -5489,12 +5495,10 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   opacity: 0.45;
   box-shadow: none;
 }
-/* 轻轨站在路线模式下的叠加（保持方形特征，只是更大/更小） */
-.nav-map__station--lrt.nav-map__station--onroute {
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-}
+/* 轻轨站在路线模式下的叠加：**只剩「变小」这一种**（保持方形特征与线路色）
+   ★ 2026-11-06：`.nav-map__station--lrt.nav-map__station--onroute`（18px / r4）已整块删除
+     —— 本线轻轨站回到 `.nav-map__station--lrt` 的 13px / r3，与常态站标一致。
+     TSX 侧该类名同样已不再输出（本线站改为 `data-on-route="1"`），无样式可补、也不许补。 */
 .nav-map__station--lrt.nav-map__station--dim {
   width: 11px;
   height: 11px;
@@ -5520,16 +5524,21 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   min-width: 0;
 }
 
-/* 线路名主题色标签（颜色是数据 ⇒ 行内 background 注入） */
+/* 线路名主题色标签（颜色是数据 ⇒ 行内 background 注入）
+   ★★ R6（2026-11-06）：补偿统一为 **700 + 双层 text-shadow**（原 500 + 单层 `.16`）。
+   500 → 700 跨度最大的就是这一族：12px 小字在浅底线路色上 500 字重太细，
+   白字笔画几乎与底色同亮，加粗是 R6 允许的两种补偿之一。 */
 .nav-vehicle-card__line {
   flex: none;
   padding: 2px 8px;
   border-radius: 6px;
   color: #fff;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: var(--fw-announce);
   white-space: nowrap;
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.16);
+  text-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.28),
+    0 0 1.5px rgba(0, 0, 0, 0.32);
 }
 
 /**
@@ -6511,6 +6520,27 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   box-shadow: none;
 }
 
+/* ── 变体：站序弹窗内的巴士信息卡（`RouteStopsSheet` · #6）─────────────────
+   站序弹窗内的巴士卡，底部对齐弹窗而非地图底栏；内联 bottom 已移除，勿加回。
+   · 为什么需要：基础规则的 `bottom` 按**地图页底栏**算
+     （`--tabbar-h` + safe + `--space-3`）；满屏站序弹窗里没有底栏 ⇒ 卡片会悬空
+     约 76px（`--tabbar-h` 64 + `--space-3` 12），看着像「没贴底」的 bug。
+     本变体改贴安全区上方 = 站序弹窗自己的底边口径（与 `.lst-sheet__toast` 一致）。
+   · 为什么用**属性选择器**而不是新类名：`data-bus-card` 已是 `RouteStopsSheet` 里的
+     既有观测属性 ⇒ 作用域天然存在，不再往 TSX 里加第二个类名（少一个可漂的钩子）。
+   · 为什么必须**限定**、不能直接改基础规则：`.nav-card-overlay` 同时被
+     `NavShell` 的车卡/站卡（地图页，底栏确实存在）复用 ⇒ 改基础会把地图页那张卡
+     一起抬高 76px。
+   · 特异性 `0,2,0` > 基础规则 `0,1,0` ⇒ 无论源码顺序都在基础规则之后生效。
+     ⚠️ 迁移期 `RouteStopsSheet` 还留着一行**内联** `bottom`（内联 > 类，取值与本条相同）
+        ⇒ 本条此刻是等价接管、零视觉变化；他删掉那行内联后本类即生效。**不要反向把
+        内联加回来**：内联会让 `prefers-reduced-motion` / 主题 / 未来任何调整都无法覆盖。
+   · 卡片挂在 `.lst-sheet` **之外**（fragment 兄弟）：`.lst-sheet` 带 `transform`
+     ⇒ 其内部 `position: fixed` 会变成相对祖先定位、还会跟着档位位移被拖出视口。 */
+.nav-card-overlay[data-bus-card="route-stops"] {
+  bottom: calc(var(--space-2) + var(--safe-bottom));
+}
+
 /* ── 面板打开期间隐藏顶部搜索框（200ms 淡出；Safari 16.4+ / Chrome 支持 :has 前的兼容做法）── */
 .nav-searchbar {
   transition: opacity var(--sheet-dur-scrim) var(--ease-standard);
@@ -6852,20 +6882,9 @@ body[data-sheet="open"] .nav-searchbar {
   flex-wrap: nowrap;
   white-space: nowrap;
 }
-/* ★ T5：本段「车上约 N 分」—— 展开态（导航强制展开 / 手动展开）也要能看到，
-   否则一进导航（`open = true`）这句话就从折叠键里消失。 */
-.navstrip__ride {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-  padding: 0 0 2px 30px; /* 与站行文字左边界对齐（.navstrip__row 的 padding-left） */
-  font-size: var(--text-xs);
-  color: var(--muted);
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-.navstrip__ride b { color: var(--fg); font-weight: var(--fw-emphasize); }
-.navstrip__ride-sub { color: var(--muted); }
+/* ★ 2026-11-06（P0 · 删导航冗余行）：`.navstrip__ride` / `.navstrip__ride-sub` 已随
+   「车上约 N 分 · 已过 n 站」整行删除（`NavStrip.tsx` 同步移除渲染 + `data-ride-min` 观测钩子）。
+   删前已全仓 grep 确认这两个类名只被那一行引用，无第二消费方、无 e2e/QA 钩子依赖。 */
 .navstrip__hop { font-size: var(--text-xs); color: var(--meta); white-space: nowrap; }
 .navstrip__sub { font-size: var(--text-xs); color: var(--muted); white-space: nowrap; }
 /* ★ 2026-09-27（用户需求 3）：换乘处的「换乘后线路报时」（缩进对齐换乘行） */
@@ -8171,7 +8190,7 @@ body[data-nav-phase]:not([data-nav-phase="off"]) .nav-brandbar__acts { display: 
   /* ── ③ 线路搜索标签（实际字色由 chipInkOf() 运行时算，此处只登记两端） ── */
   --chip-ink-light: #ffffff; /* 深底 ⇒ 白字 */
   --chip-ink-dark: var(--fg); /* 浅底 ⇒ 深字 */
-  --chip-ring: inset 0 0 0 1px rgba(255, 255, 255, 0.22); /* 深底细内描边（沿用 .route-chip 做法） */
+  --chip-ring: inset 0 0 0 1px rgba(255, 255, 255, 0.22); /* 深底细内描边（该写法源自已删除的历史类 `.route-chip`，见 M15） */
   --chip-ring-dark: inset 0 0 0 1px rgba(15, 23, 32, 0.18); /* 浅底 + 深字时改暗描边 */
 
   /* ── ④ 速度分档 · 新增档 0「大概率赶不上」──────────────────────────────
@@ -8203,7 +8222,8 @@ body[data-nav-phase]:not([data-nav-phase="off"]) .nav-brandbar__acts { display: 
     --tier0-bg: var(--danger);
     --tier0-fg: #000000; /* 12.37:1（#000 属允许例外） */
 
-    /* ③ 线路标签内描边：深色下沿用 rgba(255,255,255,.22) 已够（同 .route-chip） */
+    /* ③ 线路标签内描边：深色下沿用 rgba(255,255,255,.22) 已够
+       （该写法源自已删除的历史类 `.route-chip`，现状由 `--chip-ring` 承载，见 M15） */
   }
 }
 
@@ -8582,8 +8602,23 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
 }
 
 /* ── 线路徽章（.linechip）──
-   底色由数据（routes.color）经 chipInkOf() 算出，字色/底色**内联注入**；
-   这里只管形态。data-chip-ink 供 QA 断言分支命中。 */
+   ★★ R6 裁决（2026-11-06）：**线路标签字色一律白字 + 官方线路色底（底色不加深）**。
+   ⇒ 本族原本按 `chipInkOf()` **自适应墨色**（浅底转深字 / 死带加深底色），与其余 4 族
+   （`.route-stack__seg` / `.rl-chip` / `.nav-linechip` / `.nav-vehicle-card__line`）
+   的固定 `#fff` 不一致 —— R6 已明确否决自适应方案用于线路标签，故此处改为 `color:#fff`。
+
+   ⚠️ **已知偏差（登记在案，不得以「可读性」为由改回深字）**：
+      全库 95 条线路色按白字算 **59 条低于 AA 4.5:1**，最坏氹仔线 `#93d50a` 仅 1.79:1、
+      澳巴 `#C26D32` 3.80:1、石排湾 `#8a66c3` 4.40:1。负责人已知并接受（R6）。
+   R6 允许的**唯一**补偿：加粗字重（下方 700）+ `text-shadow`（下方双层）。
+      禁止：发光描边 / 半透明衬底 / 降饱和 / 加深底色 / `-webkit-text-stroke`。
+   ⚠️ text-shadow **不改变 WCAG 对比度数值**，它补偿的是「字形边缘可辨性」——
+      不得据此宣称「已满足 AA」。
+
+   ── 底色与兜底 ──
+   底色由数据（`routes.color`）**内联注入**且**不加深**；`data-chip-ink` 只保留
+   「脏底色 ⇒ 中性底 + 线路色圆点」这一条兜底分支（见下方 `[data-chip-ink="fallback"]`），
+   该分支底色已不是线路色 ⇒ 深字是唯一可读解，不属 R6 约束范围。 */
 .linechip {
   flex: none;
   display: inline-flex;
@@ -8599,6 +8634,10 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
   white-space: nowrap;
   box-sizing: border-box;
   justify-content: center;
+  color: #fff;
+  text-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.28),
+    0 0 1.5px rgba(0, 0, 0, 0.32);
 }
 .linechip[data-chip-ink="light"],
 .linechip[data-chip-ink="deepened"] {
@@ -8752,6 +8791,147 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
   display: none;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   纵条四态巴士图标（#5c · `LineStopRow.tsx` 的 `VehMark`）
+   ──────────────────────────────────────────────────────────────────────────
+   结构：`.lp-stop__veh`（22×22 壳）> `.lp-stop__veh-disc`（盘）> 图标
+                                       > `.lp-stop__veh-hit`（隐藏命中层 44×44）
+
+   ── 定位常量（**三者共享，改一处必须同步三处**）────────────────────────
+     `.lp-stop__rail` `left:15px` + `width:3px` ⇒ 中心 16.5px
+     `.lp-stop__dot`  `left:12px` + `width:9px`  ⇒ 中心 16.5px
+     `.lp-stop__veh`  `left:16.5px` + `translateX(-50%)` ⇒ 与上两者**同心**
+     ⚠️ 前端 B 的 #2 依赖 rail/dot 的版式；本块**只新增**绝对定位元素，
+       不入 flex 流、不改行高（`min-height:56px` 保持），故与 B 无冲突。
+
+   ── 为什么 `position:absolute` ────────────────────────────────────────
+     若入 flex 流，22px 盘的加入会挤压 `.lp-stop__eta`（`min-width:96px`）
+     与站名宽度 ⇒ 整列换行位置变化。绝对定位 ⇒ 零副作用。
+
+   ── 四态（**色盲安全**：环宽与盘形差异是主编码，颜色只是冗余）──────────
+     `data-veh`     盘底                描边                      环
+     ready          var(--surface)      1.5px var(--lp-color)     无
+     stop           var(--lp-color)     0                          无
+     approach       var(--lp-color)     0                          4px @40% + 1.6s 呼吸
+     moving         var(--lp-color)     0                          2px @22%
+     实心盘的图标字色 = `#fff`（P0-2 允许的例外色）。
+     ⚠️ **不可**换成 `var(--accent-on)`：它随主题翻色（深色主题 → #062e6f 深蓝），
+        而 `--lp-color` 是**不随主题变**的线路数据色 ⇒ 会出现深底深字。
+
+   ── 现状：盘的四态外观目前仍是 `VehMark` 的**内联**样式（内联 > 类）──────
+     本块与内联**视觉等价** ⇒ 谁先落地都零回归。真正**必须**在这里的是动画：
+     内联 `animation` 无法被 `prefers-reduced-motion` 关掉 ⇒ `VehMark` 只输出
+     `data-veh-anim="breath"`，keyframes 归 CSS（下方）。
+
+   ⚠️ `data-veh` 与 `body[data-veh="..."]`（observe-hooks）**同名不同义**。
+      本块全部用 `.lp-stop__veh[...]` 前缀限定；**不要**写裸 `[data-veh]` 选择器
+      （会双匹配导航壳的状态钩子）。行内另有 `data-veh-scope="stops"` 供 QA 定位。
+   ══════════════════════════════════════════════════════════════════════════ */
+.lp-stop__veh {
+  position: absolute;
+  /* 16.5 = 竖线 left:15 + 3/2（与 `.lp-stop__rail` / `.lp-stop__dot` 同源常量） */
+  left: 16.5px;
+  /* `--veh-frac` 由 `VehMark` 写出（0 = 本行节点 / 1 = 下一行节点），仅 `moving` 有意义。
+     ⚠️ 若将来删掉 TSX 的内联 `top`，**必须同时**把 `--veh-frac` 写进 style，
+        否则插值比例恒为 0 ⇒ 行驶中的车会吸在本行节点上（静默错位，不报错）。 */
+  top: calc(50% + var(--veh-frac, 0) * 100%);
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: default;
+}
+/* 只有「车在跑」时才渲染成 `<button>`（`ready` / 不可点时是 `span[role=img]`）。
+   用标签选择器区分可点性 ⇒ 不依赖 JS 传 disabled 类。 */
+button.lp-stop__veh {
+  cursor: pointer;
+}
+/* 命中区 44×44 = 22 + 11×2（WCAG 2.5.5）。
+   用**真元素**而非 `::after`：`getBoundingClientRect()` 量得到 ⇒ 自动化可断言 44×44。 */
+.lp-stop__veh-hit {
+  position: absolute;
+  inset: -11px;
+}
+
+/* 盘：基础形态（四态差异见下方按 `data-veh` 的派生规则） */
+.lp-stop__veh-disc {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 22px;
+  height: 22px;
+  margin-left: -11px;
+  margin-top: -11px;
+  box-sizing: border-box;
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  border: 1.5px solid var(--lp-color, var(--primary));
+}
+/* `ready` 是唯一的空心盘（默认值即 ready 外观；其余三态覆盖为实心） */
+.lp-stop__veh[data-veh="stop"] .lp-stop__veh-disc,
+.lp-stop__veh[data-veh="approach"] .lp-stop__veh-disc,
+.lp-stop__veh[data-veh="moving"] .lp-stop__veh-disc {
+  background: var(--lp-color, var(--primary));
+  border: 0;
+}
+.lp-stop__veh[data-veh="moving"] .lp-stop__veh-disc {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lp-color, var(--primary)) 22%, transparent);
+}
+.lp-stop__veh[data-veh="approach"] .lp-stop__veh-disc {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--lp-color, var(--primary)) 40%, transparent);
+}
+
+/* ── 图标字色（四态）────────────────────────────────────────────────────
+   前端 A 补的**两条**规则，依据 = 盘底与图标必须保持明度反差：
+     · `ready`（准备发车）= **空心盘**（`--surface` 底 + 主题色描边）
+       ⇒ 图标取**线路色**（与描边同源；回退 `--primary` 与 `.lp-stop__veh-disc`
+         的 `border: 1.5px solid var(--lp-color, var(--primary))` 完全一致）；
+     · `stop` / `approach` / `moving` = **实心盘**（线路色底）
+       ⇒ 图标**白字** —— **R6 裁决：线路主题色标签一律白字**。
+          `#fff` 是 P0-2 唯一允许的字面色字面值。
+   ❌ **不可**改成 `var(--accent-on)`：它随主题翻色（深色主题 → 深蓝），
+      而 `--lp-color` 是**不随主题变**的线路数据色 ⇒ 深底深字、图标直接消失。
+
+   ⚠️ 落地状态：本两条入库后，`LineStopRow.tsx` 的 `VehMark` 里那段内联 `color`
+      （:257-265）即为冗余（内联 > 类，不删也不会错，只是留一层看不见的覆盖）。
+      删除由**文件所有者（前端 C）**执行，本块作者不改他人文件。 */
+.lp-stop__veh[data-veh="ready"] .lp-stop__veh-ico {
+  color: var(--lp-color, var(--primary));
+}
+.lp-stop__veh[data-veh="stop"] .lp-stop__veh-ico,
+.lp-stop__veh[data-veh="approach"] .lp-stop__veh-ico,
+.lp-stop__veh[data-veh="moving"] .lp-stop__veh-ico {
+  color: #fff;
+}
+
+/* ── approach 的 1.6s 呼吸 ──────────────────────────────────────────────
+   ⚠️ 必须写在 CSS（内联 `animation` 无法被媒体查询覆盖）。
+   动画的 cascade 优先级**高于**内联 `box-shadow` ⇒ 动画期间会接管盘的外环，
+   这正是设计意图：静息态由 `VehMark` 的内联 ring 给出，呼吸由本动画覆盖。
+   ⚠️ 呼吸只放大外环（4 → 7px），盘本身尺寸不变 ⇒ 不触发重排、不影响行高。 */
+@keyframes lpVehBreath {
+  0%,
+  100% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--lp-color, var(--primary)) 40%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 7px color-mix(in srgb, var(--lp-color, var(--primary)) 40%, transparent);
+  }
+}
+.lp-stop__veh[data-veh-anim="breath"] .lp-stop__veh-disc {
+  animation: lpVehBreath 1.6s ease-in-out infinite;
+}
+/* 降级：`!important` 是必需的 —— 内联 `box-shadow` 仍要保留（静息环不能消失），
+   故只能把动画整体关掉，而不是删掉环。 */
+@media (prefers-reduced-motion: reduce) {
+  .lp-stop__veh[data-veh-anim="breath"] .lp-stop__veh-disc {
+    animation: none !important;
+  }
+}
+
 .lp-foot {
   margin: var(--space-4);
   font-size: var(--text-2xs);
@@ -8761,7 +8941,9 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
 
 /* ══════════════════════════════════════════════════════════════════════════
    ★ v3.6.0 · 线路搜索结果分区（AC-40 / 设计 §2.4 / §2.8）
-   零硬编码色值：徽章底色来自数据（`routes.color`），字色由 `chipInkOf()` 算好内联。
+   ★★ R6（2026-11-06）：徽章底色来自数据（`routes.color`，原值不加深），
+   **字色恒为白字**（`.linechip`）。原「由 `chipInkOf()` 算好内联」的做法已被 R6 否决，
+   现 `chipInkOf()` 在这些位置只用于判「脏底色 ⇒ fallback」分支。
    ══════════════════════════════════════════════════════════════════════════ */
 
 /* 分区标题（沿用既有 `.ssheet__sect-title` 排版，只补"两区之间"的分隔） */
@@ -8782,32 +8964,18 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
   padding: 0 14px;
 }
 
-/* ── 线路行（整行可点，56px 高）── */
-.line-result {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  width: 100%;
-  min-height: 56px;
-  padding: var(--space-2) 14px;
-  background: none;
-  border: 0;
-  text-align: left;
-  color: var(--fg);
-  cursor: pointer;
-}
-/* ★ U11：T4 列表行（线路搜索结果）—— 1.00 / 状态层 / 无涟漪 */
-.line-result[data-pressed="true"] {
-  transform: none;
-}
-.line-result:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: var(--radius-chip);
-}
+/* ★ 2026-11-06（M16 / 死代码门禁）：`.line-result` / `[data-pressed]` / `:focus-visible`
+   三个规则块已删除 —— 它们是 v3.6.1 前的「线路结果行」（56px 高 + 72px 定宽列）遗产，
+   全仓 JSX 零引用。现行线路结果行见 `SearchSheet.tsx` 的 `LineResultRow`：
+   直接复用 `.ssheet__item`（点击/按压/`focus-visible` 四态来自 `button` 原语，零新增 CSS）。
+   配套已清：`src/components/ui/press-feedback.ts` 的 pressed 白名单里那项 `.line-result`
+   字面量也一并删除（负责人授权）⇒ 该类名在 `src/` **彻底 0 代码引用**。 */
 
 /* 主题色徽章：**列宽固定 72px** —— 否则 `25`（2 字）与 `石排灣線`（4 字）会让
-   右侧名称左缘忽左忽右（同屏多行时非常刺眼）。 */
+   右侧名称左缘忽左忽右（同屏多行时非常刺眼）。
+   ⚠️ 这是 `.linechip` 的**第二份定义**（与上方「线路徽章（.linechip）」那一份同名，
+   本份后出现 ⇒ 尺寸相关属性本份胜）。两份并存是已知技术债（审计 §3-S5 / M18），
+   清理需同时改 `LineClient.tsx` 与 `SearchSheet.tsx` 的行内补丁，**不在本轮 P0 范围**。 */
 .linechip {
   flex: 0 0 72px;
   width: 72px;
@@ -8837,26 +9005,8 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
   text-overflow: ellipsis;
 }
 
-.line-result__main {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.line-result__name {
-  font-size: var(--text-md);
-  line-height: 1.35;
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* 副标题「查看全线站点」—— 承担"点了会跳页"的预告（AC-40 必需） */
-.line-result__sub {
-  font-size: var(--text-2xs);
-  color: var(--muted);
-}
+/* ★ 2026-11-06（M16）：`.line-result__main` / `__name` / `__sub` 三个规则块已删除
+   （同上，全仓零引用的「线路结果行」遗产）。现行结果行文字层级由 `.ssheet__item` 承担。 */
 
 /* ══════════════════════════════════════════════════════════════════════════
    全站 404 页（src/app/not-found.tsx）
@@ -9134,3 +9284,835 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
       会与 shorthand 竞争，逐条显式写最稳。
    ⚠️ 上面的 @media 块是唯一实现，**不要重复定义第二个**（本文件曾出现两份，后者覆盖前者
       导致 per-property !important 失效）。 */
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ★ 2026-11-05 · 通琴号（TQH）增量 —— Token + 组件
+   规范：docs/迭代-通琴号-20261105/03-UIUX.md（§17 R1–R5 为最高优先级的裁决补丁）
+         docs/迭代-通琴号-20261105/05-Spec.md
+
+   ── 三条硬约束（违反即回退）────────────────────────────────────────────
+     1. **只增不改**：不覆写 `--accent` / `--brand-green` / `--surface` / `--fg`
+        等既有 Token；通琴号自成一组 `--tqh-*`，与既有体系并列。
+     2. `#ff58a6` **只作纯色**：不得与紫/靛做渐变（P0-2）。全文件唯一出现的
+        渐变是「关联巴士站右半圆」的**硬停**（两侧都是实色，中间无插值）。
+     3. 承载文字的填充面**不得用换色表达 hover / 按压**（白字静止态 2.92:1
+        已是最差一档）⇒ 一律走项目统一状态层 `--press-on-color`。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ---------- 主题色阶（色相 332° / S 100% / L 67.25%，业务方给定，不调）---------- */
+  --tqh-accent: #ff58a6; /* 主题色本体：填充块 / 站点 / 纵条 / 指示 */
+  /* ★ 负责人 2026-11-05 裁决（§17-R1）：填充面上一律**白字**。
+     实测 2.92:1（低于 AA 4.5，也低于大字 3.0）⇒ 登记为**已知偏差**；
+     补偿手段**只有两种且不得增加第三种**：① 字重 700；② 既有 text-shadow
+     `0 1px 1px rgba(0,0,0,.18)`（与 `.rl-chip` 现网同款）。
+     回退路径：将来若要达标，只改这一个 Token 回 `#0f1720`（6.19:1），样式无需动。 */
+  --tqh-on: #ffffff;
+  --tqh-deep: #a6396c; /* 深一档：浅底上的文字 / 细描边；白底 6.14:1 */
+  --tqh-ink: var(--tqh-deep); /* 主题文字色（深色主题覆写成浅粉，见下方 @media） */
+  --tqh-soft: #ffebf4; /* 浅底：选中行 / 标签底 */
+  --tqh-soft-line: #ffcde4; /* 浅底边界 */
+  --tqh-hover: #e25096; /* 白字 3.61:1 —— 比静止态好，但仍不达 4.5 ⇒ 带字面仍不换色 */
+  --tqh-active: #ca4a89; /* 白字 4.33:1（差 0.17）⇒ 仅用于**不带文字**的面 */
+  --tqh-ring: color-mix(in srgb, var(--tqh-accent) 40%, transparent);
+
+  /* ---------- 地图（具体色值：AMap 画布/描边要 getComputedStyle 读 resolved 值，
+     `color-mix()` 在自定义属性里读不到 ⇒ 与 `--map-line-dim` 同口径落 6 位 hex）---------- */
+  --tqh-map-solid: #ff58a6; /* 纯通琴号站：整圆主题色 */
+  --tqh-map-half: #ff58a6; /* 关联巴士站：右半圆主题色（左半为 --accent 青花蓝） */
+  --tqh-map-edge: rgba(15, 23, 32, 0.42); /* 站点外圈深描边（与既有站点同值） */
+
+  /* ---------- 几何（全部落 4px 网格）---------- */
+  --tqh-seg-h: 36px; /* 段控件视觉段高；容器 36 + 4×2 = 44（命中区 44） */
+  --tqh-seg-pad: 4px;
+  --tqh-seg-radius: var(--radius-btn); /* 8px —— 项目「去 pill」纪律 */
+  --tqh-seg-item-radius: var(--radius-chip); /* 6px */
+  /* ※ 负责人裁决：两板块**不同构**
+     · 澳门   = **8 列 + 不滚动**（97 条 → 12 行；@390 格宽 40.5px）
+     · 通琴号 = **7 列 + 换字母换行**（A5 / B21 / C4 / D5 各族起新行 → **6 行**，总高 284px）
+     格宽差 6.6px（47.14 vs 40.5），已接受。 */
+  --tqh-cols-board: 8;
+  --tqh-cols: 7;
+  --tqh-chip-h: 44px; /* 两板块同高，44px 触控不降 */
+  --tqh-gap-col: 6px;
+  --tqh-gap-row: 4px;
+  --tqh-group-gap: 8px; /* 换字母时的组间距。**当前无引用**（284px 口径行距统一 4px）；
+                           语义保留：将来给族间加呼吸，挂到每族首行 margin-top 即可 */
+  --tqh-card-min-h: 64px;
+  --tqh-card-pad-y: 12px;
+  --tqh-card-pad-x: 14px;
+  /* ※ 裁决：**不做巴士图标 / 不做巴士信息弹窗** ⇒ 下列三个浮标尺寸当前无引用，
+     按「Token 只增不改」保留定义（将来恢复浮标可直接复用，不必重新论证）。 */
+  --tqh-veh-box: 24px;
+  --tqh-veh-icon: 16px;
+  --tqh-veh-ring: 4px;
+  /* 纵条站名后的属地标签（澳 / 琴）—— 裁决后唯一的每行装饰 */
+  --tqh-side-tag-h: 16px;
+  --tqh-side-tag-pad-x: 4px;
+  --tqh-side-tag-font: var(--text-2xs); /* 11px */
+  /* 站序三档弹窗：小半档可见高 = 抓手带 24 + 一行 44 + 呼吸 28 + 底部安全区 */
+  --tqh-peek-h: calc(env(safe-area-inset-bottom, 0px) + 96px);
+
+  /* ---------- 动效（复用既有收敛值，不新增时长；禁弹跳曲线）---------- */
+  --tqh-dur-switch: 150ms; /* 段控件选中态换色；内容切换 = 0ms（零延迟） */
+  --tqh-dur-sheet: var(--sheet-dur-settle); /* 260ms，三档吸附沿用 */
+}
+
+/* ── 深色主题：只覆写「会与深底打架」的几项 ──
+   不覆写 `--tqh-accent` / `--tqh-on`：线路色是数据、不随主题变；
+   主题色填充上的字色由负责人裁定**恒为白字**（两种主题同值）。 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --tqh-ink: #ff7dba; /* 深卡 #1c1e24 上 7.06:1 */
+    --tqh-soft: #4e2b41; /* 22% 主题色压在深表面上；其上 --tqh-ink 5.09:1 */
+    --tqh-soft-line: #6b3a55;
+    --tqh-hover: #ff77b4; /* 深色下 hover 走提亮（与 --press-on-color 同向） */
+    --tqh-active: #ff8fc1;
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   ① 路线弹窗 · 双板块（Spec R1 / AC-1）
+   结构（`.rl-sheet` 的 flex 列）：
+     bar（flex:none ⇒ **天然固定**，不需要 sticky）
+       ├ .rl-tabs（44 高双段控件）
+       └ .rl-sheet__close（视觉 34 / 命中 44）
+     panes（position:relative; flex:1; min-height:0）
+       ├ .rl-pane--bus   absolute inset:0
+       └ .rl-pane--tqh   absolute inset:0
+   ⚠️ **两板常驻 DOM**：隐藏只切 `aria-hidden` + `inert`，CSS 侧只降
+      `visibility` / `pointer-events`。**禁止 `display:none`** —— 它会重置
+      scrollTop，切回来时列表回到顶部，"零延迟"变成了"位置也丢了"。
+      **禁止条件渲染 / `key` 重建**（同上：卸载即丢滚动位置与展开态）。
+   ⚠️ 顶栏在滚动容器**之外**：内容滚到哪都盖不住它（AC-1 的"顶部固定"由此实现，
+      不用 `position:sticky`——sticky 在 `overflow:hidden` 容器里会静默失效）。
+   ────────────────────────────────────────────────────────────────────────── */
+.rl-sheet__panes {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.rl-pane {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 12px calc(12px + var(--safe-bottom));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  /* 切换是**瞬时**的（0ms）：两板都已渲染好，加淡入反而像"重新加载" */
+}
+.rl-pane[aria-hidden="true"] {
+  /* ★ 不用 display:none（会丢滚动位置）。visibility 同时从无障碍树里摘掉，
+     与 `inert` 属性同向、互为兜底（老浏览器无 inert 时仍不可聚焦/不可点）。 */
+  visibility: hidden;
+  pointer-events: none;
+}
+.rl-pane__state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 0;
+}
+.rl-retry {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-btn);
+  background: var(--surface);
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+/* 段控件（§3.2：容器 44 / 段 36 / 内距 4 / 外 8 内 6） */
+.rl-tabs {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  box-sizing: border-box;
+  height: calc(var(--tqh-seg-h) + var(--tqh-seg-pad) * 2);
+  padding: var(--tqh-seg-pad);
+  border-radius: var(--tqh-seg-radius);
+  background: var(--surface-2);
+}
+.rl-tab {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  height: var(--tqh-seg-h);
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--tqh-seg-item-radius);
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  /* 换色只发生在**未选→选中**这一次（150ms）；选中态之间不互相过渡
+     （两段底色不同，做成过渡会在中途混出第三种颜色） */
+  transition: background-color var(--tqh-dur-switch) var(--ease-standard),
+    color var(--tqh-dur-switch) var(--ease-standard);
+}
+.rl-tab__short {
+  display: none;
+}
+/* 澳门段选中：品牌绿 + 白字（6.25:1，达 AA）——**不动** `--accent`（青花蓝） */
+.rl-tab[data-board="bus"][aria-selected="true"] {
+  background: var(--brand-green);
+  color: var(--tqh-on);
+}
+/* 通琴号段选中：主题色 + **白字**（2.92:1，已知偏差 ⇒ 700 + 既有 text-shadow 补偿） */
+.rl-tab[data-board="tqh"][aria-selected="true"] {
+  background: var(--tqh-accent);
+  color: var(--tqh-on);
+  font-weight: var(--fw-announce);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.18);
+}
+/* ≤359px 屏：全称 116px 装不进 114px 的段宽 ⇒ 换短文案（aria-label 仍保留全称） */
+@media (max-width: 359px) {
+  .rl-tab__long {
+    display: none;
+  }
+  .rl-tab__short {
+    display: inline;
+  }
+}
+
+/* 关闭键：视觉 34×34，命中区 44×44（Spec §11 已知坑：34 不达 44） */
+.rl-sheet__close {
+  position: relative;
+  flex: none;
+}
+.rl-sheet__close::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border-radius: var(--radius-chip);
+}
+
+/* ── 标号栅格 ── */
+.rl-board {
+  display: grid;
+  gap: var(--tqh-gap-row) var(--tqh-gap-col);
+}
+.rl-board--lrt {
+  grid-template-columns: repeat(3, 1fr);
+  flex: none;
+}
+/* 澳门：**8 列**（裁决 §17-R2）；行高固定 44 ⇒ 12 行总高 572，@844 一屏放完 */
+.rl-board--bus {
+  grid-template-columns: repeat(var(--tqh-cols-board), 1fr);
+  grid-auto-rows: var(--tqh-chip-h);
+  align-content: start;
+}
+/* 通琴号：**7 列**（裁决 §17-R3）；每族首个标号由 JS 写 `grid-column-start:1`
+   ⇒ 自动排布必然另起一行。**行末留空**（不补位、不居中、不拉伸）：
+   拉伸会让 C 族单行出现 4 个宽块 + 3 个空槽的参差，留空让字母族边界一眼可读。 */
+.rl-board--tqh {
+  grid-template-columns: repeat(var(--tqh-cols), 1fr);
+  grid-auto-rows: var(--tqh-chip-h);
+  align-content: start;
+}
+.rl-chip--board {
+  height: var(--tqh-chip-h);
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+/* 4 字符标号（`25AX` / `701X`）：@12px 需 28.3px，@390 格宽 40.5 减去内距够；
+   但在 320/360 屏会贴边 ⇒ 降一档到 11px（--text-2xs），保证四周留白。 */
+.rl-chip--board[data-long="1"] {
+  font-size: var(--text-2xs);
+  letter-spacing: 0;
+}
+@media (max-width: 359px) {
+  .rl-chip--board {
+    font-size: var(--text-2xs);
+  }
+}
+/* 通琴号标号：主题色底 + **白字**（700 + 既有 text-shadow，见 §17-R1） */
+.rl-chip--tqh {
+  height: var(--tqh-chip-h);
+  background: var(--tqh-accent);
+  color: var(--tqh-on);
+  font-size: 12px;
+  font-weight: var(--fw-announce);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.18);
+  /* 选中 = **形状通道（内白环）**，不是换色 —— 白字面上任何加深都会让
+     对比度更差，而白环不影响墨色，且与"实体贴纸"语汇一致 */
+  box-shadow: inset 0 0 0 0 transparent;
+  transition: box-shadow var(--tqh-dur-switch) var(--ease-standard);
+}
+.rl-chip--tqh[aria-pressed="true"] {
+  box-shadow:
+    inset 0 0 0 2px var(--tqh-on),
+    0 1px 2px rgba(15, 23, 32, 0.2);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   ② 班次卡（Spec R2 / AC-4）
+   两行：全称 15px·700·**单行不省略** ／ 左方向 + 右「HH:MM发车」
+   为什么第一行绝不省略：80 条全称用 15px 排版最坏上界 225px ≤ 最窄可用 260px
+   （320 屏）⇒ 一行必然放得下。加 ellipsis 等于给"将来会省略"发许可。
+   断言：`data-name-len` 行 + `scrollWidth <= clientWidth + 1`（80 条全过，不抽样）。
+   ⚠️ **标号不进第一行**（会挤掉 80px ⇒ 立刻破功）；标号由选中态与站序弹窗承担。
+   ────────────────────────────────────────────────────────────────────────── */
+.tqh-trip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 2px;
+}
+.tqh-trip-list__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 20px 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+.tqh-trip {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-height: var(--tqh-card-min-h);
+  padding: var(--tqh-card-pad-y) var(--tqh-card-pad-x);
+  border: 0;
+  border-radius: var(--radius-card);
+  background: var(--tqh-accent);
+  color: var(--tqh-on);
+  text-align: left;
+  cursor: pointer;
+  /* 白字面**不换色**表达状态：只叠状态层（--press-on-color @ .12）+ 形状通道 */
+  transition: box-shadow var(--tqh-dur-switch) var(--ease-standard);
+}
+/* 正在地图上查看的那一班：外白环（形状通道，不动机身色） */
+.tqh-trip[data-selected="1"] {
+  box-shadow: 0 0 0 2px var(--tqh-on), 0 0 0 3px var(--tqh-deep);
+}
+.tqh-trip__name {
+  font-size: var(--text-md); /* 15px */
+  font-weight: var(--fw-announce); /* 700 —— 白字补偿手段之一 */
+  line-height: var(--leading-title);
+  letter-spacing: var(--tracking-body);
+  white-space: nowrap;
+  /* 不省略：靠上面的宽度核算保证放得下；这里 overflow:hidden 只作溢出兜底，
+     **不写 text-overflow: ellipsis**（写了就等于承认会省略） */
+  overflow: hidden;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.18);
+}
+.tqh-trip__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--text-xs);
+}
+.tqh-trip__dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.18);
+}
+.tqh-trip__time {
+  flex: none;
+  font-weight: var(--fw-announce);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.18);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   ③ 地图站点层（Spec R4 / AC-6）
+   纯通琴号站 = 12px 整圆主题色；关联巴士站 = 12px **右半圆**（左半青花蓝）。
+   半圆用 `linear-gradient(90deg, …, 0 50%, … 50% 100%)` **硬停**：
+   单一背景层，浏览器只在相邻 color-stop 间插值 ⇒ **不可能露出页面底色**（白缝概率 0）。
+   `clip-path` 不行：裁剪边界暴露的是"下一层"（兄弟半圆或父容器底），
+   多层叠放时可能露 0.5px 父底。
+   抗锯齿：盒宽取**偶数 12**（50% = 6px，DPR 1/2/3 全整数）；11px 时 5.5px 在
+   DPR1/3 出现半像素混色带 —— 粉(L≈72)与蓝(L≈34)混成发灰的紫，正是 P0-2 要避开的观感。
+   `Marker offset = Pixel(-6,-6)`（在 `TqhStationLayer` 里给）。
+   ────────────────────────────────────────────────────────────────────────── */
+.nav-map__station--tqh {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--tqh-on);
+  background: var(--tqh-map-solid);
+  box-shadow: 0 0 0 1px var(--tqh-map-edge);
+}
+.nav-map__station--tqh-shared {
+  /* 左半 = 青花蓝（澳门巴士站），右半 = 主题色（通琴号）——硬停，无插值 */
+  background: linear-gradient(
+    90deg,
+    var(--accent) 0 50%,
+    var(--tqh-map-half) 50% 100%
+  );
+}
+/* 本班次经过的站：白环 —— **只给巴士双色标**（只加形状，不改色 —— 双色结构不能被吃掉）
+   ★ 2026-11-06 收窄选择器（用户口径 #3：「路线查看模式下指定线路的经停站的站标与正常站标
+     不同，会有一层白色粗边」）—— 改前是**单类** `.nav-map__station--tqh-onroute{…}`，
+     同时命中两类 marker，其中一类是误加：
+       · 纯通琴号站（`TqhStationLayer`，96 个）—— 班次视图的**白名单就是本班站点**
+         （`NavShell`：`whitelist = tripStationIds(tqhTrip)`），而高亮判据 `activeIds` 用的是
+         **同一份集合**（`tqhActiveIds = tripStationIds(tqhTrip)`）⇒ 屏上每个点 `on` 恒为 true
+         ⇒ 96 个点全体加环 = 纯装饰、零区分功能；更糟的是它在 1.5px `--tqh-on` 白描边外
+         再套 2px 纯白 ⇒ **白色总厚 3.5px** = 用户说的「白色粗边」✗
+       · 巴士双色标（`NavMap` 的 `--tqh-shared`，33 个）—— 班次视图下**巴士层不过滤**，
+         全视口巴士站都在画，靠这个环标出「本班也停这站」⇒ **有真实语义，必须保留** ✓
+     ⇒ 收窄为双类（特异性 0,2,0 > 基础类 0,1,0）：纯通琴号站回到 `.nav-map__station--tqh`
+       的常态外观（12px 圆 + 1.5px `--tqh-on` 描边 + 1px `--tqh-map-edge` 外圈），
+       与 #3「站标与正常一致」同口径。
+   ⚠️ 集合关系已核（`tqh-model.ts#sharedBusMainCodes` / `NavShell#tqhActiveBusCodes`）：
+      `tqhActiveBusCodes ⊆ tqhSharedBusCodes` ⇒ 白环不会落到非双色的巴士标上。
+   ⚠️ 若真机仍见「粗白边」，那是这 33 个**双色标**（11px 盒 + 1.5px 白描边 + 2px 白环）
+      —— 属设计意图、不是本轮回归；要收细需改 TSX 换 `outline` 方案，超出 CSS 边界。 */
+.nav-map__station--tqh-shared.nav-map__station--tqh-onroute {
+  box-shadow:
+    0 0 0 2px var(--tqh-on),
+    0 0 0 3px var(--tqh-map-edge);
+}
+/* 非本班次站：**只降透明、不改背景**（轻轨踩过的坑：改 background 会抹掉双色）
+   ★ 2026-11-06 更正命中面（本文件上方「其余降为 0.42」的字面口径偏宽，`TqhStationLayer` 的
+     注释也一样）：班次视图（非导航）下 `whitelist` 与 `activeIds` 是**同一份**
+     `tripStationIds(tqhTrip)` ⇒ 非本班站**根本不建 marker** ⇒ 该态下本类打不出来；
+     唯一可达路径 = **导航进行中且还选着通琴号班次**（`navActive` 为真 ⇒ 白名单折成 `null`、
+     96 个点全画；`activeIds` 仍非空 ⇒ 不在本班的站才落到 0.42）。
+     ⇒ **规则保留**（它是那条路径上唯一的降级表达），只是别指望它在班次视图里出现。 */
+.nav-map__station--tqh-dim {
+  opacity: 0.42;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   ④ 站序三档弹窗（Spec R5/R6 / AC-7）
+   顶部一行：`[A1] 往横琴 · 08:30   [换向][刷新][关闭]`
+   · 时刻 = 该班 `departure_time`（计划时刻，**不是实时**）/ 11px / `--meta` /
+     `tabular-nums` / **flex:none 不许省略**（它才是「这是哪一班」的判别位：
+     同（标号,方向）下存在 2 套站序，只显示标号+方向分不清）；
+   · 方向 `flex: 0 1 auto` + `min-width:0`（可省略，正常不触发）；
+   · 三键 44×44，间距 8；关闭键位置**恒定**（单向标号用 `aria-disabled` + toast，
+     **不隐藏**换向键 —— 隐藏会让关闭键左移 52px）。
+   纵条（§17-R4）：只留 rail + 节点，**无巴士图标**，站名后「澳 / 琴」标签。
+   ────────────────────────────────────────────────────────────────────────── */
+.lst-sheet {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100dvh;
+  /* z76：> 路线选择弹窗 70（选完才开它）< 车卡/站卡浮层 90（卡片要能盖住它） */
+  z-index: 76;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-top-left-radius: var(--sheet-radius);
+  border-top-right-radius: var(--sheet-radius);
+  box-shadow: var(--sheet-shadow);
+  /* 位移只走 transform（GPU 合成）；`--sheet-y-anim` 每帧由 `useSnapSheet` 喂 */
+  transform: translateY(var(--sheet-y-anim, 100dvh));
+  transition: transform var(--sheet-dur-settle) var(--sheet-ease);
+  overscroll-behavior: none;
+}
+.lst-sheet[data-dragging="on"] {
+  transition: none;
+  will-change: transform;
+}
+.lst-sheet[data-open="off"] {
+  pointer-events: none;
+}
+.lst-sheet__handle {
+  flex: none;
+  position: relative;
+  z-index: 2;
+  background: var(--surface);
+  border-top-left-radius: var(--sheet-radius);
+  border-top-right-radius: var(--sheet-radius);
+  padding: 8px 12px 4px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.lst-sheet__grip {
+  display: block;
+  width: var(--grab-w);
+  height: var(--grab-h);
+  margin: 0 auto 6px;
+  border-radius: var(--radius-full);
+  background: var(--grab-color);
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.lst-sheet[data-dragging="on"] .lst-sheet__grip {
+  background: var(--grab-color-active);
+}
+.lst-sheet__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+}
+/* 标号 chip：主题色底 + 白字 / 高 24 / 13px **700**（白字须加粗）
+   ★★ R6（2026-11-06）：底色改吃 `--lst-no-bg` 变量（缺省回落 `--tqh-accent`）。
+   ⚠️ 字色**必须**继续 `var(--tqh-on)` = `#fff` —— R6 明令线路标签一律白字，不得改成墨色。
+   ⚠️ 变量缺省值与原值同源 ⇒ 不设 `--lst-no-bg` 的消费方（通琴号 `LineStopsSheet`）
+      **零视觉变化**；澳门巴士/轻轨（`RouteStopsSheet`）由宿主把 `routes.color` 写进该变量。
+   ⚠️ 变量方式优于「行内 background 覆盖」：行内会把整个 background 锁死，
+      以后想加渐变/描边/暗色补偿都得再改 JSX；变量只交出「用哪个颜色」这一件事。 */
+.lst-sheet__no {
+  flex: none;
+  display: grid;
+  place-items: center;
+  min-width: 30px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: var(--radius-chip);
+  background: var(--lst-no-bg, var(--tqh-accent));
+  color: var(--tqh-on);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-announce);
+  letter-spacing: 0.01em;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.18);
+}
+.lst-sheet__dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+.lst-sheet__time {
+  flex: none;
+  font-size: var(--text-2xs);
+  color: var(--meta);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.lst-sheet__acts {
+  flex: none;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lst-sheet__iconbtn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+/* ── 顶部行三键：视觉 34×34 + 命中 44×44（`RouteStopsSheet` 专用变体）────────
+   ★ 2026-11-06（前端 C 的口径，前端 A 落 CSS）：
+   · `--sm` 变体**只给澳门巴士/轻轨站序弹窗**用。通琴号 `LineStopsSheet` 仍是 44 视觉
+     ⇒ **绝不能把 `.lst-sheet__iconbtn` 的基础尺寸改成 34**（会同时改两家）。第二阶段
+     通琴号迁到 34+44 口径时，把 `--sm` 的声明并回基础规则即可。
+   · 为什么间距 10：命中区 = 视觉 34 + `inset:-5px` 外扩 ×2 = 44。间距取 `5×2 = 10`
+     ⇒ 相邻命中区**刚好相接、不重叠**。间距 <10 会让两键命中区重叠，
+     边缘 1~2px 落到**错误的键**上（比命中区小更难查：点击有反应，只是反应错了）。
+   · ⚠️ `.lst-sheet__acts` 的基础 `gap: 8px` 不动 —— 通琴号在吃它；本段用后代选择器
+     限定到 `[data-route-stops-kind]`（`RouteStopsSheet` 独有的观测钩子），
+     通琴号（`data-tqh-trip`）**完全不受影响**。
+   · ⚠️ 命中层用**真元素**（`.lst-sheet__iconbtn__hit`）而不是 `::after`：
+     `getBoundingClientRect()` 量得到 = 自动化能断言 44×44；伪元素量不到，
+     回归测试只能靠人眼，等于没有门禁。 */
+.lst-sheet[data-route-stops-kind] .lst-sheet__acts {
+  gap: 10px;
+}
+.lst-sheet__iconbtn--sm {
+  width: 34px;
+  height: 34px;
+}
+.lst-sheet__iconbtn__hit {
+  position: absolute;
+  inset: -5px;
+}
+
+/* peek 档只见顶部一行：内容区隐藏（保留占位 ⇒ 不重排；`visibility` 仍可被 a11y 忽略）
+   ★ 为什么必须隐藏：peek 可见约 96px + 安全区，handle 占约 66px（8+4+6+44+4），
+     余量 30~64px 恰好露出**半行站点** —— 半行文字比空着更像渲染坏了。
+   ⚠️ **限定到 `[data-route-stops-kind]`**：通琴号 `LineStopsSheet` 也吃 `.lst-sheet`
+     且同样写 `data-detent`，全局生效会**改变通琴号 peek 的现有观感**（属别人在线的组件，
+     不在本轮范围）。第二阶段通琴号迁口径时，把本规则放宽为 `.lst-sheet[data-detent="peek"]`
+     即可（届时两边语义一致）。
+   ⚠️ `visibility:hidden` 而非 `display:none`：`display` 会触发重排 ⇒ 拖动到 peek 的
+     那一帧整表跳位，手感突变。 */
+.lst-sheet[data-route-stops-kind][data-detent="peek"] .lst-sheet__body {
+  visibility: hidden;
+}
+
+/* 空站序空态（`RouteStopsSheet` 用；通琴号走自己的空态） */
+.lst-sheet__empty {
+  margin: 0;
+  padding: 20px 14px;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+/* 单向标号：外观降权但**仍可点**（点了给 toast 说明原因，不是死键） */
+.lst-sheet__iconbtn[aria-disabled="true"] {
+  color: var(--meta);
+  opacity: 0.55;
+}
+.lst-sheet__cd {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--meta);
+  font-variant-numeric: tabular-nums;
+}
+/* ── 滚动容器：**必须夹到「档位顶边 → 视口底」这段真实可见高度** ────────────────
+   ★ 2026-11-07（P1 修复）：`.lst-sheet` 是 `top:0 + height:100dvh`，靠 `translateY(档位顶边)`
+     下移 ⇒ 盒子在 half 档占 **422 → 1266**（下边界溢出屏幕 422px），而 `flex:1` 的 body
+     以为自己有 778px 高，屏幕却只看得到 356px。实测后果两条：
+       ① `scrollIntoView({block:"center"})` 把行居中到**容器中心 ≈ 877**（在屏幕外）；
+       ② **滚动到底也够不到最后 422px 的内容**（最后几行永远看不见）。
+     ⇒ 用 `--lst-top`（组件写入的**落定档位顶边**）+ `--lst-head-h`（头部实测高）夹住
+       `max-height`，body 底边正好落在视口底。**保留 `flex:1 / min-height:0`**：列表短时
+       仍撑满（不出空白），只是不再越过视口底。
+   ⚠️ 不要改成 `.lst-sheet { height: calc(100dvh - var(--lst-top)) }`：拖动只改 `transform`，
+      拖动期 height 仍是上一档 ⇒ 面板上滑时**底部露出地图**（透明缺口），比本缺陷更显眼。
+   ⚠️ `--lst-top` **只写落定值**（不跟随逐帧的 `--sheet-y-anim`）：否则每帧重算高度 =
+      整棵列表每帧重排，正是 2026-09-25 修掉的「拖弹窗地图抖」。拖动期补偿见下方
+      `[data-dragging="on"]` 分支。 */
+.lst-sheet__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  /* 卡片打开时尾部留出等量空白：否则**列表最后几行滚不到卡片上沿之上**，只能永远躺在
+     容器底（= 屏幕底），正好被卡片盖住。
+     `--lst-card-h` = **卡片遮挡带高度**（卡片顶边 → 视口底，含卡片自身距底的内距），组件实测写入。
+     `+ --space-2` = 行与卡片上沿之间的呼吸（也用于下面 `scroll-padding-bottom`，两处同源
+     ⇒ 最后一行停在「可视区底」时正好留 8px，不会贴边、也不会因亚像素取整被压住）。
+     ⚠️ 卡片关着时 `--lst-card-h` = 0 ⇒ 尾部只剩这 8px 呼吸（改前是 0）：列表末尾多 8px
+        空白，肉眼不可辨；换来的是同一个数字只在一处（此处）出现。 */
+  padding-bottom: calc(var(--safe-bottom) + var(--lst-card-h, 0px) + var(--space-2));
+  /* `scrollIntoView` 的「可视区」下界缩到卡片上沿 ⇒ `block:"center"` 才会把行居中到
+     **卡片上方**（不缩的话中心 ≈ 666 正好落在卡片里，实测卡片占 626~836）。
+     `min(…, 65%)` 保证可视区不被压成负值（异常高的卡片退化为「尽量靠上」，不乱跳）。 */
+  scroll-padding-bottom: min(calc(var(--lst-card-h, 0px) + var(--space-2)), 65%);
+  max-height: calc(100dvh - var(--lst-top, 0px) - var(--lst-head-h, 66px));
+  /* 与面板位移**同一条缓动/时长**：位移 −Δ 与高度 +Δ 相等 ⇒ 动画全程 body 底边恒在视口底，
+     既不露空白也不跳。改时长/缓动时必须与 `.lst-sheet` 的 transform 那条一起改。 */
+  transition: max-height var(--sheet-dur-settle) var(--sheet-ease);
+}
+/* 拖动期**不夹**（= 改前的观感：内容一直铺到屏幕底）。
+   拖动只改 transform，`--lst-top` 保持上一档；若此时仍按上一档夹高度，面板上滑的过程中
+   列表下方会露出一条空白面（half→full 拖到底时最多 326px）。松开后本规则退场，
+   `max-height` 与位移同缓动收回 ⇒ 底边全程贴在视口底（见上一条的等式说明）。
+   ⚠️ 必须给**确定长度**而不是 `max-height:none`：`none` 不可插值 ⇒ 回弹会瞬跳一下。 */
+.lst-sheet[data-dragging="on"] .lst-sheet__body {
+  max-height: calc(100dvh - var(--lst-head-h, 66px));
+  transition: none;
+}
+/* ── 原因提示条（`aria-disabled` 键 / 取车失败，3s 自动消失）─────────────────────
+   ⚠️⚠️ `bottom` 里的 **`+ var(--lst-top)` 不能删**（2026-11-07 修复，此前 toast
+        从来没被用户看见过 —— 功能等于不存在）。
+
+   ── 为什么必须加档位顶边 ────────────────────────────────────────────────
+     `.lst-sheet` 是 `top:0 + height:100dvh`，靠 `translateY(档位顶边)` 下移 ⇒ 盒子
+     **底边**恒落在「视口底 + 档位顶边」（390×844 的 half 档 = 844 + 422 = **1266**）。
+     `position:absolute` + `bottom:X` 量的是**盒子底边**，不是屏幕底 ⇒ 只写 16px 时
+     toast 落在 y = 1266 − 16 = 1250，而屏幕只有 844 ⇒ **half / full / peek 三档全部在
+     屏幕外**（peek 档盒子底更高，同样溢出）。页面上完全看不到，控制台无任何报错。
+     ⇒ 两个消费方（`RouteStopsSheet` 换向/刷新原因 + 取车失败；`LineStopsSheet`
+       「這條線暫無對向班次」）的提示此前**一次都没显示过**。
+
+   ── 加上之后的落点（数学上恰好把位移抵消掉）──────────────────────────────
+     视口 y = (视口底 + 档位顶边) − (16 + safe-bottom + 档位顶边) = **视口底 − 16 − safe**
+     ⇒ **三档恒贴在屏幕底上方 16px**，与档位无关（正是「浮在面板可见区底部」的口径）。
+     `--lst-top` 由两个组件在 `<section>` 的**内联** style 写入（落定值），toast 是它的
+     后代 ⇒ 自定义属性按标准继承到这里；`.lst-sheet__body` / `__handle` 等中间层都
+     **没有**重置它（全仓仅这两处写入、仅本文件两处读取）。
+     `var(--lst-top, 0px)` 的兜底只为「将来有不写该变量的消费方」时不至于算出非法值。
+
+   ── 与末行的关系（不是"悬浮不挡"就完事）────────────────────────────────
+     body 底边已由 `--lst-top` 夹到视口底（见上方 `.lst-sheet__body` 的长注释）⇒ 滚到
+     底时末行约占 780–836，而本 toast 落在 ~798–828 ⇒ **几何上确实压在末行上**。
+     toast 是 `role="status"` 的纯提示，永不需要被点 ⇒ 用 `pointer-events:none` 保证它
+     不吞掉末行/巴士图标的点击（与顶部告警条 `.nav-alarm` 同一条约定：
+     「纯提示，即使覆盖也不阻断下层交互」）。**不要**为了"不挡"把它挪到别处：
+     它必须贴在面板可见区底部，才能与「点错了哪个键」的空间位置对上。 */
+.lst-sheet__toast {
+  position: absolute;
+  left: 50%;
+  bottom: calc(16px + var(--safe-bottom) + var(--lst-top, 0px));
+  transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  margin: 0;
+  padding: 8px 14px;
+  border-radius: var(--radius-chip);
+  background: var(--fg);
+  color: var(--surface);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  z-index: 3;
+  /* 纯提示，不阻断下层交互（见上一条注释的「与末行的关系」） */
+  pointer-events: none;
+}
+
+/* ── 纵条 · 站名行 + 属地标签（§17-R4）──
+   标签：高 16 / 左右内距 4 / 11px / 圆角 6 / 底 `--surface-2` / 字 `--meta`（5.04:1 达标）。
+   **不用主题色**：主题色只属通琴号线本身，属地是中性元数据。`flex:none` 不参与省略。 */
+.lp-stop__namerow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.lp-stop__namerow .lp-stop__name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.lp-stop__side,
+.nav-side-tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--tqh-side-tag-h);
+  padding: 0 var(--tqh-side-tag-pad-x);
+  border-radius: var(--radius-chip);
+  background: var(--surface-2);
+  color: var(--meta);
+  font-size: var(--tqh-side-tag-font);
+  line-height: 1;
+  white-space: nowrap;
+}
+/* 两个变体当前**同值**（属地是中性元数据，左右两侧不靠颜色区分，
+   靠单字本身区分）；保留变体名是为了将来若真要分色不必改名 */
+.nav-side-tag--mo,
+.nav-side-tag--hq {
+  background: var(--surface-2);
+  color: var(--meta);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   ⑤ 站点卡片里的通琴号块（Spec R4 · 负责人裁决 5：按方向分组，组内按时间）
+   两处复用同一组件：纯通琴号站的独立卡 / 关联巴士站卡下方的追加块。
+   无报站：通琴号是**静态时刻表**（官方无实时源）⇒ 只出现「计划发车时刻」。
+   ────────────────────────────────────────────────────────────────────────── */
+.nav-station-card__tqh {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.tqh-trips {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tqh-trips__hint {
+  margin: 4px 0;
+}
+.tqh-trips__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tqh-trips__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 0 2px;
+  font-size: var(--text-2xs);
+  color: var(--meta);
+  letter-spacing: var(--tracking-label);
+}
+.tqh-trips__count {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.tqh-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.tqh-row[data-selected="1"] {
+  background: var(--tqh-soft);
+}
+.tqh-row__no,
+.tqh-no {
+  flex: none;
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--tqh-accent);
+  color: var(--tqh-on);
+  font-size: var(--text-2xs);
+  font-weight: var(--fw-announce);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.18);
+}
+.tqh-row__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--fg);
+}
+.tqh-row__time {
+  flex: none;
+  font-size: var(--text-2xs);
+  color: var(--meta);
+  font-variant-numeric: tabular-nums;
+}
+/* 搜索结果里「通琴号」类型标签（与其余五类同一个 `.ssheet__type`，
+   只换底色；浅底 + 深主题色字 = 5.39:1，不用主题色做底也不吃强调色预算） */
+.ssheet__type--tqh {
+  background: var(--tqh-soft);
+  color: var(--tqh-ink);
+}
+
+/* 动效降级：三档面板的吸附与段控件换色一律瞬切
+   ★ 2026-11-07：`__body` 的 `max-height` 过渡必须一起关（它是与位移同步的第二条动画，
+     只关面板位移会让 body 在 reduce 下独自缓动 260ms ⇒ 底边短暂离开视口底）。 */
+@media (prefers-reduced-motion: reduce) {
+  .lst-sheet,
+  .lst-sheet__body,
+  .rl-tab,
+  .rl-chip--tqh,
+  .tqh-trip,
+  .lst-sheet__grip {
+    transition: none !important;
+  }
+}

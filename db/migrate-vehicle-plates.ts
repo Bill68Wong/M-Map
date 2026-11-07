@@ -16,7 +16,10 @@
  *   将来口径被推翻时只需改代码、不必迁移存量。
  *
  * ⚠️ 只建表 + 索引，**不碰任何既有表**；可重复执行（IF NOT EXISTS）。
- * ⚠️ 本迁移不回填数据：回填走 `npm run db:backfill-vehicle-plates`。
+ * ⚠️ 本迁移不回填数据。
+ * ⚠️ 2026-11-06：回填脚本 `scripts/backfill-vehicle-plates.ts` 已随 `bus_snapshots` 表删除
+ *    （Spec §6.2 / OD-07 同批下线，其历史播种源就是 bus_snapshots）—— 别再按旧命令去跑，
+ *    命令已不存在。空表补数据只能靠后续实时抓取。
  */
 import { Pool } from "pg";
 
@@ -106,8 +109,8 @@ async function main() {
     console.log(`当前行数：${n.n}${n.n === 0 ? "（空表，下一步回填）" : ""}`);
 
     if (n.n === 0) {
-      console.log(`\n下一步：回填既有车牌（先播种 bus_snapshots 历史，再抓一轮实时）`);
-      console.log(`  npm run db:backfill-vehicle-plates -- cloud --allow-prod`);
+      console.log(`\n下一步：空表只能靠后续实时抓取补数据`);
+      console.log(`  （历史播种脚本 backfill-vehicle-plates 已于 2026-11-06 随 bus_snapshots 表删除）`);
     }
   } finally {
     await pool.end();

@@ -78,7 +78,8 @@ export const BUS_SLACK_SPREAD_WEIGHT = 2;
  *   A4 断言都按它写。默认关 = **代码与文档逐字一致**，避免再一次口径分叉。
  *   打开后 `slack = min(base, toMin − arrivalMin)`，使「同一桶内不同到达时刻」产生不同
  *   风险值（这正是「桶内盲区」唯一能不动物理粒度的修法），代价是偏离文档公式。
- *   ⇒ **开关权在主控**，打开前先看 `scripts/compare-slack-impact.ts` 的实测差异。
+ *   ⇒ **开关权在主控**。原决策依据是 `scripts/compare-slack-impact.ts` 的实测差异，
+ *   ★ 2026-11-06：该脚本已删，**复测入口已移除** —— 打开前请参考 git 历史重建对比脚本。
  */
 export const SLACK_SPAN_EDGE_ENABLED = false;
 

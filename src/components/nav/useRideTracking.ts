@@ -34,6 +34,7 @@ import { advanceLrt, buildLrtLadder, type LrtLadder } from "@/lib/nav/lrt-progre
 import { cumDistM, distM, nearestOnPath } from "@/lib/nav/route-overview";
 import { autoAlightOf } from "@/lib/nav/alight-detect";
 import { ladderStateOf, rideNoteOf, type LadderState } from "@/lib/nav/ride-note";
+import { lineNameOf } from "@/lib/route-label";
 import {
   ANOMALY_CONFIRM,
   ANOMALY_MIN_GAP_MS,
@@ -1224,7 +1225,14 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
      */
     (nextPlate: string | null, source: "vehicle" | "gps", entry: BoardEntry = "position") => {
       const leg = legs[legIndex];
-      const route = leg?.route.replace(/^LRT-/, "") ?? "";
+      /**
+       * ★ 2026-11-06（R5 / R7）：**线路名走唯一文案出口 `lineNameOf()`**。
+       *   ⚠️ 旧写法是「线号 + ` 路`」拼接，属全站第 4 处「XX路」残留（审计 §3-C6）——
+       *   它经 `NavAlarmOverlay` 直接显示成**自动上车吐司**，是用户可见的弃用形态。
+       *   `lineNameOf()` 同时负责「去 `LRT-` 前缀 + 轻轨线名繁化」⇒ 这里不再自己 `replace`，
+       *   否则轻轨段会退回简体的「氹仔线」，与 `RouteStack` 的「氹仔線」又变两套真相。
+       */
+      const route = lineNameOf(leg?.route ?? "");
       const lrt = leg?.kind === "lrt";
       setPhase("riding");
       setEnteredVia(entry);
@@ -1253,10 +1261,10 @@ export function useRideTracking(opts: UseRideTrackingOpts): RideTrackView {
       setNote(source === "gps" ? "" : "");
       setAutoNote(
         lrt
-          ? `已开始跟踪行程（${route}）`
+          ? `已开始跟踪行程 · ${route}`
           : nextPlate
-            ? `已开始跟踪 ${route} 路 · ${nextPlate}`
-            : `已开始跟踪 ${route} 路`,
+            ? `已开始跟踪 ${route} · ${nextPlate}`
+            : `已开始跟踪 ${route}`,
       );
       lastSwitchTsRef.current = Date.now();
       plateLockedTsRef.current = nextPlate ? Date.now() : 0; // ★ I-3：`data-plate-ts`

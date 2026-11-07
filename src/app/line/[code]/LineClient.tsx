@@ -73,6 +73,25 @@ export default function LineClient({ initial }: LineClientProps) {
   const { code, kind, color, dirs, dir, label, stops } = data;
   const isLrt = kind === "lrt";
   const canRev = dirs.length > 1;
+  /**
+   * ★★ R6 裁决（2026-11-06）：线路标签**一律白字 + 官方线路色底（不加深）**。
+   *
+   *   ── 这里原本是什么（别照旧稿改回去）──────────────────────────────
+   *   原为「行内注入 `chip` 的 bg 作底色 + ink 作字色」，即按 `chipInkOf()` **对比度自适应**：
+   *   · 字色取 `chip` 的 ink 字段 ⇒ 浅底线路（`tone === "dark"`，如氹仔线 `#93d50a` 1.79:1、
+   *     澳巴 `#C26D32` 3.80:1）转**深字**，与其余 4 族的白字不一致；
+   *   · 底色取 `chip` 的 bg 字段 ⇒ 死带分支（`chip-ink.ts:87`）是 `mixBlack(raw, 14%)` = **加深底色**。
+   *   两者都被 R6 明确否决。
+   *
+   *   ── 现在 ──────────────────────────────────────────────────────
+   *   `chipInkOf()` 在本处**只剩一个用途**：判断底色是不是脏数据（非 6 位 hex）。
+   *   · 脏数据 ⇒ `tone === "fallback"` ⇒ 不内联底色，交给 CSS 的
+   *     `[data-chip-ink="fallback"]`（中性底 `--surface-2` + 深字 + 线路色小圆点）；
+   *   · 正常 ⇒ 底色用 `color` **原值**（不加深），字色交给 `.linechip` 的 `#fff`。
+   *   ⚠️ **不要**把字色改回内联（`chip` 的 ink 字段）—— 内联会盖掉 CSS 白字。
+   *   ⚠️ **不要**把底色改回 `chip` 的 bg 字段 —— 死带线路（如石排湾 `#8a66c3`，L=0.1885）会被加深 14%。
+   *   ⚠️ 补偿只走 `.linechip` 里的字重 + `text-shadow`，勿在 TSX 另加（R6 唯一允许的两种手段）。
+   */
   const chip = useMemo(() => chipInkOf(color), [color]);
 
   /* ── 走向（线路级，与方向无关；只取一次）────────────────────────────── */
@@ -165,7 +184,8 @@ export default function LineClient({ initial }: LineClientProps) {
           <span
             className="linechip"
             data-chip-ink={chip.tone}
-            style={{ background: chip.bg, color: chip.ink }}
+            /* R6：底色用官方线路色**原值**（脏底色 ⇒ undefined ⇒ 走 CSS 兜底分支）；字色不内联 */
+            style={{ background: chip.tone === "fallback" ? undefined : color }}
           >
             {chip.dot && <i className="linechip__dot" style={{ background: chip.dot }} aria-hidden="true" />}
             {chipLabelOf(code, kind)}

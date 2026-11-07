@@ -5,7 +5,9 @@
  *   ★ **请求期绝不调用高德 walking**（`client.ts` 硬规则①；QA P0-1）——
  *     所有步行几何**只能离线预热**进 `walk_cache`。
  *   本脚本预热两类步行（供**降级路径**：高德 transit 不可用时出卡，§B.6）：
- *     · **kind='walk'**：`place_coords`（擎天匯/澳科大各座/横琴/关闸）→ **≤700m 邻近站**；
+ *     · **kind='walk'**：预设 4 地点（擎天匯/澳科大各座/横琴/关闸）→ **≤700m 邻近站**；
+ *       坐标来自 `src/lib/recommend/place-ids.ts#PLACE_COORDS` 常量
+ *       （★ 2026-11-06：`place_coords` / `places` 两表已删，坐标已固化成常量，6 行原值）；
  *     · **kind='transfer'**：站 ↔ 站（**≤300m**，不同主码）换乘步行。
  *
  * ── 键与修正 ──────────────────────────────────────────────────────────
@@ -25,6 +27,7 @@ import { Pool } from "pg";
 import { haversineM, wgs84ToGcj02 } from "../src/lib/amap/coord";
 import { walkRouteGcj } from "../src/lib/amap/client";
 import { fixWalkDistance, walkCacheKey } from "../src/lib/amap/walk-fix";
+import { PLACE_COORDS, PLACE_SLUG_BY_ID } from "../src/lib/recommend/place-ids";
 
 try {
   process.loadEnvFile("D:/Projects/University/Studio/musttoukou/.env");
@@ -91,10 +94,15 @@ async function buildPairs(): Promise<Pair[]> {
     if (!stationsByMain.has(main)) stationsByMain.set(main, rec);
   }
 
-  // 地点坐标
-  const plRows = await pool.query(
-    `SELECT pc.lat, pc.lng, p.slug, p.name FROM place_coords pc JOIN places p ON p.id = pc.place_id`,
-  );
+  // 地点坐标（★ 2026-11-06：`place_coords` JOIN `places` 已删，改读 `place-ids.ts` 常量）
+  //   `PLACE_COORDS` 逐值 = 删表前 6 行原值（WGS84，与 `stations` 同系）。
+  const plRows = {
+    rows: PLACE_COORDS.map((c) => ({
+      lat: c.lat,
+      lng: c.lng,
+      slug: PLACE_SLUG_BY_ID[c.place_id] ?? String(c.place_id),
+    })) as Record<string, unknown>[],
+  };
 
   const pairs: Pair[] = [];
 

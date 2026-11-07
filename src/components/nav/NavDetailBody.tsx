@@ -28,7 +28,7 @@ import { LrtEtaInline } from "@/components/LrtEta";
 import { directionNameOf, EtaText, Row, TierBadge, macauClock } from "@/components/RoutePieces";
 import Icon from "@/components/ui/Icon";
 import type { FavoriteEndpoint, PlanSnapshot, RouteSeg } from "@/lib/favorites/types";
-import type { RecommendCard, SegmentStrip } from "@/lib/recommend/types";
+import type { CatchTier, RecommendCard, SegmentStrip } from "@/lib/recommend/types";
 import {
   ARRIVE_OVERDUE_TEXT,
   REMAIN_ARRIVED_TEXT,
@@ -58,6 +58,51 @@ import type { WalkStep } from "@/lib/walk/walk-shared";
  *   ⚠️ 它**不是**「当前是否在车上」—— 单向、不回退，见 `NavShell` 里那块块注释。
  */
 export const CatchTagLatchContext = createContext(false);
+
+/**
+ * ★ 修复批 #9 / #10（2026-11-06）：**候车实时值的下发通道**（与 `CatchTagLatchContext` 同一种模式）。
+ *
+ * ── 为什么又是 Context（不是 prop / 不是在本组件里取数）──────────────────
+ *   两件数据都产生在**会话层**（`NavShell`），而本组件在 `RouteSheet` → `RouteDetailPane` 之下：
+ *     · `eta`  — 候车报站（`useBoardingEta`，唯一请求入口是「点刷新 / R4 位移触发」，
+ *                触发点在会话层的刷新按钮链路上，不在本组件）；
+ *     · `catch` — 实时赶车档（要 `walkFollow.progress` 的剩余步行米数 + GPS 精度，
+ *                这两个都在会话层的步行状态机里，本组件拿不到：步行段 `track` 恒为 `null`）。
+ *   中间两层（`RouteSheet` / `RouteDetailPane`）本轮**不在改动范围**（同一工作区还有别人在改）
+ *   ⇒ 只能走 React 树，不能加 prop。这就是 `CatchTagLatchContext` 当初的选择，沿用同一套。
+ *
+ * ── 值的生命周期 ──────────────────────────────────────────────────────
+ *   缺省值 `EMPTY_BOARDING_LIVE`（`eta === null` / `catchTier === null`）⇒ 本组件
+ *   **完全回落既有数据**（`card.rides[0].liveText` / `tierText`）⇒ 收藏薄壳
+ *   （`RouteDetailSheet`，没有 Provider）行为逐字不变，不会崩也不会空。
+ */
+export interface BoardingLiveValue {
+  /** 候车实时到站（`null` = 没有实时值 ⇒ 回落 `card.rides[0].liveText`） */
+  eta: {
+    /** 展示文案（`还有 3 站 · 约 6 分`） */
+    text: string;
+    stopsAway: number;
+    etaMin: number | null;
+    /** 成功取数序号（观测钩子 `data-eta-seq` / `data-recompute-seq`） */
+    seq: number;
+  } | null;
+  /** 实时赶车档（`null` = 没算过 / 连冲刺也赶不上 ⇒ 回落 `card.rides[0].tierText`） */
+  catchTier: CatchTier | null;
+  /** 实时档位文案（与 `catchTier` 同生同灭；`""` = 无） */
+  catchText: string;
+  /** 实时档位重算序号（观测钩子 `data-tag-seq`） */
+  catchSeq: number;
+}
+
+/** 无 Provider 时的缺省值（= 「什么都没算过」）—— 必须是**稳定引用**，避免每次渲染换新对象 */
+export const EMPTY_BOARDING_LIVE: BoardingLiveValue = {
+  eta: null,
+  catchTier: null,
+  catchText: "",
+  catchSeq: 0,
+};
+
+export const BoardingLiveContext = createContext<BoardingLiveValue>(EMPTY_BOARDING_LIVE);
 
 /* ══════════════════════════════════════════════════════════════════════
    ★ U5（2026-11-04）：导航信息行的排版常量与派生逻辑
@@ -198,6 +243,16 @@ interface NavInfoRowProps {
   /** 观测钩子：到下车还有几站（未知 ⇒ 属性不输出） */
   stopsAway: number | null;
   /**
+   * 观测钩子 `data-eta-live`：上车前左槽的数字**是不是实时报站**。
+   *   `"1"` = 来自 `/api/station/eta`（`useBoardingEta`）；`"0"` = 规划快照 `card.rides[0].liveText`。
+   * ⚠️ 这是修复批 #9 的**唯一**判据：只看「点了刷新后有没有请求」不够 ——
+   *   有请求但解析失败/无在途车时同样不显示实时值，那种情况必须是 `"0"`（回落），
+   *   不能因为"发了请求"就报绿。
+   */
+  etaLive: boolean;
+  /** 观测钩子 `data-eta-seq`：候车报站**成功取数**的序号（`null` ⇒ 属性不输出） */
+  etaSeq: number | null;
+  /**
    * 观测钩子 `data-nav-missed`：**「已过下车站」的唯一机器可验口径**。
    *
    * 判定式（唯一，不接受第二种解释）：
@@ -241,6 +296,8 @@ function NavInfoRow({
   nextStationOn,
   remainMin,
   stopsAway,
+  etaLive,
+  etaSeq,
   missed,
 }: NavInfoRowProps) {
   const rowRef = useRef<HTMLDivElement | null>(null);
@@ -288,6 +345,11 @@ function NavInfoRow({
       data-eta-base={remainMin == null ? undefined : remainMin}
       data-eta-remain={remainMin == null ? undefined : remainMin}
       data-stops-away={stopsAway == null ? undefined : stopsAway}
+      /* ★ 修复批 #9（2026-11-06）：左槽数字的来源 —— `"1"` 实时报站 / `"0"` 规划快照。
+         `post` 态不适用该概念（上车后走 `data-nav-remain-min`），恒输出 `"0"`，
+         保证任何时刻 `[data-eta-live]` 都有确定值（脚本不必判"属性缺失"）。 */
+      data-eta-live={etaLive ? "1" : "0"}
+      data-eta-seq={etaSeq == null ? undefined : String(etaSeq)}
       /* 「已过站」的唯一机器可验口径：`"1"` ⟺ stopsAway===0 且 alarm==="none"；其余不输出 */
       data-nav-missed={missed ? "1" : undefined}
       style={{
@@ -622,6 +684,18 @@ export default function NavDetailBody({
      ══════════════════════════════════════════════════════════════════════ */
   const hasEnteredRiding = useContext(CatchTagLatchContext);
   /**
+   * ★ 修复批 #9 / #10（2026-11-06）：**候车期的实时值**（报站 + 赶车档）。
+   *   两者都由会话层（`NavShell`）算好下发，本组件只负责「有就用、没有就回落」。
+   *   ⚠️ 这里**不发起任何请求**：请求的唯一入口是「点刷新」与 R4 的位移触发
+   *      （`useBoardingEta` 头注的纪律 ①）。在本组件里补一次 fetch 就等于新增轮询通道。
+   */
+  const boardingLive = useContext(BoardingLiveContext);
+  /** 实时报站文案（`null` ⇒ 回落 `card.rides[0].liveText`） */
+  const boardingEtaText = boardingLive.eta?.text ?? null;
+  /** 实时赶车档（`null` ⇒ 回落 `card.rides[0].tier` / `tierText`） */
+  const liveTier = boardingLive.catchTier;
+  const liveTierText = boardingLive.catchText;
+  /**
    * ★ 2026-11-05：`riding` 语义变更（车停靠上车站即切 riding）后的**第二处必改点**。
    *
    * ⛔ 旧写法 `track?.phase === "riding" ? "post" : …` 是**无条件优先**的 ——
@@ -919,7 +993,17 @@ export default function NavDetailBody({
            ⚠️ 与 `data-eta-base` 是**两个不同指标**（前者=全程①，后者=本段④），勿混。 */
         data-remain-base={liveRemain ? Math.round(liveRemain.remainingMin * 10) / 10 : undefined}
         data-arrive-at={Math.round(remain.arriveAtMs)}
-        data-recompute-seq={liveRemain?.seq ?? 0}
+        /**
+         * ★ 修复批 #9（2026-11-06）：「本屏生效的重算序号」。
+         *   两个通道**互斥**（候车 ≠ 乘车），所以取「有谁用谁」不会互相打架：
+         *     · `riding`  ⇒ `liveRemain.seq`（`POST /api/nav/remaining` 的重算次数，原语义）；
+         *     · `boarding`/`off` ⇒ `boardingLive.eta.seq`（`/api/station/eta` 的成功取数次数）。
+         *   改造前候车期这里恒为 `0`（剩余行程通道被刻意排除，见 `useNavRemaining` 的 `enabled`），
+         *   QA 因此只能读到「点了刷新，序号一动不动」。现在候车期点刷新就会 +1。
+         *   ⚠️ 断言的正确读法：**同一相位内**单调递增；跨相位（上车那一刻）会从
+         *      `boarding` 的计数切到 `riding` 的计数（两者各自从 1 起），不要跨相位比大小。
+         */
+        data-recompute-seq={liveRemain?.seq ?? boardingLive.eta?.seq ?? 0}
         /* ★ 2026-11-03（批 1）：失败留痕。**成功时不输出该属性**（`undefined` 即不渲染）。
            QA 断言：点刷新后不得出现以 `403` 开头的值。
            ⚠️⚠️ **本属性缺失 ≠「刷新成功」**：也可能是**从未发起** ——
@@ -1025,8 +1109,20 @@ export default function NavDetailBody({
                   tierCtx={{ walkMin: card.walkOut.minutes, walkDistM: card.walkOut.distanceM }}
                 />
               ) : (
-                /* 无实时数据 ⇒ 「等车约 X 分」：有"约"字，不谎称精确 */
-                <EtaText text={minuteUnitOf(first.liveText || `等车约 ${Math.round(first.waitMin)} 分`)} />
+                /**
+                 * ★ 修复批 #9（2026-11-06）：**先实时、后快照**。
+                 *   实时值来自 `/api/station/eta`（`useBoardingEta`，由刷新触发）——
+                 *   改造前这一格只有 `first.liveText`（**规划时**的冻结文案），
+                 *   于是「点刷新」在候车期毫无变化（QA 24 次采样恒定）。
+                 *   ⚠️ 回落语义**必须保留**：无实时值（未请求 / 失败 / 该方向暂无在途车）
+                 *       ⇒ 仍显示规划文案，**不能变空**（空行比旧数据更糟：用户会以为坏了）。
+                 *   ⚠️ 单位仍是「分」：`minuteUnitOf` 把 `约 X 分钟` 归一，实时文案本身已用「分」。
+                 */
+                <EtaText
+                  text={minuteUnitOf(
+                    boardingEtaText ?? (first.liveText || `等车约 ${Math.round(first.waitMin)} 分`),
+                  )}
+                />
               )
             }
             preAside={
@@ -1040,10 +1136,28 @@ export default function NavDetailBody({
                *   `走快一点可赶上 14:32 那班` 实占 165px，320px 下把左槽压到 86px 而溢出；
                *   而且左槽已经表达了同一件事（轻轨分支的时刻由 `LrtEtaInline` 提供）。
                *   ⚠️ 影响面仅本行：方案卡（`RecommendCard` / `CardDetailClient`）继续用合并式。
+               *
+               * ★ 修复批 #10（2026-11-06）：**档位也要「活」**。
+               *   改造前右槽恒读 `first.tierText`（规划时刻按「全程步行时长」算的档），
+               *   人走了 300 米之后它还写「小跑能赶上」——QA 实测刷新前后一字未变。
+               *   现在：会话层按「**剩余步行距离 ÷ 常速**」与「刷新后的到站分钟」重算
+               *   （`lib/nav/catch-up-live.ts`），有值就用实时档；无值（没算过 / 连冲刺也赶不上 /
+               *   无报站）⇒ 回落 `first.tierText` —— 与 #9 同一套「先实时后快照」。
+               *   ⚠️ 档位枚举与文案仍取 `TIER_TEXT`（`catch-up-live.ts` 复用），**没有新文案**，
+               *      也不存在「赶不上」这一档（`liveTier === null` 只是回落，不是结论）。
                */
-              showTag && first.tierText ? (
-                <span data-tag="on" style={{ flex: "none" }}>
-                  <TierBadge tier={first.tier} tierText={first.tierText} />
+              showTag && (liveTierText || first.tierText) ? (
+                <span
+                  data-tag="on"
+                  /* ★ 观测钩子：`"1"` = 这句文案是**实时重算**出来的；`"0"` = 规划快照 */
+                  data-tag-live={liveTier !== null ? "1" : "0"}
+                  data-tag-seq={liveTier !== null ? String(boardingLive.catchSeq) : undefined}
+                  style={{ flex: "none" }}
+                >
+                  <TierBadge
+                    tier={liveTier ?? first.tier}
+                    tierText={liveTierText || first.tierText}
+                  />
                 </span>
               ) : null
             }
@@ -1052,6 +1166,9 @@ export default function NavDetailBody({
             nextStationOn={false}
             remainMin={null}
             stopsAway={null}
+            /* ★ 修复批 #9：左槽是否为实时报站（`useBoardingEta` 成功取数才有值） */
+            etaLive={boardingEtaText != null}
+            etaSeq={boardingLive.eta?.seq ?? null}
             missed={false}
           />
         )}
@@ -1065,6 +1182,9 @@ export default function NavDetailBody({
             nextStationOn
             remainMin={shownAlightMin}
             stopsAway={stopsAway}
+            /* 上车后不适用「候车实时报站」这一概念（见 `NavInfoRowProps.etaLive` 注释） */
+            etaLive={false}
+            etaSeq={null}
             missed={missedStop}
           />
         )}

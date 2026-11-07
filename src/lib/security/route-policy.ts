@@ -20,8 +20,22 @@
  * ⚠️ 用户裁决（2026-10-29）：采集/计时类页面**全部下线**，不留任何入口。
  *    `/finish` 一并下线：它只服务于计时会话收尾，会话接口已 410，
  *    留着就是一张「提交必然失败」的空白页。
+ *
+ * ⚠️ 2026-11-06（通琴号迭代 · 旧推荐链下线）：`/commute`、`/recommend`、`/card`
+ *    随 14 张表同批下线。三者都是旧「通勤方案」概念的页面：数据源
+ *    `commute_plans` / `plan_legs` / `places` 本批删除，页面不删就是必然 500 的空白页。
+ *    产品上它们也早已无导航入口（`BottomNav` 只有 `/` `/favorites` `/help`）。
  */
-export const PAGE_RETIRED = ["/timer", "/records", "/stats", "/free", "/finish"] as const;
+export const PAGE_RETIRED = [
+  "/timer",
+  "/records",
+  "/stats",
+  "/free",
+  "/finish",
+  "/commute",
+  "/recommend",
+  "/card",
+] as const;
 
 /**
  * ② 退役接口（前缀匹配）→ **410 Gone**。
@@ -31,15 +45,35 @@ export const PAGE_RETIRED = ["/timer", "/records", "/stats", "/free", "/finish"]
  * ⚠️⚠️ 若要恢复任一接口，**必须先解决主键可枚举问题**：
  *   `timer_sessions.id` / `free_rides.id` 都是 SERIAL 自增，
  *   公开后可按 1,2,3… 顺序扫描 ⇒ 等于把真实出行记录放到公网可扫。
+ *
+ * ⚠️ 2026-11-06（旧推荐链下线）：`/api/plans`、`/api/recommend`、`/api/card`、
+ *    `/api/fav-routes`、`/api/dsat/grab` 一并退役。前四个的数据源
+ *    （`commute_plans` / `plan_legs` / `places` / `favorite_routes`）本批删除；
+ *    `/api/dsat/grab` 的写点 `bus_snapshots` 本批删除。
+ *    对应 route 目录已同时删除 —— 410 是给**书签/旧客户端**的兜底，
+ *    不是让它们继续被新代码调用。
  */
-export const GONE_PREFIXES = ["/api/timer", "/api/free"] as const;
+export const GONE_PREFIXES = [
+  "/api/timer",
+  "/api/free",
+  "/api/plans",
+  "/api/recommend",
+  "/api/card",
+  "/api/fav-routes",
+  "/api/dsat/grab",
+] as const;
 
 /**
  * ③ 保留下来的公开写接口（同源校验）——跨站或来源不明 ⇒ **403**。
  *
  * 这些是**产品功能本身**（收藏页要写入），不能关；靠同源 + 体积上限 + 限流三重护栏。
+ *
+ * ⚠️ 2026-11-06：`/api/fav-routes` 已整体退役（进 `GONE_PREFIXES`，410），
+ *    故从本常量移除。留着会让「同源校验覆盖范围」与「实际可达接口」分叉 ——
+ *    中间件里 410 判定在前，同源判定永远走不到，属**看起来在防护、实际零作用**的假条目。
+ *    当前为空：本批之后**不再有任何保留下来的公开写接口**。
  */
-export const SAME_ORIGIN_PREFIXES = ["/api/fav-routes"] as const;
+export const SAME_ORIGIN_PREFIXES = [] as const;
 
 /**
  * ④ **在 handler 内自做同源校验**的写接口（`isSameOrigin()` 直接在 route 里调，不经中间件）。

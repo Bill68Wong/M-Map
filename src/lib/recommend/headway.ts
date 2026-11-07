@@ -248,7 +248,9 @@ export function conservativeWaitMin(hit: Pick<HeadwayHit, "lo" | "hi">): number 
  *   ⇒ 档 ③ 也走 `tight` 侧。`null` 只保留给「同场换乘不写该字段（`undefined`）」与
  *   「字段缺失」这两种**本就不该有风险信号**的情形。
  *
- * ⚠️ **取值待测量**（`scripts/compare-slack-impact.ts` 的档 ③ 占比 + top3 翻转组数），
+ * ⚠️ **取值待测量**（原测量入口 `scripts/compare-slack-impact.ts` 的档 ③ 占比 + top3 翻转组数；
+ *   ★ 2026-11-06：该脚本已随 `shadow_diff_report` 同批删除，**复测入口已移除**；
+ *   如需重测请参考 git 历史（删除前最后一个提交版），
  *   现默认 `0`（= 与档 ② 同口径）。改这里会同时改 cost 与排序，属可审计常量。
  */
 export const SLACK_NO_DATA = 0;

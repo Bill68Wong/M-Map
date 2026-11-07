@@ -24,6 +24,46 @@ export function detentTopsPx(winH: number, safeTop = 0): number[] {
   return [full, h * 0.5, h * 0.8];
 }
 
+/**
+ * 读 `env(safe-area-inset-bottom)` 的真实像素（同 `readSafeTopPx` 的探针法）。
+ * 通琴号站序弹窗的 peek 档顶边要用它（`--tqh-peek-h` 含底部安全区）。
+ */
+export function readSafeBottomPx(): number {
+  if (typeof window === "undefined" || typeof document === "undefined") return 0;
+  try {
+    const probe = document.createElement("div");
+    probe.style.cssText =
+      "position:fixed;bottom:0;left:0;width:0;height:env(safe-area-inset-bottom,0px);pointer-events:none;visibility:hidden";
+    document.body.appendChild(probe);
+    const h = probe.getBoundingClientRect().height;
+    probe.remove();
+    return Number.isFinite(h) && h > 0 ? h : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * ★ 2026-11-05（通琴号站序弹窗）：三档顶边 —— **只覆盖 peek，full/half 沿用**。
+ *
+ * ```
+ * full = clamp(max(safeTop+44, 12vh), 96, 128)   ← 与 `detentTopsPx` 同式
+ * half = 50vh
+ * peek = winH − (96 + safeBottom)                ← 可见 = 抓手带 24 + 行 44 + 呼吸 28 + 安全区
+ * ```
+ *
+ * 为什么 peek 不能直接复用 `detentTopsPx` 的第三档（`80vh`）：
+ *   导航 peek 要放「摘要 + 指标」（可见 20% ≈ 169px）；通琴号 peek **只放一行**
+ *   （`[A1] 往横琴 · 08:30  [换向][刷新][叉]`），可见高必须按 96px 重算，否则会出现
+ *   "单行面板拖出半屏空白"的破面。这是本迭代唯一需要覆写的几何值。
+ */
+export function tqhDetentTopsPx(winH: number, safeTop = 0, safeBottom = 0): number[] {
+  const h = winH > 0 ? winH : 844;
+  const [full, half] = detentTopsPx(h, safeTop);
+  /** 96 = 抓手带 24 + 行 44 + 上下呼吸 28（与 `--tqh-peek-h` 的 96 同一口径） */
+  return [full, half, Math.max(full + 120, h - (96 + safeBottom))];
+}
+
 /** `Detent` → 在 `DETENTS` / `detentTopsPx` 中的下标（越界夹取） */
 export function detentIndex(d: Detent): number {
   const i = DETENTS.indexOf(d);

@@ -40,6 +40,19 @@ export interface RecommendData {
   missed: string[];
   fromSlug: string;
   toSlug: string;
+  /**
+   * ★ 2026-11-06（问题 #6 收尾 · 让用户看得见「数据是什么时候取的」）：
+   *   **这批数据是哪一刻取的**，直接透传服务端 `/api/nav` 的 `generatedAt`
+   *   （`src/app/api/nav/route.ts:123` → `new Date(r.generatedAt).toISOString()`）。
+   *
+   *   ⚠️ 格式是 **ISO 8601 字符串**（如 `2026-11-06T09:41:07.382Z`），
+   *      **不是** `nav-service.ts` 里那个毫秒数 —— 前者已 `.toISOString()` 过。
+   *      展示端一律按**本地时区**格式化（见 `RouteResultPane.fmtClock`）。
+   *   ⚠️ 旧响应 / 字段缺失 ⇒ `null`（UI 整行不渲染，**不留空位**，见调用方）。
+   *   ⚠️ 这是**服务端取数时刻**，不是「前端收到响应的时刻」——
+   *      两者相差一次网络往返；用它才能让用户看到"刷新确实换了数据"。
+   */
+  generatedAt: string | null;
 }
 
 interface NavResp {
@@ -54,6 +67,8 @@ interface NavResp {
   missed?: string[];
   fromSlug?: string;
   toSlug?: string;
+  /** ★ 2026-11-06：ISO 8601（`route.ts:123` 已 `.toISOString()`）；旧响应可缺。 */
+  generatedAt?: string | null;
 }
 
 export interface UseRecommend {
@@ -154,6 +169,8 @@ export function useRecommend(
        */
       if (!sameQuery) clearSmoothMem();
       setData((prev) => ({
+        /* ⚠️ 同一 query 的刷新会走 `mergeCardsStable`（卡是"旧集合+新数字"的混血），
+           但 `generatedAt` **必须**取本次响应的 —— 它描述的是"这批数字",不是"这批方案"。 */
         cards: prev && sameQuery ? mergeCardsStable(prev.cards, nextCards) : nextCards,
         colors: j.colors ?? prev?.colors ?? {},
         degraded: !!j.degraded,
@@ -163,6 +180,7 @@ export function useRecommend(
         missed: j.missed ?? [],
         fromSlug: j.fromSlug ?? "",
         toSlug: j.toSlug ?? "",
+        generatedAt: j.generatedAt ?? null,
       }));
       setPhase("ready");
     } catch (e) {

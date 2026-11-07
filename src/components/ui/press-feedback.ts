@@ -44,7 +44,6 @@ const PRESSABLE = [
   ".rpanel__row",
   ".rl-chip",
   ".fav-flat__main",
-  ".line-result",
   ".link-hit",
   ".rc-report__link",
   ".nav-brand",

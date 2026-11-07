@@ -5,7 +5,8 @@
  *   向 `poi_aliases` 灌入「**0 配额**命中」所需的别名（设计 §2.A / §G3）：
  *     · **站点名**（613 站；含繁体原名 + 繁简归一 + 去后缀形态）；
  *     · **线路名**（95 条；线路码）；
- *     · **预设地点**（擎天匯 / 澳科大 / 横琴口岸 / 关闸 —— 来自 places + place_coords）；
+ *     · **预设地点**（擎天匯 / 澳科大 / 横琴口岸 / 关闸 —— 来自 `src/lib/recommend/place-ids.ts` 常量；
+ *       ★ 2026-11-06：`places` + `place_coords` 两表已删，改读常量）；
  *     · **校园叫法 / 口岸口语 / 轻轨缩写（lrt·轻轨——★高德搜不到）/ 葡文地名**（人工策划）。
  *
  *   ★ 坐标系：别名坐标一律 **GCJ-02**（确认后直接作 `transit.destination`）。
@@ -23,6 +24,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Pool } from "pg";
 import { wgs84ToGcj02 } from "../src/lib/amap/coord";
+import { PLACE_COORDS, PLACE_NAME_BY_SLUG, PLACE_SLUG_BY_ID } from "../src/lib/recommend/place-ids";
 import { normalizeName, normalizeQuery } from "../src/lib/shared/normalize";
 
 try {
@@ -154,18 +156,20 @@ async function main() {
   }
   say(`② 线路 ${rt.rows.length} 条 → 新增别名 ${rows.length - beforeRoutes}`);
 
-  // ── ③ 预设地点（places + place_coords）──
+  // ── ③ 预设地点（★ 2026-11-06：`places` + `place_coords` 两表已删→改读 `place-ids.ts` 常量）──
+  //   `PLACE_SLUG_BY_ID` / `PLACE_NAME_BY_SLUG` / `PLACE_COORDS` 逐值 = 删表前原值，
+  //   因此本段产出的别名行与改动前**逐行一致**（含坐标与 weight）。
   const beforePlaces = rows.length;
-  const places = await pool.query(`SELECT id, slug, name FROM places WHERE is_active`);
-  const coords = await pool.query(`SELECT place_id, zone, lat, lng FROM place_coords`);
+  const placeRows = Object.entries(PLACE_SLUG_BY_ID).map(([id, slug]) => ({
+    id: Number(id),
+    slug,
+    name: PLACE_NAME_BY_SLUG[slug] ?? slug,
+  }));
   const coordByPlace = new Map<number, { lat: number; lng: number }[]>();
-  for (const raw of coords.rows as Record<string, unknown>[]) {
-    const pid = Number(raw.place_id);
-    const arr = coordByPlace.get(pid) ?? [];
-    const lat = num(raw.lat);
-    const lng = num(raw.lng);
-    if (lat !== null && lng !== null) arr.push({ lat, lng });
-    coordByPlace.set(pid, arr);
+  for (const c of PLACE_COORDS) {
+    const arr = coordByPlace.get(c.place_id) ?? [];
+    arr.push({ lat: c.lat, lng: c.lng });
+    coordByPlace.set(c.place_id, arr);
   }
   const PLACE_ALIASES: Record<string, string[]> = {
     home: ["擎天汇", "擎天匯", "擎天", "T8", "擎天汇T8", "家", "宿舍"],
@@ -173,10 +177,10 @@ async function main() {
     hengqin: ["横琴", "橫琴", "横琴口岸", "橫琴口岸", "横琴站", "橫琴站", "澳门大学横琴"],
     gate: ["关闸", "關閘", "拱北", "拱北口岸", "关闸口岸", "關閘口岸"],
   };
-  for (const raw of places.rows as Record<string, unknown>[]) {
-    const slug = String(raw.slug);
-    const nameTc = String(raw.name ?? "");
-    const list = coordByPlace.get(Number(raw.id)) ?? [];
+  for (const raw of placeRows) {
+    const slug = raw.slug;
+    const nameTc = raw.name;
+    const list = coordByPlace.get(raw.id) ?? [];
     // 取第一个坐标作为代表（澳科大取首个 zone；仅用于别名命中给点，精度足够）
     const rep = list[0] ?? null;
     const gcj = rep ? wgs84ToGcj02(rep) : null;
@@ -207,7 +211,7 @@ async function main() {
       source: "campus",
     });
   }
-  say(`③ 预设地点 ${places.rows.length} 个 → 新增别名 ${rows.length - beforePlaces}`);
+  say(`③ 预设地点 ${placeRows.length} 个 → 新增别名 ${rows.length - beforePlaces}`);
 
   // ── ④ 人工策划：轻轨缩写 / 葡文 / 常见 POI ──
   const beforeExtra = rows.length;

@@ -61,6 +61,9 @@ import { lrtTransferVariantOf } from "./lrt-transfer";
 import TrackLayer from "./TrackLayer";
 import UserDotLayer from "./UserDotLayer";
 import VehicleLayer from "./VehicleLayer";
+import TqhStationLayer from "./TqhStationLayer";
+import TqhPathLayer from "./TqhPathLayer";
+import type { TqhSegment, TqhStation } from "./tqh-model";
 import type { VehicleLite } from "./VehicleMarker";
 import type { UserFix } from "./useUserFix";
 
@@ -167,6 +170,12 @@ export interface NavMapProps {
         insetTopPx?: number;
         /** ★ v3.6.0 S5：底部被占高度（= 面板顶边 `topsPx[detentIndex]`） */
         insetBottomPx?: number;
+        /**
+         * ★ 2026-11-06（修复批 #6b）：**显式意图 ⇒ 解除让位锁**（缺省 = 旧行为）。
+         * 只有「用户主动选中某条班次线」会传；自动取景（GPS / 面板落定）**一律不传**。
+         * 语义与类型定义见 `useNavFrame.ts#FrameCmd.force`（两处必须同口径）。
+         */
+        force?: boolean;
       }
     | null;
   /** 定位回调：成功给 GCJ-02 坐标；失败给 null */
@@ -188,6 +197,21 @@ export interface NavMapProps {
    *   上层据此判定单向（`length<=1` ⇒ 无换向按钮）并补齐 `routeLine.dir`。
    */
   onRouteDirs?: (dirs: string[]) => void;
+  /**
+   * ★ 2026-11-06（修复批 #4/#5a 收尾）：**线路站序弹窗的顶边像素**（px，从屏幕顶部算）。
+   *
+   *   · 非空 ⇒ 线路取景把包围盒装进「弹窗顶边**以上**」的槽（**自算** zoom + `panBy`，
+   *     与 `fit-box` 同一配方，见下方取景处的长注释）；
+   *   · `null` / 不传 ⇒ **原行为一字不改**（`setBounds(b, true, [40,40,40,40])`）。
+   *
+   * ⚠️ 只在本弹窗**打开**时由宿主给值；关闭 / 导航态 / 选线弹窗 / 详情 pane 时宿主传 `null`
+   *   ⇒ 那些场景走原路径（别把「既有例外」泛化成统一路径：线路查看模式现在的观感是验收过的）。
+   * ⚠️ **值来源**：宿主的 `tqhDetentTopsPx(winH, safeTop, safeBottom)[detentIndex(detent)]`
+   *   —— 与弹窗自己的档位顶边**同一个函数**，不要在任一侧另算。
+   * ⚠️ 本值**不进取景 effect 的依赖**（见 `stopsInsetTopRef`）：拖档换档不重新取景，
+   *   否则每拖一档地图就跳一次。取景时机仍是「打开 / 换线 / 换向」。
+   */
+  stopsInsetTop?: number | null;
   /** ★ v2.10.0：该线路当前方向的在途车辆（空数组 = 无车/非巴士） */
   vehicles?: VehicleLite[];
   /** ★ v2.10.0：点击车辆图标（含合并组内的其余车辆） */
@@ -260,6 +284,61 @@ export interface NavMapProps {
    *     让位锁（`followState`/`free`）、双击恢复 `restore()`、定位键重跑**全部保留**。
    */
   userDotSmoothMs?: number;
+  /**
+   * ★ 2026-11-05（通琴号 Spec R3/R4）：**第三类交通方式的地图图层**。
+   *
+   * · `tqhStations` 非空 ⇒ 画通琴号站点（★ 2026-11-06 起只有 **96 个纯通琴号站整圆**，
+   *   带 `bus_station_code` 的 41 站不再单独成标，改由 `tqhSharedBusCodes` 把巴士标染双色）；
+   * · `tqhActiveIds` 非空 ⇒ 该班次经过的站高亮、其余降透明（**只降透明不改背景**）；
+   * · `tqhSegments` 非空 ⇒ 按段画主题色实线 / 缺段直线虚线（几何全部离线预计算，零高德调用）。
+   * 三者**互不依赖**：只传站点也能看图层；`null` ⇒ 对应图层 0ms 清空。
+   */
+  tqhStations?: TqhStation[] | null;
+  tqhActiveIds?: ReadonlySet<number> | null;
+  tqhSegments?: TqhSegment[] | null;
+  /**
+   * ★ 2026-11-06（修复批 #1）：**双色巴士标**集合。
+   *
+   * 命中的巴士站 marker 改用「左半青花蓝 `--accent` / 右半通琴号粉 `--tqh-map-half`」硬停渐变
+   * （复用 `globals.css .nav-map__station--tqh-shared`，**零新增 CSS**）—— 因为带
+   * `bus_station_code` 的通琴号站**不再单独画 marker**（`TqhStationLayer` 已跳过 41 个），
+   * 通琴号信息改挂在这里。
+   *
+   * 传入的是**主码集合**（`sharedBusMainCodes`，实测 33 个）：`/api/stations` 只下发主码，
+   * 35 个站台码塌成 33 个点。兼容按完整站台码传（下方判据两种都认）。
+   * `null` / 缺省 ⇒ 不染（与改前逐字节一致，降级安全）。
+   */
+  tqhSharedBusCodes?: ReadonlySet<string> | null;
+  /**
+   * ★ 2026-11-06（修复批 #1 配套）：**本班次经过、但已被吸进巴士标的站**（主码集合）。
+   *
+   * 为什么需要：通琴号班次详情里，本班 7 个站可能有 1 个是「关联巴士站」——
+   * 它的独立 marker 已被取消（改由巴士双色标代表），若不给那个巴士标加环，
+   * 用户会觉得「这班少了一站」。这些站命中 ⇒ 巴士标加白环（复用
+   * `.nav-map__station--tqh-onroute`，**只加形状不改色**，双色结构不会被吃掉）。
+   * `null` ⇒ 不加环（浏览 / 非通琴号视图）。
+   */
+  tqhActiveBusCodes?: ReadonlySet<string> | null;
+  /**
+   * ★ 2026-11-06（修复批 #6 · P0「通琴号路线模式未隐藏其它站点」）：**巴士站点层的白名单**。
+   *
+   * 三态（顺序即语义）：
+   *   · `null` / 缺省 ⇒ **不接管**，巴士层走既有 `lineStops` → 本线 `routeStops` 逻辑
+   *     （浏览 / 线路详情 / 导航态行为与改前逐字节一致）；
+   *   · **非空集** ⇒ 只渲染集合内的巴士站（主码；兼容完整站台码），其余一概不建 marker；
+   *   · **空集** ⇒ 巴士站**全隐**（班次里没有任何关联巴士站时的正确结果）。
+   *
+   * ⚠️ 判据必须是 `!= null`（不能用真值判断空集会被漏掉，`Set` 实例恒为 truthy，
+   *   但语义上要写成「null 才是不接管」，否则后来人改成 `Array` 就会踩空）。
+   */
+  tqhBusWhitelist?: ReadonlySet<string> | null;
+  /**
+   * ★ 2026-11-06（修复批 #3 / R2）：**通琴号站点白名单**（站 `id`）。
+   * `null` = 不过滤（浏览 / 导航态，行为与改前一致）；空集 = 全隐；非空 = 只留这些站。
+   */
+  tqhWhitelist?: ReadonlySet<number> | null;
+  /** 点通琴号站点（纯通琴号站 → 通琴号卡片；`ids` > 1 表示同物理点合并组） */
+  onTqhStationClick?: (s: TqhStation, ids: number[]) => void;
   /** 附加类名（承载全屏布局） */
   className?: string;
 }
@@ -278,6 +357,7 @@ export default function NavMap({
   className = "",
   routeLine = null,
   onRouteDirs,
+  stopsInsetTop = null,
   vehicles = NO_VEHICLES,
   onVehicleClick,
   overview = null,
@@ -289,6 +369,14 @@ export default function NavMap({
   traveled = null,
   lineStops = null,
   userDotSmoothMs = 0,
+  tqhStations = null,
+  tqhActiveIds = null,
+  tqhSegments = null,
+  tqhSharedBusCodes = null,
+  tqhActiveBusCodes = null,
+  tqhBusWhitelist = null,
+  tqhWhitelist = null,
+  onTqhStationClick,
 }: NavMapProps) {
   const canvasRef = useRef<HTMLDivElement | null>(null);
   /** `.nav-map` 根元素（写观测钩子：data-map-follow / data-map-zoom / …） */
@@ -329,12 +417,47 @@ export default function NavMap({
   const overviewPolylinesRef = useRef<unknown[]>([]);
   /** 路线模式切换后触发站点图层重建（marker 的样式在创建时决定，必须重建才生效） */
   const [stationRebuildTick, setStationRebuildTick] = useState(0);
+  /**
+   * ★ 2026-11-06（修复批 #6 · P0「通琴号站点缩放比例与巴士站不一致」）：
+   * **站点是否达到当前场景的显示阈值**（`zoom >= minZoom`）。
+   *
+   * 唯一计算点 = 巴士站点图层的 `render()`（它本来就算 `minZoom`）；本状态只是把
+   * 「这一帧达没达标」原样转给 `TqhStationLayer` 的 `enabled` ——
+   * 两层共用**同一个常量、同一次计算、同一时刻**，⇒ 慢慢拉远时同时消失、放大时同时出现。
+   * ⚠️ 不要在 `TqhStationLayer` 里另写一个 15（那会变成两份真相，必然漂移）。
+   */
+  const [stationZoomOk, setStationZoomOk] = useState(false);
+  /** 阈值判定镜像（只在**跳变**时 setState，避免 zoomend 高频 setState 抖动整棵 NavMap） */
+  const zoomOkRef = useRef(false);
+  /**
+   * ★ 观测钩子（修复批 #6）：通琴号站点图层的**已绘 marker 数**写到 `.nav-map` 根。
+   *
+   * 为什么不自己数 DOM：marker 增减有两条路径（建 / `clear`），而图层是唯一真相 ⇒
+   * 由它上报最准。这是 QA 断言「首页 96 个纯站」「缩到 14 级 ⇒ 0」的唯一手段
+   * （既有 `data-tqh-shared-count` 只覆盖双色巴士标，不覆盖通琴号整圆标）。
+   * ⚠️ 只写 DOM 属性（不 setState）⇒ 零重渲染成本。
+   */
+  const onTqhStationCount = useCallback((n: number) => {
+    rootRef.current?.setAttribute("data-tqh-station-count", String(n));
+  }, []);
   /** 点击回调放进 ref：避免 prop 变化导致图层重新绑定事件 */
   const onStationClickRef = useRef<NavMapProps["onStationClick"]>(undefined);
   const onMapClickRef = useRef<NavMapProps["onMapClick"]>(undefined);
   const onMapReadyRef = useRef<NavMapProps["onMapReady"]>(undefined);
   /** ★ v2.10.0：方向回报回调（放进 ref，避免图层重建） */
   const onRouteDirsRef = useRef<NavMapProps["onRouteDirs"]>(undefined);
+  /**
+   * ★ 2026-11-06（#5a 收尾）：站序弹窗顶边的实时镜像（渲染期同步赋值，同 `viewRef` 口径）。
+   *
+   * 为什么是 ref 而不是 effect 依赖：
+   *   线路取景 effect 的依赖是 `[routeLine, applyCamera]` —— **只在打开 / 换线 / 换向时跑**。
+   *   若把 `stopsInsetTop` 加进依赖，用户每拖一档（half→full→peek）都会重跑整个 effect
+   *   （重新 `fetch` route-shapes + 重新取景）⇒ 地图跟着手指跳。用 ref 则：
+   *   **触发时机不变，但取景那一刻读到的是最新档位**（取景在 `await fetch` 之后发生，
+   *   宿主同一批里已经把档位落定，ref 必然已是最新值）。
+   */
+  const stopsInsetTopRef = useRef<number | null>(stopsInsetTop);
+  stopsInsetTopRef.current = stopsInsetTop;
   /**
    * ★ 2026-09-22：`view` 的实时镜像。
    * 为什么需要：`applyLocateView` 是 `useCallback([])`（空依赖，避免定位回调重绑），
@@ -900,7 +1023,17 @@ export default function NavMap({
     if (!cmd || cmd.mode === "none") return;
     lastCmdRef.current = cmd;
     if (phase !== "ready") return;
-    if (followRef.current === "free") return; // ★ 让位锁：free 态跳过一切自动取景
+    /**
+     * ★ 2026-11-06（修复批 #6b）：`cmd.force` = **显式意图**（选中某条班次线），
+     *   与定位键（`locateTick` 里 `setFollowState("follow")`）同权 ⇒ **解除让位锁后取景**。
+     *
+     * 不放行会怎样：用户先缩放/拖动地图找车（⇒ 锁变 `free`），再点班次 ⇒
+     *   取景被本行静默跳过，视野纹丝不动、无任何提示 = 需求未实现却零信号。
+     * ⚠️ 只有显式选择类指令带 `force`（见 `FrameCmd.force` 注释）；
+     *   GPS / 面板落定 / 数据到达类取景**一律不带** —— 否则让位锁形同废纸。
+     */
+    if (followRef.current === "free" && !cmd.force) return; // ★ 让位锁：free 态跳过自动取景
+    if (cmd.force) setFollowState("follow");
     applyView(cmd);
   }, [viewTick, phase, applyView]);
 
@@ -1076,23 +1209,106 @@ export default function NavMap({
         // ★ 本批（需求② / AC-29~31）：**站点白名单**
         //   · 宿主在路线查看 / 导航模式传入 `lineStops`（各腿站点并集）；
         //   · 空集保护：`lineStops` 空 ⇒ 折成 null（不过滤）；路线模式回落 `routeStopsRef`。
-        const white =
-          lineStops && lineStops.size > 0
+        /**
+         * ★ 2026-11-06（修复批 #6 · P0「通琴号路线模式未隐藏其它站点」）：
+         * **通琴号班次模式的白名单优先级最高**，直接接管本图层的过滤口径。
+         *
+         * 病根：`tqhWhitelist` 只过滤通琴号图层 ⇒ 进班次查看后通琴号其它站消失了，
+         *   巴士层却完全没过滤 ⇒ 满屏巴士站还在（负责人报的 P0）。
+         * 现口径（负责人裁决「全部隐藏」）：班次模式下白名单 = 本班关联巴士主码；
+         *   本班没有关联巴士站 ⇒ **空集** ⇒ 一个都不建（`Set` 实例恒 truthy，
+         *   ⇒ 下面的 `white && !white.has(...)` 会全部 `continue`，最终
+         *   「移出视野」清理段把已有 marker 全部 remove —— 与拉远清空同口径）。
+         * 不接管（`null`）时**逐字节保持**既有 `lineStops` → `routeStops` 逻辑。
+         */
+        const tqhOnly = tqhBusWhitelist != null;
+        const white = tqhOnly
+          ? tqhBusWhitelist
+          : lineStops && lineStops.size > 0
             ? lineStops
             : routeStopsRef.current.size > 0
               ? routeStopsRef.current
               : null;
-        // ★ 观测钩子 H3：站点图层过滤态（nav=白名单 / route=本线 / all=不过滤）
+        // ★ 观测钩子 H3：站点图层过滤态（nav=白名单 / route=本线 / tqh=通琴号班次 / all=不过滤）
         //   ⚠️ 契约（07 §1.1/§1.2）：**唯一挂载点 = `.nav-map` 根**（选择器 `.nav-map[data-station-layer]`）
+        //   ★ 2026-11-06（#6）：新增第 4 个取值 `tqh`（**追加**，不改既有三值语义）——
+        //     QA 用它区分「班次模式接管了巴士层」与「既有白名单」。
         rootRef.current?.setAttribute(
           "data-station-layer",
-          lineStops && lineStops.size > 0 ? "nav" : routeStopsRef.current.size > 0 ? "route" : "all",
+          tqhOnly
+            ? "tqh"
+            : lineStops && lineStops.size > 0
+              ? "nav"
+              : routeStopsRef.current.size > 0
+                ? "route"
+                : "all",
         );
         // ★ 2026-09-22：路线模式下阈值放宽（否则长线缩到全澳后站点全消失，看不到高亮）
         // ★ 本批：导航模式（白名单）同样放宽 —— 详情 fit-box 常在 zoom≈13 ⇒ 沿用路线档阈值
-        const routeMode = routeStopsRef.current.size > 0 || (!!lineStops && lineStops.size > 0);
+        /**
+         * ══════════════════════════════════════════════════════════════════════
+         * ★ 2026-11-06（修复批 #6b · #2 取景配套）：通琴号班次模式归入 `routeMode`
+         * ══════════════════════════════════════════════════════════════════════
+         *
+         * ── ① 为什么 `tqhBusWhitelist != null` 要算进 `routeMode` ──────────────
+         *   它**只在通琴号班次模式下非空**（导航态 / 浏览态都折成 `null`，
+         *   见 `NavShell` 的 `tqhBusWhitelist` 派生注释）⇒ 判据天然只命中该场景，
+         *   不会把阈值效应泄漏到别的模式。
+         *
+         * ── ② 这不是「为班次模式放宽阈值」，而是「同类场景取同一档」─────────────
+         *   本常量的语义是「**需要装下整条线路**时的站点阈值」。班次取景
+         *   （`NavShell` 的 `tqhFitBox` → `frame({mode:"fit-box"})`）与线路查看模式
+         *   **是同一类场景**：都要把一条线整条装进视野，`fit-box` 的 clamp 下限 12
+         *   ⇒ 落点必然 12~13。两者用同一档（`STATION_MIN_ZOOM_ROUTE`）是一致性，
+         *   **不是给通琴号开的特例**。
+         *   反过来说：若这里保留 15，就变成"班次模式需要 15 级才看得到站"，
+         *   而它自己的取景恰好把它放在 12~13 ⇒ 自相矛盾。
+         *
+         * ── ③ 与 #5 的「统一比例尺」不冲突（关键的不变量没破）──────────────────
+         *   #5 要的是「**同一缩放级别下两者同生同灭**」。两层用的仍是**同一个
+         *   `minZoom`、同一次 `render()` 计算**（下行 `zoomOk` 单一真相）
+         *   ⇒ 不变量一条没破；变的只是「本场景取哪一档」——而这本来就是
+         *   巴士层早已存在的机制（线路查看模式 2026-09-22 就从 15 改到了 12，
+         *   理由同为「`setBounds` 装下整条线后 zoom 掉到 12~13」）。
+         *
+         * ── ④ 密度安全（已核算，不是"应该没问题"）───────────────────────────
+         *   班次模式下巴士层白名单只剩「本班关联巴士主码」（实测个位数，
+         *   典型 0~2 个）；通琴号层只剩本班站点（典型 5~9 个）
+         *   ⇒ 12 级不可能糊成一片（与路线模式白名单后的结论同向）。
+         *
+         * ══════════════════════════════════════════════════════════════════════
+         * ⚠️⚠️ 改这一行之前**必须先读完 ②**：
+         *   把 12 改回 15（或把 `tqhBusWhitelist != null` 从 `routeMode` 删掉）⇒
+         *   **班次取景会静默失效**：`frame()` 照常执行、`data-view-mode` 照常写、
+         *   地图照常缩放 —— 但**一个站点都不显示**。不报错、不警告，
+         *   用户看到的是"这班车没有站"，排查时也只会怀疑取景算法（而它是对的）。
+         *   ⇒ 这是「改了 A 却坏在 B」的典型形态：症状与原因不在同一层。
+         *   **要动它请连带跑一遍真浏览器验收：选一个班次 ⇒ 站点必须可见。**
+         * ══════════════════════════════════════════════════════════════════════
+         */
+        const routeMode =
+          routeStopsRef.current.size > 0 ||
+          (!!lineStops && lineStops.size > 0) ||
+          tqhBusWhitelist != null;
         const minZoom = routeMode ? STATION_MIN_ZOOM_ROUTE : STATION_MIN_ZOOM;
-        if (zoom < minZoom) {
+        /**
+         * ★ 2026-11-06（修复批 #6 · P0「通琴号站点缩放比例与巴士站不一致」）：
+         * **把「本次判据是否达标」回写给 `TqhStationLayer`** —— 同一常量、同一次计算、同一时刻。
+         *
+         * 为什么不是让通琴号图层自己算：那会变成两份真相（它既不知道 `routeMode`，
+         *   也有自己的事件时机）⇒ 慢慢拉远时会出现「一个先消失、一个后消失」。
+         * 这里 `minZoom` 已经是本场景生效的阈值（路线/导航档 12，常规 15），
+         *   `zoomOk` 就是巴士层**此刻**用不用画点的同一个布尔值 ⇒ 两层必然同生同灭。
+         *
+         * ⚠️ 只为**跳变**触发一次 setState（ref 去重）：`render()` 在 `zoomend`/`moveend`
+         *   节流后高频执行，逐帧 setState 会让整个 `NavMap` 抖动。
+         */
+        const zoomOk = zoom >= minZoom;
+        if (zoomOkRef.current !== zoomOk) {
+          zoomOkRef.current = zoomOk;
+          setStationZoomOk(zoomOk);
+        }
+        if (!zoomOk) {
           clearAll(); // 拉远：清空（产品口径）
           return;
         }
@@ -1127,16 +1343,89 @@ export default function NavMap({
             const variant = c2 ? lrtTransferVariantOf(s.code) : undefined;
             if (variant) cutCls = variant === "diag" ? " lrt-cut-diag" : " lrt-cut-half";
           }
-          // ★ 2026-09-22 路线查看模式：本线站点高亮放大、其他站点变灰变小（「一眼分辨」）
+          // ★ 2026-09-22 路线查看模式：本线站点高亮、其他站点变灰变小（「一眼分辨」）
+          /**
+           * ★ 2026-11-06（修复批·裁决 A 方案 2）：**「本线站」不再用类名，改用 `data-on-route="1"`**。
+           *
+           * 为什么：`globals.css` 那边已把 `.nav-map__station--onroute` 的样式**整块删除**
+           *   （用户口径「指定线路的经停站站标与正常站标不同，会有一层白色粗边」）⇒
+           *   这个类名变成**零样式死钩子**。死钩子比没钩子更危险：后来人看到类名还在，
+           *   很容易往里加样式，立刻重回「两种站标」——正是本次 #3 的病根。
+           * ⇒ 语义保留（「本线站」仍是可观测事实），载体换成**属性**（属性不会被误当样式入口）。
+           *
+           * 「本线 vs 其它」如何仍可分辨：路线模式下 marker 白名单已按本线站点建点
+           *   （`white = routeStopsRef`），屏幕上本来就只有本线站；`--dim` 继续承担
+           *   「同主码不同站台」的降级态（**该分支不动**）。
+           * ⚠️ 不要改成 `data-on-route` 之外的新类名，也不要在 CSS 里补回样式。
+           */
           const inRoute = routeStopsRef.current.size > 0;
           const isOnRoute = inRoute && routeStopsRef.current.has(s.code);
-          const routeCls = !inRoute ? "" : isOnRoute ? " nav-map__station--onroute" : " nav-map__station--dim";
-          const cls = `nav-map__station${isLrt ? " nav-map__station--lrt" : ""}${cutCls}${routeCls}`;
+          const routeCls = inRoute && !isOnRoute ? " nav-map__station--dim" : "";
+          const onRouteAttr = isOnRoute ? ' data-on-route="1"' : "";
+          /**
+           * ★ 2026-11-06（修复批 #1）：**双色巴士标**。
+           *
+           * 命中 `tqhSharedBusCodes` 的巴士站 = 同一物理位置也有通琴号站 ⇒ 用
+           * 「左半 `--accent`（青花蓝）/ 右半 `--tqh-map-half`（通琴号粉）」**硬停**渐变，
+           * 类名复用 `TqhStationLayer` 当年为半圆标的 `.nav-map__station--tqh-shared`
+           * （`globals.css` 现有规则，`linear-gradient(90deg … 0 50%, … 50% 100%)`）
+           * ⇒ **本轮零新增 CSS**。
+           *
+           * 判据同时认「主码」和「完整站台码」：`/api/stations` 下发的是主码
+           * （`M172/1…/17` 塌成一个 `M172`），而 `bus_station_code` 是站台码 ⇒
+           * 调用方传主码集即可；万一传完整码也不漏。
+           *
+           * ⚠️ 形状仍由 `.nav-map__station`（11px 圆 + 1.5px 白描边）承载，
+           *   本类只换 `background`（CSS 里位置在 2593 之后 ⇒ 覆盖生效）；
+           *   `--dim` 的灰底同理被覆盖 —— 降级态改为「保留双色 + 缩到 8px + 0.45 透明」，
+           *   与轻轨「非本线不抹线路色」的历史结论同向（`globals.css:5508` 注释）。
+           */
+          const tqhShared =
+            !!tqhSharedBusCodes &&
+            (tqhSharedBusCodes.has(s.code) || tqhSharedBusCodes.has(stationMain(s.code)));
+          const sharedCls = tqhShared ? " nav-map__station--tqh-shared" : "";
+          /**
+           * ★ 2026-11-06（#1 配套）：本班次经过的关联站（已吸进本标的那些）⇒ 加白环。
+           * 只加 `box-shadow` 环、不改 background ⇒ 双色结构与时序高亮互不吃掉。
+           */
+          const tqhOnTrip =
+            !!tqhActiveBusCodes &&
+            (tqhActiveBusCodes.has(s.code) || tqhActiveBusCodes.has(stationMain(s.code)));
+          const tripCls = tqhOnTrip ? " nav-map__station--tqh-onroute" : "";
+          const cls = `nav-map__station${isLrt ? " nav-map__station--lrt" : ""}${cutCls}${routeCls}${sharedCls}${tripCls}`;
           const marker = new AMap.Marker({
             position: [s.lng, s.lat],
-            content: `<div class="${cls}" data-code="${esc(s.code)}"${styleAttr} title="${esc(s.name)}"></div>`,
-            // ★ v2.10.1：站点盒尺寸**分类型**（巴士 11px / 轻轨 13px，见 globals.css）
-            //   ⇒ 居中偏移各取一半（-5.5 / -6.5），否则小圆点会偏离真实坐标约 1px
+            content: `<div class="${cls}" data-code="${esc(s.code)}"${onRouteAttr}${tqhShared ? ' data-tqh-shared="1"' : ""}${tqhOnTrip ? ' data-tqh-on-trip="1"' : ""}${styleAttr} title="${esc(s.name)}"></div>`,
+            /**
+             * ★ v2.10.1：站点盒尺寸**分类型**（巴士 11px / 轻轨 13px，见 globals.css）
+             *   ⇒ 居中偏移各取一半（-5.5 / -6.5），否则小圆点会偏离真实坐标约 1px。
+             *
+             * ══════════════════════════════════════════════════════════════════
+             * ★ 2026-11-06：**已知偏差（改前既有、已核算、明示不修）—— 不要再重算一遍**
+             * ══════════════════════════════════════════════════════════════════
+             * 全仓站点 offset 只有这一处，值恒为 `-5.5`（巴士）/ `-6.5`（轻轨），
+             * 按**常态盒宽**算的一半 —— 而 `--dim` 态会把盒子改小（CSS 里写死 8 / 11）：
+             *
+             *   | 态 | 盒宽 | 用的 offset | 锚点落在中心的偏移 |
+             *   |---|---|---|---|
+             *   | 巴士常态 `.nav-map__station` | 11px | -5.5 | 0（精确居中）|
+             *   | 轻轨常态 `--lrt` | 13px | -6.5 | 0（精确居中）|
+             *   | 巴士 `--dim` | 8px | -5.5 | 偏**左上** 1.5px |
+             *   | 轻轨 `--lrt.--dim` | 11px | -6.5 | 偏**左上** 1.0px |
+             *
+             * （`box-sizing: border-box`，11/13 已含 1.5px 白描边 ⇒ 11/2=5.5、13/2=6.5 精确。）
+             *
+             * ── 为什么不按盒宽动态算（一行就能"修"）────────────────────────────
+             *   `--dim` 的盒宽是**写死在 globals.css** 的（8 / 11）。TSX 若再抄一遍
+             *   `const box = dim ? (isLrt ? 11 : 8) : isLrt ? 13 : 11`，就产生了**第二份定义**：
+             *   哪天 CSS 改尺寸，这里会**静默**偏掉，而且没有任何编译期/测试信号。
+             *   ⇒ 判断标准：**「1px 不可见」 vs 「第二份定义」，后者更贵。**
+             *     宁可留一个已知的小偏差，也不制造第二个真相。（负责人 2026-11-06 裁决采纳。）
+             *
+             * ⚠️ 将来若非要修：前置条件是**先让 CSS 侧把盒宽以 CSS 变量导出**
+             *   （如 `--station-box` / `--station-box-dim`），JS 读变量、CSS 读同一变量
+             *   ⇒ 保持单一真相；**不要**在 TSX 里手抄像素值。
+             */
             offset: new AMap.Pixel(isLrt ? -6.5 : -5.5, isLrt ? -6.5 : -5.5),
             zIndex: isLrt ? 95 : 90,
           });
@@ -1159,6 +1448,16 @@ export default function NavMap({
       } finally {
         // ★ 无副作用观测钩子：无论走哪个分支，都回写当前已渲染站点数（拉远/清空后 = 0）
         canvasRef.current?.setAttribute("data-station-count", String(stationMarkersRef.current.size));
+        /**
+         * ★ 2026-11-06（修复批 #1）：**双色巴士标数量**（验收钩子）。
+         * 直接数 DOM 属性（`data-tqh-shared="1"`）而不是维护额外计数器 ——
+         * marker 的增删有两条路径（本 effect 的可见集合 / `dropStationMarkers`），
+         * DOM 是唯一不会漂的真相。查询只在节流后的 render 末尾执行一次，成本可忽略。
+         */
+        canvasRef.current?.setAttribute(
+          "data-tqh-shared-count",
+          String(canvasRef.current.querySelectorAll('[data-tqh-shared="1"]').length),
+        );
       }
     };
 
@@ -1198,6 +1497,30 @@ export default function NavMap({
         .catch(() => {
           console.warn("[NavMap] 站点列表加载失败（站点图层不可用，不影响其他功能）");
           stationsRef.current = [];
+          /**
+           * ★ 2026-11-06（修复批 #6）：**失败也必须跑一次 `render()`** ——
+           *   这不是"顺手补一行"，而是一条**跨功能的连带失效**的唯一堵口，改动前请先读完因果链：
+           *
+           * ```
+           *   /api/stations（巴士/轻轨站点）500
+           *     └─ 本图层 render() 从未执行
+           *          └─ 缩放门 stationZoomOk 永久停在初值 false   ← 本轮新增的状态
+           *               └─ <TqhStationLayer enabled={… && stationZoomOk}> 恒为 false
+           *                    └─ 通琴号图层永远 clear() ⇒ **地图上一个通琴号站都没有**
+           * ```
+           *   ⇒ 用户报的症状是「**通琴号不显示**」，根因却是**澳门巴士接口挂了**。
+           *     这类「A 功能坏掉 B 功能」的连带故障是最难排查的一种（看通琴号的代码
+           *     一万遍也找不到原因，因为它本身的代码没错，结论取决于别人的请求成败）。
+           *
+           *   ⇒ 结论：**缩放门必须挂在一个"无论数据成败都会跑"的地方**，即本 catch 也要
+           *     `render()`。`stationsRef.current = []` 后 `render()` 走完整分支：
+           *     不建任何巴士 marker、`data-station-count` 归零、**缩放门与观测钩子按真实
+           *     zoom 落定** ⇒ 通琴号层照常显示（它的数据来自 `/api/tqh/lines`，与本请求无关）。
+           *
+           *   ⚠️ 重构时若把缩放门挪到「站点数据就绪之后」，本行会被当成多余的而删掉 ——
+           *     一旦删掉，上面那条因果链立刻复活。要挪就一起挪，别只删这行。
+           */
+          render();
         });
     } else {
       render();
@@ -1226,8 +1549,13 @@ export default function NavMap({
      *
      * ★ 本批：依赖补 `lineStops` —— 白名单变化（进入/退出导航）时重建站点图层
      *   （marker 的「建/不建」在创建时决定，必须重建才生效）。
+     * ★ 2026-11-06（修复批 #1）：依赖再补 `tqhSharedBusCodes` / `tqhActiveBusCodes` ——
+     *   双色与白环同样是**创建时**写进 content 字符串的，集合变化必须重建才生效。
+     * ★ 2026-11-06（修复批 #6 · P0）：再补 `tqhBusWhitelist` —— 它是**另一个白名单入口**
+     *   （通琴号班次模式接管过滤），且优先级高于 `lineStops`；不进依赖 ⇒ 进出班次查看
+     *   模式时巴士层不会重建 ⇒ 该隐藏的巴士站留着（正是本次 P0 的形态之一）。
      */
-  }, [phase, stationRebuildTick, lineStops]);
+  }, [phase, stationRebuildTick, lineStops, tqhSharedBusCodes, tqhActiveBusCodes, tqhBusWhitelist]);
 
   /**
    * ★ 2026-09-22：**路线查看模式** —— 画线 + 站点区分 + 自动装下整条线。
@@ -1240,7 +1568,9 @@ export default function NavMap({
    *     （`shapes.filter(s => s.dir === routeLine.dir)`）；未指定 `dir` 时按第一个方向渲染，
    *     并通过 `onRouteDirs` 把可用方向回报给上层（判定单向/双向 + 补齐 `dir`）。
    *
-   * 站点区分（产品口径「一眼分辨」）：本线站点 → `--onroute`（放大）；其他 → `--dim`（灰小）。
+   * 站点区分（产品口径「一眼分辨」）：★ 2026-11-06 起**本线站与常态站标像素级一致**
+   *   （放大/加粗白边的规则已按用户口径整块删除）⇒ 本线站只打 `data-on-route="1"` 观测属性；
+   *   其他站 → `--dim`（灰小）保留。见 :1288 那段注释。
    * 视野：按**当前方向** line 的包围盒 `setBounds`（换向时重算，Spec AC-11）。
    */
   useEffect(() => {
@@ -1274,6 +1604,8 @@ export default function NavMap({
     // 退出路线模式：清线 + 站点样式回落
     if (!routeLine) {
       clearLines();
+      /* 清掉线路取景的观测钩子（否则退出后仍挂着上一条线的 inset 值，断言会读到脏数据） */
+      canvasRef.current?.removeAttribute("data-route-inset-top");
       if (routeStopsRef.current.size > 0) {
         routeStopsRef.current = new Set();
         dropStationMarkers();
@@ -1347,11 +1679,90 @@ export default function NavMap({
           }
           if (lngs.length) {
             try {
-              const b = new AMap.Bounds(
-                [Math.min(...lngs), Math.min(...lats)],
-                [Math.max(...lngs), Math.max(...lats)],
-              );
-              applyCamera(() => map.setBounds(b, true, [40, 40, 40, 40]));
+              const minLng = Math.min(...lngs);
+              const maxLng = Math.max(...lngs);
+              const minLat = Math.min(...lats);
+              const maxLat = Math.max(...lats);
+              const b = new AMap.Bounds([minLng, minLat], [maxLng, maxLat]);
+
+              /**
+               * ══════════════════════════════════════════════════════════════════
+               * ★ 2026-11-06（#5a 收尾）**站序弹窗打开时的带 inset 取景**
+               * ══════════════════════════════════════════════════════════════════
+               *
+               * 【为什么需要】站序弹窗（z77，`fixed` 全屏 100dvh）从 `half`（50vh）起，
+               *   盖住下半屏。原来线路取景把包围盒居中装进**整屏** ⇒ 线的下半段永远压在
+               *   弹窗底下，用户只看得到半条线（而"整条线"正是这个弹窗的唯一上下文）。
+               *
+               * 【怎么改】`insetTopPx` 非空 ⇒ 把包围盒装进 `0 … insetTopPx` 这条**槽**
+               *   （自算 zoom + `panBy` 把框中心抬到槽中心），与 `fit-box` 同一配方。
+               *   `insetTopPx` 为空 ⇒ **原路径一字不动**（`setBounds` + 40px 四周，
+               *   线路查看模式现在的观感是验收过的，不能被我顺手改掉）。
+               *
+               * 【为什么**不**用 `setBounds` 的 `avoid` 参数避让（三层理由，负责人 2026-11-06 裁决保留自算）】
+               *   ① 决定性：`avoid` 四格顺序**官方文档自相矛盾** —— 参考手册 / DT 的 JSDoc 写「上下左右」，
+               *      全站示例却按 CSS 口径 `[上,右,下,左]` 传。我要的「只避底部」恰好落在两种读法
+               *      结论不同的 index=2 上：押错 = 底部避让变右侧避让，线被挤成竖条，**不报错、只在真机可见**
+               *      ⇒ 手上没有任何手段能证伪它，只能赌。不赌。
+               *   ② 不拿两个未验证的东西相乘：`setBounds` 本身在本项目已被怀疑（`:155-156` 铁律，
+               *      全项目只剩一处在用），再给它叠一个未证实的参数语义，风险是乘出来的。
+               *   ③ 自算**不是新增一处 `setBounds` 例外**（本段不调用 `setBounds`）⇒ 铁律未被放宽；
+               *      且与线上已跑的 `fit-box`（`:891-932`）逐行同源，那边验过的结论直接继承。
+               *      **能用已验证的路径，就不为省几行去赌未验证的参数。**
+               * ⚠️ 将来若要换回 `setBounds + avoid`，**前置条件是先在真机确认 avoid 的四格顺序**，
+               *    并用真机截图证明「只避底部」。仅凭文档/示例不足以开工。
+               *
+               * 【值来源】`stopsInsetTop` ← 宿主 `tqhDetentTopsPx(...)[detentIndex(detent)]`
+               *   （与弹窗自己算顶边**同一个函数**）⇒ 弹窗画在哪，槽就避到哪；
+               *   本文件**不出现任何档位常量**（`96` / `50vh` 之类）。
+               *
+               * 【为什么读 ref 不读 prop】见 `stopsInsetTopRef`：拖档不重新取景，
+               *   否则每拖一档地图就跳一次。取景时机仍是 打开 / 换线 / 换向。
+               *
+               * 【zoom 区间 12~16】与 `fit-box` 同值。**下限 12 在这里是实测硬需求**，
+               *   依据与算式写在下方 `clamp` 处（实测最长线 10.9km ⇒ 半屏槽需要 `zy≈12.21`），
+               *   不要把它当成"跟 fit-box 抄来的数字"再顺手调大。
+               */
+              const insetTopPx = stopsInsetTopRef.current;
+              if (insetTopPx == null) {
+                applyCamera(() => map.setBounds(b, true, [40, 40, 40, 40]));
+              } else {
+                const size = map.getSize?.() ?? { width: 390, height: 700 };
+                const gap = fitGapPx();
+                /** 可用槽：宽留 50px/侧（同 fit-box）；高 = 弹窗顶边以上，再让出呼吸位 */
+                const slotTop = Math.max(80, Math.round(insetTopPx));
+                const availW = Math.max(80, size.width - 100);
+                const availH = Math.max(80, slotTop - gap * 2);
+                const centerLng = (minLng + maxLng) / 2;
+                const centerLat = (minLat + maxLat) / 2;
+                /** 1.25 = 留白系数（与 fit-box 同：包围盒四周再放 12.5%） */
+                const lngSpan = Math.max((maxLng - minLng) * 1.25, 1e-5);
+                const latSpan = Math.max((maxLat - minLat) * 1.25, 1e-5);
+                const zx = Math.log2((360 * availW) / (256 * lngSpan));
+                const zy = Math.log2(
+                  (360 * availH) / (256 * latSpan * Math.cos((centerLat * Math.PI) / 180)),
+                );
+                /**
+                 * 夹取 12~16。**下限 12 是本处的硬需求，不是抄 `fit-box` 的** —— 依据（实测真库
+                 * `route_stations` 全量包围盒，2026-11-06）：跨度最大的是 `26A` 南北 **10.9km**
+                 * （次之 `25` 10.8 / `26` 10.3 / `59` 10.0 / `73` 9.9），在 half 档槽
+                 * （屏高 844 ⇒ `slotTop=422`，`gap=20` ⇒ `availH=382`）里需要
+                 * `zy = log2(360×382 / (256×1.25×latSpan×cosφ)) ≈ 12.21`
+                 * ⇒ **12 档刚好装下；谁把它提到 13，最长的几条线就会溢出一条街**（= 本轮要修的同一个病）。
+                 * 上限 16：短线（2~3 站）别怼到街景级。
+                 * ⚠️ full / peek 档槽 ≤128px，整线装不进去也不需要（那两档地图本就被收起），
+                 *   夹在 12 只保证地图仍可读、框中心仍对齐槽中心。
+                 */
+                const z = Math.max(12, Math.min(16, Math.floor(Math.min(zx, zy))));
+                applyCamera(() => {
+                  map.setZoomAndCenter(z, [centerLng, centerLat], true);
+                  /** 把框中心从整屏中心上移到槽中心（屏坐标 y = slotTop/2） */
+                  map.panBy(0, Math.round(size.height / 2 - slotTop / 2));
+                });
+                canvasRef.current?.setAttribute("data-nav-zoom", String(z));
+                canvasRef.current?.setAttribute("data-view-mode", "route-inset-selfcalc");
+                canvasRef.current?.setAttribute("data-route-inset-top", String(slotTop));
+              }
             } catch {
               /* ignore */
             }
@@ -1604,6 +2015,34 @@ export default function NavMap({
       data-vehicle-shown={String(vehicles.length)}
     >
       <div ref={canvasRef} className="nav-map__canvas" />
+      {/*
+        ★ 2026-11-05（通琴号 R3/R4）：路径层在站点层**之前**渲染 ⇒ z73 < 站点 90/91/96，
+          站点永远压在线之上（线上压点会读成"点没画出来"）。
+          两层各自管「建 / 清」，均以 `map.remove()` 收尾（与 VehicleLayer 同一纪律）；
+          `enabled` 绑 `phase==="ready"`，地图未就绪时传 null 实例 ⇒ 两层都空转不发请求。
+      */}
+      <TqhPathLayer
+        map={phase === "ready" ? mapRef.current : null}
+        amap={phase === "ready" ? amapRef.current : null}
+        enabled={phase === "ready"}
+        segments={tqhSegments}
+        stations={tqhStations}
+      />
+      <TqhStationLayer
+        map={phase === "ready" ? mapRef.current : null}
+        amap={phase === "ready" ? amapRef.current : null}
+        /* ★ 2026-11-06（修复批 #6 · P0）：`enabled` 叠加**与巴士层同一个缩放门** ——
+           `stationZoomOk` 由巴士层的 `render()` 用同一 `minZoom` 算出（见 :1188 附近），
+           ⇒ 同一缩放级别下两层同生同灭。阈值以下 `enabled=false` ⇒ 图层 `clear()`
+           走 `map.remove()`，**不是** `visibility:hidden`（与巴士层同口径）。 */
+        enabled={phase === "ready" && stationZoomOk}
+        stations={tqhStations}
+        activeIds={tqhActiveIds}
+        whitelist={tqhWhitelist}
+        onStationClick={onTqhStationClick}
+        /* ★ 观测钩子：已绘通琴号 marker 数（96 = 全量纯站；0 = 阈值以下/被白名单清空） */
+        onCount={onTqhStationCount}
+      />
       {/* ★ 2026-09-23：在途巴士图标（**原生 AMap.Marker** + DOM content；拖拽期零 JS） */}
       <VehicleLayer
         map={phase === "ready" ? mapRef.current : null}

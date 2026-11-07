@@ -1,20 +1,22 @@
 -- =============================================================
 -- MUST登校 · 数据库建表脚本（对应《数据库设计》v0.2）
--- 15 张表；幂等：全部 CREATE TABLE IF NOT EXISTS + ALTER ADD COLUMN IF NOT EXISTS，
+-- 幂等：全部 CREATE TABLE IF NOT EXISTS + ALTER ADD COLUMN IF NOT EXISTS，
 -- 可安全重复执行（不再 DROP 重建）。本文件是「重建库唯一真相源」：
 --   全新库 = apply-schema 后按需跑 db:migrate-v040→v071→v090…（迁移幂等，重复执行无副作用）
 -- ⚠️ 生产库勿直接跑本脚本，一律走 db/migrate-vXXX.ts（只读数据不动，计时数据绝不触碰）
+--
+-- ── 2026-11-06 通琴号迭代：本文件删掉 14 张表的建表段 ───────────────────
+--   Spec §6.2 负责人最终裁决：`edit_audit` / `ride_crowd` / `shadow_diff_report` /
+--   `route_stations_bak_20260919` / `route_stations_bak_20261030` / `routes_bak_20261030` /
+--   `stations_bak_20260919` / `bus_snapshots` / `place_coords` / `favorite_routes` /
+--   `station_walk_distance` / `commute_plans` / `plan_legs` / `places`。
+--   ⚠️ **别把任何一段加回来**：这几张表已被 `db/migrate-v3703-drop-legacy.ts` 删除，
+--      在此复活建表段 = 下一次 `npm run db:schema` 把空表重建出来（AC-10「db:schema 不复活」）。
+--   其中 `favorite_routes` / 四张 `*_bak_*` 本来就只在迁移脚本里建、从未进过本文件。
+--   连带去掉的两条外键指向（Spec §6.2.1）：
+--     · `walk_times.place_id`  → 不再是外键，取值来自 `src/lib/recommend/place-ids.ts`
+--     · `timer_sessions.plan_id` → 不再是外键，历史值冻结（计时链已 410 下线）
 -- =============================================================
-
--- 2.1 地点（家 / 学校 / 口岸）
-CREATE TABLE IF NOT EXISTS places (
-    id          SERIAL PRIMARY KEY,
-    slug        TEXT NOT NULL UNIQUE,      -- 'home' | 'school' | 'hengqin'
-    name        TEXT NOT NULL,             -- '擎天汇 T8'
-    kind        TEXT NOT NULL,             -- 'dorm' | 'school' | 'border'
-    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
 
 -- 2.2 站点（巴士站 + 轻轨站）；无官方编号的站用 X-名称 临时编号
 CREATE TABLE IF NOT EXISTS stations (
@@ -36,7 +38,7 @@ CREATE TABLE IF NOT EXISTS stations (
 --      由高德距离推算时：minutes = distance_m ÷ 90（= 1.5 m/s × 60）
 CREATE TABLE IF NOT EXISTS walk_times (
     id          SERIAL PRIMARY KEY,
-    place_id    INT NOT NULL REFERENCES places(id),
+    place_id    INT NOT NULL,               -- ★ 2026-11-06：`places` 已删，**不再有外键**；取值见 src/lib/recommend/place-ids.ts#PLACE_ID_BY_SLUG
     station_code TEXT NOT NULL REFERENCES stations(code),
     zone        TEXT,                      -- 澳科大校区 'B/C' | 'N/O' | 'R'；非澳科大 place 为 NULL
     minutes     NUMERIC(5,1),              -- 常速基准分钟（实测均值 或 distance_m÷90）；NULL = 未知
@@ -46,38 +48,6 @@ CREATE TABLE IF NOT EXISTS walk_times (
     distance_m  NUMERIC(7,1),              -- ★ v1.2.0：高德步行路径距离（米）；NULL = 未知
     amap_fetched_at TIMESTAMPTZ,           -- ★ v1.2.0：上面 distance_m 的抓取时刻（>30 天会增量重抓）
     UNIQUE (place_id, station_code, zone)
-);
-
--- 2.3a 地点坐标（v1.2.0）—— ★ 带 zone 粒度
---   为什么独立成表而不是 places.lat/lng：聚合键是 (place_id, station主码, zone)，
---   而 zone（澳科大 B/C、N/O、R）是**三栋不同建筑 = 三个不同目的地**。
---   places 一行对应「整个澳科大」，单行坐标会让三个 zone 算出同一个距离 ⇒ 维度退化。
-CREATE TABLE IF NOT EXISTS place_coords (
-    id          SERIAL PRIMARY KEY,
-    place_id    INT NOT NULL REFERENCES places(id),
-    zone        TEXT,                      -- 'B/C' | 'N/O' | 'R'；非澳科大 place 为 NULL
-    lat         DOUBLE PRECISION NOT NULL,
-    lng         DOUBLE PRECISION NOT NULL,
-    source      TEXT NOT NULL DEFAULT 'manual',  -- 'manual' 人工拾取 | 'amap'
-    note        TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (place_id, zone)                -- ★ zone 维度的真正约束点
-);
-
--- 2.3c 高德步行距离缓存（v1.2.0）—— 与 walk_times **分层**
---   为什么独立成表：rebuildWalkTimes 是 DELETE + 全量重灌（每日 Cron），
---   距离若存在那张表里 → 每天被清掉再重抓 → 浪费配额 + 高德一挂就全丢。
---   分层后：距离是「外部事实」（慢变、可增量抓），minutes 是「派生值」。
-CREATE TABLE IF NOT EXISTS station_walk_distance (
-    id           SERIAL PRIMARY KEY,
-    place_id     INT NOT NULL REFERENCES places(id),
-    station_main TEXT NOT NULL,            -- 主码口径（C690、T363），与 walk_times 聚合键一致
-    zone         TEXT,
-    distance_m   NUMERIC(7,1) NOT NULL,    -- 高德步行路径距离（米）
-    snap_start_m NUMERIC(6,1),             -- ★ 坐标系健康指标：路径首点→输入点的球面距离
-    snap_end_m   NUMERIC(6,1),             -- ★ 同上，末点
-    fetched_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (place_id, station_main, zone)
 );
 
 -- 2.3b 站点↔站点换乘步行耗时（v1.0.0：自动选线的换乘方案计时用；由 db:transferwalks 重灌）
@@ -117,98 +87,27 @@ CREATE TABLE IF NOT EXISTS route_stations (
     UNIQUE (route_id, dsat_dir, seq)
 );
 
--- 2.6 通勤方案（种子数据 = commute-network.json 的 plans）
-CREATE TABLE IF NOT EXISTS commute_plans (
-    id           SERIAL PRIMARY KEY,
-    plan_key     TEXT NOT NULL UNIQUE,     -- 'home-school-1'
-    from_place   INT NOT NULL REFERENCES places(id),
-    to_place     INT NOT NULL REFERENCES places(id),
-    summary      TEXT NOT NULL,            -- '50路 金峰南岸→路氹东/新濠天地'
-    is_active    BOOLEAN NOT NULL DEFAULT TRUE,
-    note         TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- 2.7 方案分段（walk / bus / lrt / transfer / cross_border）
-CREATE TABLE IF NOT EXISTS plan_legs (
-    id            SERIAL PRIMARY KEY,
-    plan_id       INT NOT NULL REFERENCES commute_plans(id) ON DELETE CASCADE,
-    seq           INT NOT NULL,
-    leg_kind      TEXT NOT NULL,           -- 'walk'|'bus'|'lrt'|'transfer'|'cross_border'
-    route_id      INT REFERENCES routes(id),
-    route_options TEXT,                    -- 备选线路JSON数组 '["25B","25BS","50",…]'
-    from_station  TEXT REFERENCES stations(code),
-    to_station    TEXT REFERENCES stations(code),
-    minutes       NUMERIC(5,1),            -- 已知耗时（步行实测值）；乘车段NULL走估算
-    note          TEXT,
-    border_label  TEXT,                    -- v0.13.0 cross_border 段口岸显示名：'橫琴口岸' / '關閘（拱北口岸）'
-    board_candidates TEXT[],               -- bus 段可选上车站（v0.6.0 去学校 51 系：首项=默认展示）
-    alight_candidates TEXT[],              -- bus 段可选下车点（v0.6.0 回宿舍动态下车：末位=强制终点）
-    route_meta      JSONB,                 -- v0.17.0 合并卡「每线路差异化」：{"50":{"to":"T400"},"51A":{"board":["C690/1","C689/2"]}}
-    UNIQUE (plan_id, seq)
-);
-
--- 2.8 DSAT 实时快照（轮询缓存，只增不改，定期归档清理）
-CREATE TABLE IF NOT EXISTS bus_snapshots (
-    id            BIGSERIAL PRIMARY KEY,
-    route_code    TEXT NOT NULL,           -- '26'/'50'…
-    dsat_dir      TEXT NOT NULL,
-    station_code  TEXT,
-    bus_plate     TEXT,                    -- 'MY9362'
-    bus_code      TEXT,                    -- 'E3390'
-    speed_kmh     SMALLINT,
-    status        TEXT,                    -- '0'/'1'
-    passenger_flow SMALLINT,
-    polled_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_snapshots_route_time ON bus_snapshots (route_code, polled_at DESC);
-CREATE INDEX IF NOT EXISTS idx_snapshots_time ON bus_snapshots (polled_at);
--- v0.4.0 归属列（随会话打点写入；v0.9.0 起补外键 fk_bus_snapshots_session → timer_sessions ON DELETE CASCADE）
-ALTER TABLE bus_snapshots ADD COLUMN IF NOT EXISTS session_id INT;
-ALTER TABLE bus_snapshots ADD COLUMN IF NOT EXISTS stage TEXT;           -- 'depart'|'wait_start'|'alight'|'board'
-ALTER TABLE bus_snapshots ADD COLUMN IF NOT EXISTS ref_station TEXT;     -- 参照站（用户上/下车站），stops_away 以它计
-ALTER TABLE bus_snapshots ADD COLUMN IF NOT EXISTS stops_away SMALLINT;  -- ref_idx − bus_idx
-
 -- 2.9 计时器会话（一次完整通勤 = 一个 session）
 CREATE TABLE IF NOT EXISTS timer_sessions (
     id            SERIAL PRIMARY KEY,
     user_id       INT NOT NULL DEFAULT 1,  -- 预留多用户
-    plan_id       INT REFERENCES commute_plans(id),
+    plan_id       INT,                     -- ★ 2026-11-06：`commute_plans` 已删，**不再有外键**；历史值冻结（计时链已 410 下线）
     route_code    TEXT,                    -- 实际乘坐线路
     dsat_dir      TEXT,
     travel_date   DATE NOT NULL,
     weekday       SMALLINT NOT NULL,       -- 0=周日…6=周六
     time_bucket   TEXT,                    -- 时段 'am_peak'/'pm_peak'/'day'/'night'
-    crowd_level   SMALLINT,                -- 【v0.18.0 起废弃】旧会话级拥挤度 0空/1正常/2拥挤/3爆满；新数据写 ride_crowd（按程）
+    crowd_level   SMALLINT,                -- 【已废弃】旧会话级拥挤度 0空/1正常/2拥挤/3爆满（v0.18.0 起按程记录；`ride_crowd` 表 2026-11-06 已删）
     missed_count  SMALLINT NOT NULL DEFAULT 0,  -- 没挤上车次数
     vehicle_plate TEXT,                    -- 打点时自动抓取的车辆牌号（失败留空）
     vehicle_code  TEXT,                    -- 车号
     started_at    TIMESTAMPTZ,
     ended_at      TIMESTAMPTZ,
     total_minutes NUMERIC(5,1),
-    is_edited     BOOLEAN NOT NULL DEFAULT FALSE,  -- 是否被人工修正过（原值见 edit_audit）
+    is_edited     BOOLEAN NOT NULL DEFAULT FALSE,  -- 是否被人工修正过（`edit_audit` 表 2026-11-06 已删，恒 0 行）
     deleted_at    TIMESTAMPTZ              -- 软删除
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_route_date ON timer_sessions (route_code, travel_date);
-
--- 2.9b 每程拥挤度（v0.18.0：拥挤度改为「上车后在行程内记录」，换乘每趟车都记一次）
---      语义：level = 0空(随便坐)/1正常(有座)/2饱和(没座位但站稳)/3挤(贴着站)/4爆满(前胸贴后背)
---      veh_index = 载具段序号（0-based，与 buildSteps 的 Step.vehIndex 同构）
---      route_code 冗余存当时的线路，便于统计「哪条线最挤」
-CREATE TABLE IF NOT EXISTS ride_crowd (
-    id           BIGSERIAL PRIMARY KEY,
-    session_id   INT NOT NULL REFERENCES timer_sessions(id) ON DELETE CASCADE,
-    veh_index    INT NOT NULL DEFAULT 0,
-    level        SMALLINT NOT NULL,
-    route_code   TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    source       TEXT NOT NULL DEFAULT 'in_ride',  -- 'in_ride' 行程内记录 / 'migrated' 由旧会话级 crowd_level 迁移
-    UNIQUE (session_id, veh_index)
-);
--- 说明：车牌/上下车时刻不在此表冗余——session_id 已绑定整趟行程，
---       需要「具体哪班车」时 join bus_snapshots（按 route_code + 时间窗/stage 取 bus_plate）
---       或 join timer_events 取 board/alight 时刻；轻轨无车辆数据。
-CREATE INDEX IF NOT EXISTS idx_ride_crowd_route ON ride_crowd (route_code);
 
 -- 2.11 自由记站（v0.19.0：独立数据采集渠道，与乘车计时完全隔离、互不影响）
 --      用途：平时有空坐车时采集「任意线路任意两站间的实测行车时长」，供自动选线建模
@@ -300,17 +199,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_wait_snap_manual_min_nostation
     ON wait_snapshots (session_id)
     WHERE source = 'manual' AND value_kind = 'minutes' AND station_code IS NULL;
 
--- 2.10b 编辑痕迹（人工修正审计：只插入不更新，保留全部原值）
-CREATE TABLE IF NOT EXISTS edit_audit (
-    id            BIGSERIAL PRIMARY KEY,
-    entity        TEXT NOT NULL,           -- 'timer_session' | 'timer_event' | 'wait_snapshot'
-    entity_id     BIGINT NOT NULL,
-    field         TEXT NOT NULL,           -- 被改字段名
-    old_value     TEXT,                    -- 原值
-    new_value     TEXT,                    -- 新值
-    edited_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 -- 2.10c DSAT 调用日志（风控三保险之一：记账本）
 CREATE TABLE IF NOT EXISTS dsat_call_logs (
     id            BIGSERIAL PRIMARY KEY,
@@ -385,6 +273,38 @@ CREATE TABLE IF NOT EXISTS lrt_holidays (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_lrt_holidays_date ON lrt_holidays (holiday_date);
 
+-- 3.x 轻轨线路级实测参数（migrate-v2100；**在用但此前未登记进本文件**，2026-11-06 补登）
+--   粒度 = 线路。刻意与 lrt_timetables（站×线×方向×班别）分开，
+--   避免线路级常量在站级表里重复 N 份。
+CREATE TABLE IF NOT EXISTS lrt_route_params (
+    route_code   TEXT PRIMARY KEY,
+    dep_bias_sec INTEGER NOT NULL,          -- 发车偏差（秒，可为负）：计划发车 + 此值 = 实发预测
+    ride_sec     INTEGER NOT NULL,          -- 单区间乘车用时（秒）：本站发车 → 下一站到站
+    stops        INTEGER NOT NULL DEFAULT 1,
+    measured_on  DATE NOT NULL,             -- 实测日期（派生值须能溯源）
+    note         TEXT,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 3.y 轻轨逐站逐模式实测偏差（migrate-v3200；**在用但此前未登记进本文件**，2026-11-06 补登）
+--   读端：src/lib/lrt/next-departures.ts 的读秒精度。表不存在时调用方容错为空（回落分钟级）。
+CREATE TABLE IF NOT EXISTS lrt_station_biases (
+    id           SERIAL PRIMARY KEY,
+    route_code   TEXT NOT NULL,
+    direction    TEXT NOT NULL,
+    pattern      TEXT NOT NULL,
+    api_station  TEXT NOT NULL,
+    arr_bias_sec INTEGER,
+    dep_bias_sec INTEGER,
+    source       TEXT,
+    measured_on  DATE,
+    note         TEXT,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT lrt_station_biases_uniq UNIQUE (route_code, direction, pattern, api_station)
+);
+CREATE INDEX IF NOT EXISTS lrt_station_biases_lookup
+    ON lrt_station_biases (route_code, direction, pattern, api_station);
+
 -- =============================================================
 -- 3. 全澳导航数据地基（v1.3.0 提案 · 迁移 db/migrate-v1400.ts）
 --    ★ 本文件是「重建库唯一真相源」；生产库请走 db/migrate-v1400.ts（幂等）。
@@ -447,21 +367,6 @@ CREATE TABLE IF NOT EXISTS transit_cache (
 CREATE INDEX IF NOT EXISTS idx_transit_cache_time ON transit_cache (fetched_at DESC);
 
 -- 3.4 影子对照 / 本地补漏候选（离线产，请求期只读）
-CREATE TABLE IF NOT EXISTS shadow_diff_report (
-    id              BIGSERIAL PRIMARY KEY,
-    od_key          TEXT NOT NULL,
-    amap_plan_cnt   INT NOT NULL,
-    local_plan_cnt  INT NOT NULL,
-    missed_paths    JSONB,
-    extra_paths     JSONB,
-    extra_recompute JSONB,
-    miss_rate       NUMERIC(5,3),
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_shadow_diff_created ON shadow_diff_report (created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_shadow_diff_od ON shadow_diff_report (od_key);
-
--- 3.5 跨实例令牌桶（3 QPS 全实例共享；pg_advisory_xact_lock 串行化）
 CREATE TABLE IF NOT EXISTS amap_rate_bucket (
     bucket     TEXT PRIMARY KEY,                    -- 'transit'|'walking'|'search'
     tokens     NUMERIC(10,4) NOT NULL DEFAULT 0,
@@ -520,3 +425,88 @@ CREATE TABLE IF NOT EXISTS search_quota_log (
 );
 CREATE INDEX IF NOT EXISTS idx_search_quota_day ON search_quota_log (day, api);
 CREATE INDEX IF NOT EXISTS idx_search_quota_time ON search_quota_log (created_at DESC);
+
+-- ============================================================================
+-- 4. 通琴号（横琴粤澳深度合作区通勤班车）· migrate-v3700
+--
+--   数据来源与合规：站点坐标取自负责人主动分享的腾讯地图收藏集（GCJ-02），
+--   班次与时刻取自负责人整理的小程序截图；属地与巴士站关联由负责人逐条确认。
+--
+--   ★ 方向判定按「终点站属地」，不看「上班/下班」——实测 8 条上班实为往横琴、
+--     9 条下班实为往澳门。
+--   ★ 属地不能只看站名：「澳门新街坊」名字带澳门，实际在横琴。
+--   ★ 本组表坐标为 GCJ-02；既有 stations 表是 WGS84，跨表算距离必须先转换。
+-- ============================================================================
+
+-- 4.1 通琴号站点库
+CREATE TABLE IF NOT EXISTS tqh_stations (
+    id               SERIAL PRIMARY KEY,
+    name             TEXT NOT NULL,                 -- 站点全称原文（含 ①②③，标号不可剥）
+    lng              DOUBLE PRECISION NOT NULL,     -- 经度（GCJ-02）
+    lat              DOUBLE PRECISION NOT NULL,     -- 纬度（GCJ-02）
+    side             TEXT NOT NULL,                 -- '澳门' | '横琴'
+    bus_station_code TEXT,                          -- 关联澳门巴士站站码（stations.code），非等价为 NULL
+    same_place_group INT,                           -- ★同一物理点的分组 id = 组内最小站 id（migrate-v3701）
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT tqh_stations_name_uniq UNIQUE (name),
+    CONSTRAINT tqh_stations_side_chk CHECK (side IN ('澳门','横琴'))
+);
+CREATE INDEX IF NOT EXISTS idx_tqh_stations_side ON tqh_stations (side);
+CREATE INDEX IF NOT EXISTS idx_tqh_stations_bus ON tqh_stations (bus_station_code);
+-- 同一物理点分组（migrate-v3701）：①② 上下车点共享组 id，两条记录都保留
+CREATE INDEX IF NOT EXISTS idx_tqh_stations_place_group ON tqh_stations (same_place_group)
+    WHERE same_place_group IS NOT NULL;
+
+-- 4.2 通琴号班次库
+CREATE TABLE IF NOT EXISTS tqh_trips (
+    id             SERIAL PRIMARY KEY,
+    trip_code      TEXT NOT NULL,                   -- 规范化班次名「序号｜方向｜线路名全称」
+    route_no       TEXT NOT NULL,                   -- 序号 A1/B6/C4/D3
+    direction      TEXT NOT NULL,                   -- '往澳门' | '往横琴'（按终点站属地）
+    line_full_name TEXT NOT NULL,                   -- 线路名全称（md 原文标题）
+    trip_label     TEXT NOT NULL,                   -- 原文时段部分（澳琴早上班 / 上班 / 午下班…）
+    departure_time TIME NOT NULL,
+    arrival_time   TIME NOT NULL,
+    stop_count     INT NOT NULL,
+    origin_name    TEXT NOT NULL,
+    terminal_name  TEXT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT tqh_trips_code_uniq UNIQUE (trip_code),
+    CONSTRAINT tqh_trips_dir_chk CHECK (direction IN ('往澳门','往横琴'))
+);
+CREATE INDEX IF NOT EXISTS idx_tqh_trips_route ON tqh_trips (route_no);
+CREATE INDEX IF NOT EXISTS idx_tqh_trips_dir ON tqh_trips (direction);
+
+-- 4.3 通琴号「班次×站点」时刻表
+CREATE TABLE IF NOT EXISTS tqh_trip_stops (
+    id         SERIAL PRIMARY KEY,
+    trip_id    INT NOT NULL REFERENCES tqh_trips (id) ON DELETE CASCADE,
+    seq        INT NOT NULL,
+    station_id INT NOT NULL REFERENCES tqh_stations (id),
+    stop_time  TIME NOT NULL,
+    CONSTRAINT tqh_trip_stops_uniq UNIQUE (trip_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_tqh_trip_stops_station ON tqh_trip_stops (station_id);
+
+-- 4.4 通琴号相邻有向站对的离线路径几何（migrate-v3702 / Spec §6.1 · OD-04）
+--   请求期零高德调用：几何全部离线算一次落库，读端只做一次 LEFT JOIN 命中。
+--   ★ 去重键 (from,to,profile) —— **禁止**按 route_no+direction 聚合：
+--     实测 64 组 (route_no, direction) 装不下 73 种真实站序，其中 8 组是真不同路线
+--     （几何差 259~3701 m），按标号级 key 会在地图上画错路。
+--   ★ source=straight-fallback 表示高德没取到、降级成两点直线（前端画虚线），不是造假路径。
+CREATE TABLE IF NOT EXISTS tqh_segment_paths (
+    from_station_id INT NOT NULL REFERENCES tqh_stations (id) ON DELETE CASCADE,
+    to_station_id   INT NOT NULL REFERENCES tqh_stations (id) ON DELETE CASCADE,
+    profile         TEXT NOT NULL,                 -- 算法版本，如 'driving-v1'（读端只认 TQH_SEGMENT_PROFILE）
+    polyline        JSONB NOT NULL,                -- [[lng,lat],…] GCJ-02
+    distance_m      INT,
+    duration_s      INT,
+    source          TEXT NOT NULL,                 -- 'amap-driving' | 'straight-fallback'
+    computed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT tqh_segment_paths_pkey PRIMARY KEY (from_station_id, to_station_id, profile),
+    CONSTRAINT tqh_segment_paths_source_chk CHECK (source IN ('amap-driving','straight-fallback')),
+    CONSTRAINT tqh_segment_paths_distinct_chk CHECK (from_station_id <> to_station_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tqh_segment_paths_profile ON tqh_segment_paths (profile);

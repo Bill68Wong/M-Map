@@ -45,8 +45,11 @@ export const SHORT_DISTANCE_FACTOR = 1.5;
  * ★★ T05 校准新增：**失真分支的上界夹逼**。
  *
  * ── 为什么需要它（真实校准数据倒逼，可信）─────────────────────────────
- *   `scripts/calibrate-walk.ts` 用 37 组真实样本（`station_walk_distance` × `walk_times`）
- *   + QA 8 组真机样本跑 R3 规则：
+ *   原校准入口 `scripts/calibrate-walk.ts` 用 37 组真实样本（`station_walk_distance` × `walk_times`）
+ *   + QA 8 组真机样本跑 R3 规则。
+ *   ★ 2026-11-06：`station_walk_distance` 表与 `scripts/calibrate-walk.ts` 均已删除
+ *     （Spec §6.2 · 距离管线整条下线）⇒ **本段结论已无法在当前仓库重复验证**，
+ *     保留为历史记录（常量值不改；如需重跑请参考 git 历史）。当时的口径：
  *     · `ratio > 3` 的失真段里，**部分真实步行确实较长**（**关口/大型建筑绕行**）——
  *       实测 `gate→M1` 真实 2.8 分，而 `直线×1.5` 只给 1.5 分（**低估 46%**）；
  *       `gate→M9` 同样被低估（35%）。

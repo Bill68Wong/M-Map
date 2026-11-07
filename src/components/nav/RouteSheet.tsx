@@ -48,6 +48,7 @@ import { useSnapSheet } from "./useSnapSheet";
 import type { DetailBody, FoldState } from "./useDetailBody";
 import type { RideTrackView } from "./useRideTracking";
 import { DETENTS, detentIndex, type Detent } from "./sheet-detents";
+import { lineNameOf } from "@/lib/route-label";
 import type { FavoriteEndpoint } from "@/lib/favorites/types";
 import type { RecommendCard, SegmentStrip } from "@/lib/recommend/types";
 
@@ -167,11 +168,13 @@ export default function RouteSheet({
   const dLegRide = detail?.card.rides[dLegIdx] ?? null;
   const dFirst = detail?.card.rides[0] ?? null;
   const dTrackStops = dStrips?.[dLegIdx]?.stops ?? [];
-  const dRouteLabel = dLegRide
-    ? dLegRide.kind === "lrt"
-      ? `轻轨 ${dLegRide.route.replace(/^LRT-/, "")}`
-      : `${dLegRide.route} 路`
-    : "";
+  /**
+   * ★ 2026-11-06（R5 / R7）：线路名一律走**唯一文案出口** `lineNameOf()`。
+   *   ⚠️ 旧写法是「`轻轨 ` + 线号」与「线号 + ` 路`」两串**字符串拼接**（v3.1.0 `0e50f81`
+   *   建本文件时抄回的弃用形态：带「路」字 + 简体线名 + 「轻轨」前缀）⇒ 同一条轻轨线在全站
+   *   出现「氹仔線 / 氹仔线 / 轻轨 氹仔线」三套真相（审计 §3-C1）。别再按旧稿写。
+   */
+  const dRouteLabel = dLegRide ? lineNameOf(dLegRide.route) : "";
   const dLrt = dLegRide?.kind === "lrt";
   /**
    * ★★ S4 评审阻断 ③：**刷新作用域**。
@@ -367,22 +370,30 @@ export default function RouteSheet({
   const sheetRef = useRef<HTMLElement | null>(null);
 
   /**
-   * ★ v3.6.0 S5：**walk 态禁 peek**（设计要求：强制 half、允许 full、禁 peek ——
-   *   peek 会把"当前步"藏掉）。
-   *   · `walkActive` 时只允许 `full` + `half`；其余 pane **不传**该参 ⇒ 行为一行不变；
-   *   · 进 walk 时若停在 peek ⇒ 立即 snap 到 half（不能停在 peek）；
-   *   · 退出 walk **不强制跳档**（用户拖到哪就是哪），但恢复完整三档（下面 effect 自然生效）。
+   * ★★ R8 裁决（2026-11-06）：**步行态恢复三档 `full / half / peek`**。
+   *
+   *   ── 这里原本是什么（别照旧稿改回去）────────────────────────────────
+   *   v3.6.0 S5 曾在此处对 walk 态收紧档位：`allowedDetents = walkActive ? ["full","half"] : undefined`，
+   *   并在下方用 effect 在「进 walk 时若停在 peek」强制 snap 到 half。理由写的是
+   *   「peek 会把『当前步』藏掉」。
+   *
+   *   ── 为什么作废 ────────────────────────────────────────────────────
+   *   负责人实测认为这是**缺陷**而非设计：步行时用户**最需要**看大半屏地图
+   *   （认路 / 看当前步的位置全貌），把它禁掉等于削掉步行场景的核心能力。
+   *   ⇒ **原 v3.6.0 S5『walk 禁 peek』的结论作废**，不是本次回退、不要当成 bug 再"修"回去。
+   *
+   *   ── 改动边界（严格执行）──────────────────────────────────────────
+   *   · **不传** `allowedDetents`（`useSnapSheet` 的契约：不传 ⇒ `[0..last]` = 完整三档）
+   *     ⇒ 三个 pane（推荐 / 详情 / 步行详情）一律走三档，不存在按态分档的分支；
+   *   · 乘车态（`walk` 为 null 或 `!walk.active`）**行为逐字不变** —— 它本来就走三档；
+   *   · 去掉「进 walk 强制跳 half」的 effect ⇒ 用户拖到哪就停在哪（读屏/触屏都不再被改档）。
    */
-  const walkActive = pane === "detail" && !!walk?.active;
-  const allowedDetents = walkActive ? (["full", "half"] as Detent[]) : undefined;
-
   const snap = useSnapSheet({
     open,
     detent,
     topsPx,
     sheetRef,
     onDetentChange,
-    allowedDetents,
     onDismiss: onContextClose,
     /**
      * ★ 2026-09-24（用户实测反馈·二轮）：**两个 pane 统一禁用**「最低档继续下拉关闭」——
@@ -392,16 +403,20 @@ export default function RouteSheet({
     dismissible: false,
   });
 
-  /**
-   * ★ v3.6.0 S5：进 walk 时若停在 peek ⇒ **立即 snap 到 half**（peek 会把当前步藏掉）。
-   *   退出 walk **不强制跳档** —— 用户拖到哪就是哪；只是恢复完整三档（`allowedDetents` 变 undefined）。
-   *   ⚠️ 依赖只放 `walkActive`：若依赖 `detent`，用户手动拖到 half 也会反复触发（虽幂等但不必要）。
+  /*
+   * ★★ R8 裁决（2026-11-06）：**已删除「进 walk 若停在 peek ⇒ 强制 snap 到 half」的 effect**。
+   *   原 v3.6.0 S5 在此处写：
+   *   ```
+   *   useEffect(() => { if (!walkActive) return; if (detent === "peek") onDetentChange("half"); }, [walkActive]);
+   *   ```
+   *   ⇒ 后果：步行时用户把弹窗拉到小半屏（= 大半屏地图）后，只要 `walk.active` 一变
+   *   （换步 / 重算步行段 / 进出预览）就被无声弹回 half，**像是"拉不上去"**。
+   *
+   *   R8 判定这是缺陷，故整段删除：**步行态不再有任何"替你改档"的副作用**，
+   *   档位完全由用户的拖拽决定。乘车态从未受此 effect 影响（`walkActive` 恒 false ⇒ 原样）。
+   *
+   *   ⚠️ 不要以「peek 会把当前步藏掉」为由加回来 —— 该理由已被 R8 明确否决。
    */
-  useEffect(() => {
-    if (!walkActive) return;
-    if (detent === "peek") onDetentChange("half");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walkActive]);
 
   /** peek 点整区 → 回该 pane 的默认档（推荐→full / 详情→half） */
   const defaultDetent: Detent = pane === "detail" ? "half" : "full";
