@@ -2489,14 +2489,21 @@ button[aria-disabled="true"] {
   position: absolute;
   inset: 0;
   /* ★ 2026-11-05（f.e. 实测修复，非本迭代功能改动）：
-     高德 2.0 初始化时会**运行时注入** `<style>.amap-container{position:relative}</style>`，
+     高德 2.0 初始化时会**运行时注入** `<style>.amap-container{position:relative}<\/style>`，
      它排在 `globals.css` 之后且与 `.nav-map__canvas` **同权重** ⇒ 后者胜出，
      `inset:0` 随之失效；而容器内只有绝对定位子节点 ⇒ 计算高度塌成 **0px**
      （实测 `.nav-map__canvas` 390×0、`<canvas>` 780×0 ⇒ 全部 marker 被压到顶部一条，
       地图既不能点也不能拖）。
      `height:100%` 是**与 position 取值无关**的兜底：absolute + inset:0 时同值无害，
      relative 时立刻拿到父级高度。父级（`.nav-map--full` fixed / `.nav-map` aspect-ratio）
-     高度都是确定的，百分比可解析。 */
+     高度都是确定的，百分比可解析。
+
+     ★ 2026-11-07 注释字面修正（**只改字面，语义不变**）：上面那句里的收尾标签一律写成
+     `<\/style>`。原因：本文件一旦被拼进 style 元素的 HTML 字符串（离屏渲染 / HTML 快照 /
+     截图比对 / 视觉回归 / 静态稿），字面的收尾标签会让 HTML 解析器**在此提前闭合该元素**
+     —— 实测 `document.styleSheets[0].cssRules` 只剩 239 条（真值 1399）、`.xb-sheet`
+     退化、盒子全量成 0，而 0 会被读成"没滚动"= 假绿。产品侧不受影响
+     （Next 走外链 / JS `textContent` 注入），所以只改注释字面，不动任何声明。 */
   height: 100%;
 }
 .nav-map__cover {
@@ -5839,6 +5846,42 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   fill: var(--fg);
   opacity: 0.22;
 }
+/* ══════════════════════════════════════════════════════════════════════════
+   ⛔⛔ 三层同心矩形 = 互补双描边（**改配色之前必须读完本段**）
+   ──────────────────────────────────────────────────────────────────────────
+   巴士字形的三层是**依次内缩**的同心矩形，不是"三层并列色块"：
+     .vbus__white  x5    y4    w22 h24   ← 最外：1.5px 白环
+     .vbus__ink    x6.5  y5.5  w19 h21   ← 内缩 1.5：1.5px 墨环
+     .vbus__body   x8    y7    w16 h18   ← 再内缩 1.5：涂装车身
+   （几何的**唯一真相**在 `src/components/nav/BusGlyph.tsx` 文件头「三层同心矩形」一节；
+     本段只解释「为什么这三条 fill 不许动」，不复制几何。）
+
+   ── 设计意图：浅底靠墨、深底靠白，各出一层轮廓 ──────────────────────────
+     轮廓层 vs 宿主底的对比度（真 Chrome computed fill 复算：
+     `.verify/_css2-vbus-ink-contrast.mjs`；底 = `--surface`）：
+
+       宿主底                 白环          墨环            有效轮廓
+       浅色 `#ffffff`         1.00:1（融合＝**正是意图**）  7.58~12.13:1   墨环
+       深色 `#1c1e24`         **16.66:1**   4.83~7.02:1    白环
+
+     墨环色是 `color-mix(--vbus-livery 58%, --fg)` ⇒ **随涂装色变**，区间取全库真实涂装色域
+     （澳巴 `#C26D32` / 新福利 `#276299` / 其他 `#5B6470` / 轻轨实测 `#1B4D8F`）：
+     浅侧最坏 7.58（澳巴橙）、深侧最坏 4.83（轻轨深蓝）。白环恒为 `#fff`，与涂装色无关。
+
+   ⛔⛔ **深色主题下白环呈现一圈「亮白轮廓」= 双描边在深底上的正确行为，不是缺陷**
+        （team-lead 2026-11-07 裁决：保持现状）。勿为"统一观感"把它改掉。
+   ⛔ 不要在这里换成 `var(--surface)`：那会把互补双描边退化成单描边（浅底就只剩墨环一层可依赖）。
+   ⛔ 不要给"每层都要 ≥3:1"设门禁 —— 那是**判据写错**：浅底下白环 1.00:1 是设计本意。
+      正确判据 = 「每个主题下 **max(各轮廓层 vs 底) ≥ 3:1**」（当前最坏 12.13 浅 / 16.66 深）。
+   ⛔ 「深色主题要与地图 marker 观感一致」**不是有效的验收标准**：地图 marker 恒画在
+      高德**浅色**底图上（本项目未启用深色底图）⇒ 该目标不可验证。纵条宿主底是
+      `--surface`（随主题翻色），与地图宿主底本就不同，出不同轮廓层是这套双描边的本意。
+
+   ⚠️ 别引用 `.verify/_fe-c-glyph-dark.mjs` 打印的「浅 21.00 / 深 1.25」——**那两个数是解析
+      bug 的产物**：它把 `color(srgb 0.086 0.213 0.378)` 的 **0~1 归一化分量**当成 0~255
+      再 `Math.round()` ⇒ 得到纯黑（21.00 恰好是 #000/#fff 的理论上限）与 rgb(0,1,1)（≈1.25）。
+      真实值为上表。正确解析见 `_css2-vbus-ink-contrast.mjs` 的 `parseCssColor()`（`color(srgb…)` 需 ×255）。
+   ══════════════════════════════════════════════════════════════════════════ */
 .vbus__white {
   fill: #fff;
 }
@@ -7055,6 +7098,26 @@ body[data-sheet="open"] .nav-searchbar {
   letter-spacing: 0.04em;
 }
 .nav-actions__spacer { margin-left: auto; flex: none; }
+/* 右槽文本（「即将到达 XX」/「上次更新：N 秒前」）：**让步于左槽**，超长省略而不是挤爆状态行。
+   ── 为什么必须是**双类**（0,2,0）而不是 `.nav-actions__right`（0,1,0）──────────
+     同一个元素上挂着 `nav-actions__spacer nav-actions__right` 两个类；
+     `.nav-actions__spacer` 已有 `flex: none`（= `0 0 auto`，**不可收缩**）。
+     单类选择器与本条同为 (0,1,0) ⇒ 只能靠「写在后面」取胜（后写优先），
+     任何人日后在文件别处插入/挪动一条 `.nav-actions__*` 规则就可能静默翻回 `flex:none`
+     （= 右槽重新变硬、长站名又把行顶出面板，且不报错）。
+     双类 (0,2,0) ⇒ 与书写顺序无关，语义也准确：「只有当 spacer 同时是 right 时」。
+   ── 为什么 `min-width: 0` 不能省 ──────────────────────────────────────
+     flex 子项默认 `min-width: auto` ⇒ 即使 `flex-shrink: 1` 也不会窄于内容
+     ⇒ `text-overflow: ellipsis` 永远不触发（最常见的「写了 ellipsis 没反应」）。
+   ⚠️ 不改 `.nav-actions__spacer` 本身：`.nav-actions__hint`（按钮行中央提示）复用它，
+      那里需要的是「居中且不收缩」，与右槽诉求相反。 */
+.nav-actions__spacer.nav-actions__right {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .nav-actions__sub { color: var(--muted); font-weight: 400; }
 .nav-actions .btn.is-emph { color: var(--accent); font-weight: var(--fw-announce); }
 .nav-actions__btnrow { display: flex; align-items: center; gap: 10px; }
@@ -8699,6 +8762,19 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
   margin: 0;
   padding: 0 var(--space-4);
 }
+/* ⚠️ `padding-left` = 站名文字起点，由**实测**决定，不是审美值：
+   纵条巴士字形（`BusGlyph`，22px 壳 / 32 单位画布）着墨最右沿按态不同：
+     ready 27px · stop 28px · **approach 32px**（含 4px 呼吸环）· moving 30px
+   （`.verify/_fe-c-stoprow-geom.mjs` 真 Chrome DPR2「隐/显两帧逐像素差」实测，坐标含行内原点）。
+   最差态 32px + 4px 最小间距 = 36px ⇒ 文字起点 36px。
+   ⚠️ 旧值 26px 会让 四态全部压字（右间距 −1 / −2 / −6 / −4px）。
+   ⚠️ 呼吸动画峰值外环 7px ⇒ 右沿可达 34.5px，此刻与文字仅剩 **1.5px**。
+      **这是已知且被负责人拍板保留的瞬态**（2026-11-07 裁决）：峰值环是 40% 透明度、
+      1.6s 内往返的软边，不构成可读性边界；为它把 padding 加到 39 要牺牲 3px 站名宽度
+      （320px 下 148→145px），边际收益为负 ⇒ **不加宽**。
+      ❗ 但若将来有人把呼吸环**做粗**（`VEH_LOOK.approach.ringPx` > 4 或 keyframes 峰值 > 7px），
+      本值必须同步提到 **38px+** —— 那时环就成了不透明实边，不能再当"软边"处理。
+   ⚠️ 改 `VEH_DISC` / `VEH_GLYPH` / `VEH_LOOK.ringPx` 任一处 ⇒ **必须重跑**上述脚本重定本值。 */
 .lp-stop {
   display: flex;
   align-items: center;
@@ -8706,7 +8782,7 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
   min-height: 56px;
   box-sizing: border-box;
   position: relative;
-  padding-left: 26px;
+  padding-left: 36px;
 }
 /* 竖线：线路色 3px；首站从圆点起、末站到圆点止 */
 .lp-stop__rail {
@@ -9639,7 +9715,14 @@ button.lp-stop__veh {
 
 /* ──────────────────────────────────────────────────────────────────────────
    ③ 地图站点层（Spec R4 / AC-6）
-   纯通琴号站 = 12px 整圆主题色；关联巴士站 = 12px **右半圆**（左半青花蓝）。
+   纯通琴号站 = 12px 整圆主题色；关联巴士站 = **11px** 右半圆（左半青花蓝）。
+   ★ 2026-11-07 更正（需求 3 复核时实测，负责人批准只改注释不动尺寸）：
+     上一版写"12px"与实现不符 —— `.nav-map__station--tqh-shared` 未设 width，
+     走基类 `.nav-map__station` 的 11px（getComputedStyle 实测 11px）。
+     连带后果：50% 硬停落在 **5.5px**，DPR 1/3 存在半像素混色带
+     （粉 L≈72 + 蓝 L≈34 → 发灰的紫）—— **既有问题、本轮未处理、另案评估**：
+     改盒宽要连带 `NavMap` 的 `Pixel(-5.5,-5.5)` 与降级态 8px 的对齐账，
+     风险不对称，负责人裁定不并入本轮。
    半圆用 `linear-gradient(90deg, …, 0 50%, … 50% 100%)` **硬停**：
    单一背景层，浏览器只在相邻 color-stop 间插值 ⇒ **不可能露出页面底色**（白缝概率 0）。
    `clip-path` 不行：裁剪边界暴露的是"下一层"（兄弟半圆或父容器底），
@@ -9664,29 +9747,56 @@ button.lp-stop__veh {
     var(--tqh-map-half) 50% 100%
   );
 }
-/* 本班次经过的站：白环 —— **只给巴士双色标**（只加形状，不改色 —— 双色结构不能被吃掉）
-   ★ 2026-11-06 收窄选择器（用户口径 #3：「路线查看模式下指定线路的经停站的站标与正常站标
-     不同，会有一层白色粗边」）—— 改前是**单类** `.nav-map__station--tqh-onroute{…}`，
-     同时命中两类 marker，其中一类是误加：
-       · 纯通琴号站（`TqhStationLayer`，96 个）—— 班次视图的**白名单就是本班站点**
-         （`NavShell`：`whitelist = tripStationIds(tqhTrip)`），而高亮判据 `activeIds` 用的是
-         **同一份集合**（`tqhActiveIds = tripStationIds(tqhTrip)`）⇒ 屏上每个点 `on` 恒为 true
-         ⇒ 96 个点全体加环 = 纯装饰、零区分功能；更糟的是它在 1.5px `--tqh-on` 白描边外
-         再套 2px 纯白 ⇒ **白色总厚 3.5px** = 用户说的「白色粗边」✗
-       · 巴士双色标（`NavMap` 的 `--tqh-shared`，33 个）—— 班次视图下**巴士层不过滤**，
-         全视口巴士站都在画，靠这个环标出「本班也停这站」⇒ **有真实语义，必须保留** ✓
-     ⇒ 收窄为双类（特异性 0,2,0 > 基础类 0,1,0）：纯通琴号站回到 `.nav-map__station--tqh`
-       的常态外观（12px 圆 + 1.5px `--tqh-on` 描边 + 1px `--tqh-map-edge` 外圈），
-       与 #3「站标与正常一致」同口径。
-   ⚠️ 集合关系已核（`tqh-model.ts#sharedBusMainCodes` / `NavShell#tqhActiveBusCodes`）：
-      `tqhActiveBusCodes ⊆ tqhSharedBusCodes` ⇒ 白环不会落到非双色的巴士标上。
-   ⚠️ 若真机仍见「粗白边」，那是这 33 个**双色标**（11px 盒 + 1.5px 白描边 + 2px 白环）
-      —— 属设计意图、不是本轮回归；要收细需改 TSX 换 `outline` 方案，超出 CSS 边界。 */
-.nav-map__station--tqh-shared.nav-map__station--tqh-onroute {
-  box-shadow:
-    0 0 0 2px var(--tqh-on),
-    0 0 0 3px var(--tqh-map-edge);
-}
+/* ── 本班次经过「关联巴士站」的白环：**2026-11-07 按用户口径 #3 整块删除** ────────
+   删除实体：`.nav-map__station--tqh-shared.nav-map__station--tqh-onroute` 的
+   `box-shadow: 0 0 0 2px var(--tqh-on), 0 0 0 3px var(--tqh-map-edge)`
+   ⇒ 用户说的「白色粗边」（11px 盒 + 1.5px 白描边 + 2px 纯白环 = 白厚 3.5px）。
+   删后这 33 个关联标落回基类 `.nav-map__station`（:2576）的
+   `border: 1.5px solid #fff` + `box-shadow: 0 0 0 1px rgba(15, 23, 32, 0.42)`
+   ⇒ **外圈与首页地图普通巴士站逐字符一致**（需求 3 的验收口径）。
+
+   ── 双色从哪来 —— **本次一行未动，动它等于事故** ──────────────────────────
+   双色**不在**被删的那条规则里（那条只声明 `box-shadow`，没有任何 background /
+   `--tqh-*` 覆盖 / 盒模型声明）。双色来自紧邻其上的
+   `.nav-map__station--tqh-shared`（:9728-9735）：
+     `background: linear-gradient(90deg, var(--accent) 0 50%, var(--tqh-map-half) 50% 100%)`
+   左半青花蓝（澳门巴士站）/ 右半主题色（通琴号），硬停无插值。
+   ⇒ 白环删掉后**圆点仍是左右两半异色，不是单色点**；关联站与普通站的区别
+     由「左右分色」承担，而不是由白边承担。
+
+   ── 为什么整块删，而不是改写成重复声明 ────────────────────────────────────
+   把 `1.5px 白描边 + 1px 外圈` 抄一份进复合规则 = 同一规格存两份：基类一改，
+   复合规则不跟随 ⇒ **静默漂移**。删掉让基类接管 = 单一真相。
+   也**不能只删 `box-shadow` 一行留空块 `{}`**：`scripts/check-station-spec.mjs`
+   的 EMPTY-RULE 断言（:471-481）判 FAIL ⇒ 验证链直接红。
+
+   ── 不变量（以后动这块之前务必读完）──────────────────────────────────────
+   · `.nav-map__station--tqh`（:9720-9727）的**盒宽 12px 不动**：硬停 50% 只有在
+     偶数盒宽才落整数像素（6px）；11px 时 5.5px 在 DPR 1/3 出现半像素混色带
+     （粉 L≈72 与蓝 L≈34 混成发灰的紫）—— 推导见本段 ③ 头部注释
+     （:9715-9721「抗锯齿」段），别重算。
+   · 关联巴士标本身走**基类的 11px**（`.nav-map__station--tqh-shared` 未设 width，
+     全文件无第二处给它宽度），与 12px 的纯通琴号站不同盒 —— 属既有事实，
+     本轮不调整（改盒宽要连带 `NavMap` 的 `Pixel(-5.5,-5.5)` 与降级态 8px 的对齐账）。
+   · 「本班经停」的**可观测载体仍在**：`NavMap.tsx` 仍给 marker 输出
+     `data-tqh-on-trip="1"`（:1398）⇒ 将来要恢复视觉表达，不必先加 CSS 钩子。
+   · `--tqh-shared`（:9728）与 `--tqh-dim`（下方，只 `opacity`）**均未改动**。
+   · 集合关系（`tqh-model.ts#sharedBusMainCodes` / `NavShell#tqhActiveBusCodes`）：
+     `tqhActiveBusCodes ⊆ tqhSharedBusCodes` ⇒ 白环倘若日后回归，也不会落到
+     非双色的巴士标上。
+
+   ── 历史（2026-11-06，仅追溯，**与当前实现相反**）──────────────────────────
+   环最初是**单类** `.nav-map__station--tqh-onroute{…}`，同时命中 96 个纯通琴号站：
+   班次视图下 `whitelist` 与 `activeIds` 是同一份 `tripStationIds(tqhTrip)` ⇒ 每个点
+   `on` 恒 true ⇒ 全体加环 = 纯装饰，且 1.5px 白描边外套 2px 纯白 = 白厚 3.5px。
+   当时收窄为双类（特异性 0,2,0），让纯通琴号站回到 12px 常态外观；但 33 个双色标的
+   2px 环仍在，用户复核仍判「粗白边」⇒ 本轮连同这条规则一并删除。
+
+   ⚠️ `scripts/check-station-spec.mjs` 的不变量 ④（:22-24）与 `checkTqhRingGuard`
+      （:375-416）**仍断言此环存在**。删除后它报 **WARN**（不是 FAIL ⇒ exit 0 ⇒
+      `npm run verify` 仍绿），脚本自身写有「若属产品决定（不再标本班停靠）请同步
+      删除本断言」。该断言已过期，待负责人 / QA 同步处置。
+      **不要为了让门禁变绿把环加回来。** */
 /* 非本班次站：**只降透明、不改背景**（轻轨踩过的坑：改 background 会抹掉双色）
    ★ 2026-11-06 更正命中面（本文件上方「其余降为 0.42」的字面口径偏宽，`TqhStationLayer` 的
      注释也一样）：班次视图（非导航）下 `whitelist` 与 `activeIds` 是**同一份**
@@ -10114,5 +10224,1194 @@ button.lp-stop__veh {
   .tqh-trip,
   .lst-sheet__grip {
     transition: none !important;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ★ 2026-11-07 · 跨境交通（需求 4 / 5 / 6）—— 分区新增，**不改任何既有规则**
+   ──────────────────────────────────────────────────────────────────────────
+   加入者：前端（贾思敏）· 对应设计稿 `docs/迭代-跨境交通-20261106/05-跨境交通界面设计.html`
+          §7.3 的类名清单（`.xb-*` + 四个列模板 + `.bottom-nav` 第 4 tab 口径）。
+
+   ── 四条自我约束（开工时 team-lead 划定的）──────────────────────────────
+     ① 只追加：本分区在文件末尾，未触碰上方任何一条既有规则；
+     ② **新增 Token = 0 个**：全部引用 `:root` 既有 `--space-* / --surface* / --accent* /
+        --text-* / --radius-* / --dur-* / --ease-standard / --focus-ring / --sheet-* /
+        --grab-* / --plate-font / --safe-bottom / --tabbar-h`；
+        唯一字面色是 `#fff`/`#000`（本分区内实际一个都没用到）。
+     ③ 前缀 `.xb-`（cross-border），列模板沿用设计稿的 `.tbl-air4/air5/sea3/sea5`；
+     ④ 未改 `.nav-map__station` / `--lrt` / `--tqh` 任何规格 ⇒ `scripts/check-station-spec.mjs`
+        的 17 条断言不受影响（交付前已复跑）。
+
+   ── 为什么这些类名与设计稿逐字一致 ─────────────────────────────────────
+     设计稿是按「Token + 类名」交付的，实现时**不做二次命名**（改了名，下次核对就得
+     人肉 diff 两份文件）。唯一差异：设计稿里的 `.ann` / `.doc*` / `.phone` / `.dt` / `.prose`
+     是**文档外壳**（画稿用的画布、标注气泡、说明表格），不属应用内实现 ⇒ 本分区不含。
+
+   ── 深色主题 ───────────────────────────────────────────────────────────
+     本分区没有任何 `prefers-color-scheme` 分支：所有值都是 var()，深色由既有 `:root`
+     覆写自动接管。⚠️ 唯一需要目视复核的是 `.xb-th` 的吸附底色（`--surface-2` 深色下为
+     `#2a2d34`）—— 见交付报告「必须真浏览器复验」第 5 条。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 页面骨架（与 .page / .page--with-nav 同口径的底部让位）── */
+.xb-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  height: 100%;
+  padding: var(--space-5) var(--space-4) calc(var(--tabbar-h) + var(--safe-bottom) + var(--space-5));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.xb-hd {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.xb-hd__t {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: var(--fw-emphasize);
+  letter-spacing: var(--tracking-title);
+  color: var(--fg);
+}
+.xb-hd__m {
+  font-size: var(--text-2xs);
+  color: var(--meta);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* ── 分组：`.fav-group__title` 的「标签 + 发丝线 + 计数」语言，不套卡片壳 ── */
+.xb-grp {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.xb-grp__h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0 0 6px;
+  border-bottom: var(--frame-w) solid var(--border);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-emphasize);
+  letter-spacing: var(--tracking-label);
+  color: var(--fg);
+}
+.xb-grp__h > .mm-icon {
+  color: var(--muted);
+}
+.xb-grp__n {
+  margin-left: auto;
+  font-size: var(--text-2xs);
+  font-weight: var(--fw-read);
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+.xb-grp__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ── 卡片（= 既有 .card 的值：1px 描边 + 10 圆角 + 无投影，只加内部栅格）── */
+.xb-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 64px;
+  margin: 0;
+  padding: var(--space-3) 14px;
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-card);
+  font-family: inherit;
+  text-align: left;
+  color: var(--fg);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard);
+}
+.xb-card:hover {
+  border-color: var(--border-2);
+}
+.xb-card:active {
+  background: var(--surface-2);
+}
+.xb-card:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.xb-card__ic {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-btn);
+  background: var(--surface-2);
+  color: var(--fg-2);
+}
+.xb-card__main {
+  flex: 1;
+  min-width: 0;
+}
+.xb-card__t {
+  display: block;
+  font-size: var(--text-md);
+  font-weight: var(--fw-emphasize);
+  letter-spacing: var(--tracking-title);
+  color: var(--fg);
+  line-height: var(--leading-title);
+}
+.xb-card__s {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-sm);
+  color: var(--muted);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.xb-card__end {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+.xb-card__lab {
+  font-size: var(--text-2xs);
+  color: var(--meta);
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+}
+.xb-card__val {
+  font-size: var(--text-md);
+  font-weight: var(--fw-announce);
+  color: var(--fg);
+  font-family: var(--plate-font);
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+}
+.xb-card__chev {
+  flex: none;
+  color: var(--border-2);
+}
+.xb-chip {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: var(--radius-chip);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.02em;
+  line-height: 1.35;
+}
+
+/* ── 数据来源（条款义务：须註明来源 + 取得日期，不可省、不可折叠）── */
+.xb-src {
+  display: flex;
+  gap: 6px;
+  margin: var(--space-2) 0 0;
+  /* 原：padding-top: var(--space-3);  ← 左右为 0，比表格正文少缩进一节（§5 对齐修复）
+     用 padding 而非 margin：本元素是 flex + gap:6px，margin 会把 gap 节奏带偏，
+     且 A 档切换要改两处；border-top 保持通栏（padding 不缩 border，分割线是全宽设计）。 */
+  padding: var(--space-3) var(--sheet-gutter) 0;
+  border-top: 1px solid var(--border);
+  font-size: var(--text-2xs);
+  line-height: 1.6;
+  color: var(--meta);
+}
+.xb-src .mm-icon {
+  flex: none;
+  margin-top: 2px;
+}
+.xb-src b {
+  font-weight: var(--fw-emphasize);
+  color: var(--muted);
+}
+.xb-src span {
+  display: block;
+}
+
+/* ── 资料完整性提示（滚动窗口导致早班缺失时）── */
+.xb-flag {
+  display: flex;
+  gap: 6px;
+  margin: var(--space-2) 0 0;
+  padding: 6px 10px;
+  border-radius: var(--radius-chip);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+}
+.xb-flag .mm-icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+/* ── 「暂时无法更新」降级条（stale === true；**继续展示旧数据**，不清表）── */
+.xb-stale {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  padding: 6px var(--sheet-gutter);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+}
+.xb-stale .mm-icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+/**
+ * ── 底导：本分区**不新增任何 `.bottom-nav*` 规则**（这是刻意的）─────────────────
+ *   第 4 个 tab 由 `BottomNav.tsx` 的 `TABS` 数组插入即可：`.bottom-nav__tab` 已是
+ *   `flex: 1` ⇒ 三个变四个自动等分，无需改样式。
+ *   ⚠️ 有坑：我一开始想补一条 `.bottom-nav__icon { display: grid }` 来"居中更好"，
+ *      但既有 `globals.css:3159` 是 `display: inline-flex`，追加同选择器规则 = **压掉旧值**
+ *      ⇒ 收藏红点（`.bottom-nav__dot` 绝对定位在 icon 内）会位移。已删。
+ *      「只许追加、不许改既有规则」的实际含义包含这一条：**不得追加与既有类同名的新规则**。
+ */
+
+/* ── 全屏弹窗（同族 .lst-sheet：14 圆角 + grip 36×4 + head 44 + sheet-shadow）── */
+.xb-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 76;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-top-left-radius: var(--sheet-radius);
+  border-top-right-radius: var(--sheet-radius);
+  box-shadow: var(--sheet-shadow);
+  overflow: hidden;
+}
+.xb-sheet__grab {
+  flex: none;
+  padding: 8px 12px 0;
+}
+.xb-sheet__grip {
+  width: var(--grab-w);
+  height: var(--grab-h);
+  margin: 0 auto;
+  border-radius: var(--radius-full);
+  background: var(--grab-color);
+}
+.xb-sheet__hd {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: 0 8px 0 var(--sheet-gutter);
+}
+.xb-sheet__h {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--fw-emphasize);
+  letter-spacing: var(--tracking-title);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.xb-sheet__x {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.xb-sheet__x:hover {
+  background: var(--surface-2);
+}
+.xb-sheet__x:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+/* `.xb-sheet__sub`（「最近班次 · 現在 HH:MM · 今日 N 班」）已于 2026-11-07 删除，
+   连同 `.xb-sheet__sub .dot`。删除理由与信息损失见 `XbSheet.tsx` 对应位置的注释。 */
+.xb-sheet__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* ★ 2026-11-07：表头与单元格一律 nowrap ⇒ 列宽按最长真实文案给足，
+     总宽超出容器时**横向滚动**（替代省略号与缩字号）。见 .tbl-* 的 min-width。 */
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: var(--space-4);
+}
+.xb-sheet__foot {
+  flex: none;
+  margin-top: auto;
+  padding: 0 0 var(--safe-bottom);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+.nw {
+  white-space: nowrap;
+}
+
+/* ── 表格（`.xb-th` = 表头 / `.xb-tr` = 行；内边距写在格子上，吸附才干净）── */
+.xb-tbl {
+  width: 100%;
+}
+.xb-th,
+.xb-tr {
+  display: grid;
+  align-items: baseline;
+  column-gap: var(--space-2);
+  padding-left: var(--sheet-gutter);
+  padding-right: var(--sheet-gutter);
+}
+.xb-th {
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: var(--text-2xs);
+  font-weight: var(--fw-emphasize);
+  letter-spacing: 0.06em;
+  color: var(--meta);
+  /* ★ 2026-11-07（需求 6c）：表头**不换行、不省略**。
+     改前这里没有任何 white-space/overflow 声明 ⇒ 「计划出发」（4 字 ≈46.6px）
+     在 44px 列里被折成「计划出 / 发」。禁止改用 ellipsis 或缩字号来凑。 */
+  white-space: nowrap;
+}
+.xb-tr {
+  min-height: 52px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.xb-tr:last-child {
+  border-bottom: 0;
+}
+.xb-c {
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--fg);
+  min-width: 0;
+  /* ★ 2026-11-07（需求 6c）：单元格不换行、不省略、不缩字号（**机场状态列除外**，见 `.tbl-air*-c--st` 例外）。
+     保证「放得下」的手段是**给足列轨 + 容器横向滚动**，不是 ellipsis：
+     实测（Chromium 156 · 390 视口）每列最长真实文案所需像素（全站 PE/PI/TP + 机场 16 个屏取最大）：
+       · 船名 72（迅隆 11 號）｜船务公司 52（噴射飛航）｜到达地·出发地 52（深圳蛇口）
+       · 计划出发·计划到达 47（07:30）｜船侧状态 76（預計 11:45 到達）｜闸口 23（9）
+       · 航班号 44（KW4002）｜机场状态 237（「航班延誤至 15:10 … 櫃檯 D7-D11 開放時間為 12:25」
+         是上游把两段状态拼在一个字段里，QA 已核实上游原文如此）
+     机场状态列**不追这 237**：追它会把机场全量表撑到 498，390 视口看登机口必须左滑
+     （负责人 2026-11-07 裁定回退）⇒ 该列单独允许折行，其余列一律 nowrap。
+     **禁止**改用 text-overflow:ellipsis 或降字号来"看起来不溢出"。 */
+  white-space: nowrap;
+}
+.xb-c--num {
+  font-family: var(--plate-font);
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.xb-c--dim {
+  color: var(--muted);
+}
+.xb-c--st {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--fg);
+}
+.xb-st--past {
+  color: var(--muted);
+}
+.xb-st--warn {
+  color: var(--warn);
+}
+.xb-st--danger {
+  color: var(--danger);
+}
+.xb-c--ctr {
+  text-align: center;
+}
+/**
+ * 我方**认不出**的字面量 `status_raw === "0"`（机场抵澳实测 6 条）。
+ * 渲染成「—」+ `--meta`：连排 6 行裸 `0` 会被读成渲染 bug；留空又会被读成加载失败。
+ * 原始值进 `aria-label`（"狀態未能識別，原始值為 0"），并在表下给一行说明，见 `.xb-note`。
+ * ⚠️ 类名用 `unrecognized` 而不是 `sentinel`：「哨兵」等于替上游判定这个值是废的，
+ *    而我们只知道**自己没读懂**。类名也是描述，同样会繁殖。
+ */
+.xb-st--unrecognized {
+  color: var(--meta);
+}
+
+/* 表下小字说明（哨兵值 / 资料完整性）；默认不出现，只在确有该情况时由 TSX 渲染 */
+.xb-note {
+  margin: 0;
+  padding: 6px var(--sheet-gutter) var(--space-2);
+  font-size: var(--text-2xs);
+  line-height: 1.55;
+  color: var(--meta);
+}
+
+/**
+ * ★ 设计稿 v1.1 §06 断点定案：**状态列字号在 ≤400px 降一档到 11px**。
+ *   实测：390 状态列 120px、375 只剩 113px，而最长串「櫃檯 A10-A12 已開放」需 118px
+ *   ⇒ 375 上必折成 2 行。降到 `--text-2xs` 后 375 与 320 都安全，一条覆盖两档。
+ *   ⚠️ 只降状态列（`.xb-c--st`），其余列不动 —— 航班号/时刻/地名本来就是短串或等宽数字。
+ *   ★ 2026-11-07：本规则**保留**（仍是"窄屏状态文字别太大"的一道保险），
+ *     但列宽不足的问题已改由列模板给足宽度解决，不再依赖这条降字号。
+ *   ★ 2026-11-07：已被 A 档（≤409px）覆盖且同值，逻辑上是死代码 —— **保留是有意的**：
+ *     若日后 A 档边界调小，没有它会漏 401–409。不要以为是重复声明而删掉。
+ */
+@media (max-width: 400px) {
+  .xb-c--st {
+    font-size: var(--text-2xs);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   列模板（2026-11-07 重算：表头/单元格 nowrap + 船侧 +1 列「船务公司」）
+
+   ── 宽度怎么来的（每列取「表头所需」与「最长真实文案所需」的较大值，+2~4px 余量）
+      · 表头：11px + letter-spacing .06em ⇒ **每字 11.66px**（4 字 = 46.6px）
+      · 数据：`.xb-c` 13px；`.xb-c--num` 用 plate-font（数字约 7.8px）；`.xb-c--st` 12px
+        且 ≤400px 降 11px
+      · 最长串取自 `src/lib/cross-border/status.ts` 的白名单正则（穷举，非猜测）：
+        机场离澳 `櫃檯 A10-A12 已開放`（12px ≈118px）
+        机场抵澳 `已啟航 預計到達 21:30`（12px 实测 119.36，11px 实测 109.41）← 全表最长
+                                       ←「≈124」来源不可考，实测 119.36（差 4.64）
+        船离澳   `08:20 啟航`（≈70px）／船到港 `預計 08:20 到達`（12px ≈88px）
+      · 缺值兜底 `资料未公开` = 5 字 × 13px = 65.00（11px 正文 = 55.00；船名走 plate 字体，11px = 55.56）
+        ⇒ 船务公司列 B 档 72 / A 档 56；船名列 `minmax(·,1fr)`，B 档 72 / A 档 59。
+
+   ── 每列：表头文案 → 所需宽 → 取值
+      机场（air4/air5 同一口径）
+        航班号      35 / 39(NX123)      → 56(air4) 54(air5)
+        到达地|出发地 35 / 52(深圳蛇口)   → 68(air4) 62(air5)
+        计划出发|到达 46.6 / 39(08:30)   → **50**
+        状态        109.41（11px 实需）  → **minmax(112px, 1fr)**（air4 与 air5 **都是 112**；
+                                         且**两张表都折行**，见 `.tbl-air4 .xb-c--st, .tbl-air5 .xb-c--st`）
+                                       ← 旧文「air4 = 124」与代码不符（代码 112）；
+                                         「只有 air5 折行」与代码不符（air4 也折行）。
+        登机口      35 / 26(A10)         → 38
+      船（sea3/sea4/sea5）
+        船名        23.3 / 65(资料未公开) → **minmax(72px, 1fr)**
+        船务公司    46.6 / 65             → **72**
+        到达地|出发地 35 / 52              → **54**
+        计划出发|到达 46.6 / 39            → **48**
+        状态        23.3 / 88(船最长)     → **90**
+        闸口        23.3 / 26             → **40**
+
+   ── 总宽（盒对盒）= Σmin + gap×(列数−1) + padL + padR
+      · `Σmin` = 各列轨道下限之和（`minmax(a,1fr)` 取 a，定宽取自身）
+      · `gap×(列数−1)` ← 旧文写作 `8×列数−1`，**缺一对括号**：字面 8×6−1 = 47，
+        实际 8×5 = 40，sea5 因此一直多报 7px。恒等式必须带括号。
+      · `padL + padR` = 左右内距之和（B 档 16+16 = 32；A 档 8+8 = 16）
+      ⇒ 判「装得下」只看 `总宽 ≤ 视口`；`Σmin` 与单列宽都只是中间量。
+      ⇒ 每个模板的 `min-width` **必须等于** `Σmin + gap和 + pad`（多 1px 即赘肉）。
+
+   ── 两档定案（2026-11-07）
+      A 档 ≤409px（覆盖 320 / 375 / 390）：gap 4 · 内距 8/侧 · 表体 11 · 状态 11 ·
+        表头 10/.04em · 表头短名「到达 · 出发」
+        air4 270 · air5 306 · sea3 229 · sea4 313 · sea5 315
+        ⇒ 320 屏五张表全部不横滚（最紧 sea5 余 5、sea4 余 7）
+      B 档 ≥410px（桌面 / 平板）：gap 8 · 内距 16/侧 · 表体 13 · 表头 11/.06em
+        air4 322 · air5 370 · sea3 306 · sea4 398 · sea5 405
+        ⇒ `min-width` **必须 ≤ 410**：旧值 sea5 = 448 会让 410 视口自己横滚 38px。
+
+   ── 内距为什么从稿值 14/侧 压到 8/侧（同一套轨道，两列可直接对账）
+     表     8/侧(pad16)   14/侧(pad28)   320 余（8/侧）   320 余（14/侧）
+     air4      270           282             +50              +38
+     air5      306           318             +14               +2
+     sea3      229           241             +91              +79
+     sea4      313           325              +7              **−5**
+     sea5      315           327              +5              **−7**
+     ⇒ 稿值 14/侧 在 320 下 sea4 溢 5、sea5 溢 7。air5 单独用 14/侧 是余 2、精确对稿，
+        但内距只能有一份值 ⇒ 整档取 8/侧。
+        代价如实记：air5 比稿少 6px 呼吸（稿 318 余 2 → 本方案 306 余 14），
+        是**为保对齐链完整付的价**。8 是压缩容忍下限，不是设计标准值，也不是「与卡片对齐」。
+     ⇒ **不许按表分叉内距**：`.xb-note / .xb-src / .xb-brd / .xb-link / .xb-sheet__hd` 是
+        `.xb-sheet__body` 的直接子元素、不是表格子元素，按表覆盖 padding 只能作用到表格行
+        ⇒ 表体 8、注释 14，错开 6px，正是本轮要修的那类缺陷。且 token 分叉后不再是单一来源。
+
+   ── 船务公司列为什么 A 档 56 / B 档 72
+     兜底串 `资料未公开` 实测：13px = 65.00（B 档，取 72 含 plate 平台差异余量）、
+     11px = 55.00（A 档，取 56）。把 13px 的修值搬进 11px 的档是口径串档。
+     修值本意是「让兜底串完整显示」，A 档 56 已经做到（55.00 ≤ 56），不需要多占。
+     船名列不同：它走 `.xb-c--num`（plate 字体），A 档实需 57.97，故 `minmax(59px,1fr)`。
+
+   ── 表头短名（到达 · 出发）
+     稿 320 档：`10 / .04em（短名：到达·出发）`。短名**不是省宽手段**（该列绑定者是正文
+     `深圳蛇口` 44.00，轨道下限 46 不因表头缩短而变），是设计决定（视觉密度）。
+     映射以代码真实表头字符串为准，共 4 键：到达地→到达、出发地→出发、
+     计划出发→出发、计划到达→到达（dep 表得「到达·出发」，arr 表得「出发·到达」）。
+     全名常驻 `aria-label`，两档读屏一致；不要用 `::before { content }` 替换文本（读屏丢字）。
+
+   ── ⚠️ 旧裁定留痕（只许追加，不许删除本段）
+      旧文第 1 句：「⇒ 320px 屏全部横向滚动；390px 屏 air4/air5/sea3 不滚，sea4/sea5 滚。」
+      旧文第 2 句：「**这是 nowrap 的必然代价**：宁可横滚，也不省略、不缩字号（负责人裁定）。」
+      ⇒ **2026-11-07 新裁定已作废以上两句，改为：手机 320 / 375 / 390 一律不许横向滚动，
+         宁可缩小字号（表体 11、状态 11、表头 10），也不省略、不裁切、不改 ellipsis。**
+         A 档字号下调与内距压到 8/侧是知情取舍，不是手误；
+         落地后必须真浏览器实测复证，不许拿上面这些算式当验收。
+
+   ── 模板名里的数字**不再等于列数**（船侧各 +1），原因见 `XbTable.tsx#Cols` 注释。
+   ⚠️ 改这里之前先看设计稿 §04 与本节算式，不要凭记忆改回去。
+   ══════════════════════════════════════════════════════════════════════ */
+/**
+ * 列轨道一律「按实测最长真实文案给足」+ 容器横向滚动（需求 6c）。
+ * 通用算式：min-width = (padL + padR) + Σ轨道 + gap×（列数−1）—— 三项随档位取值：
+ *   B 档（≥410）：16+16 = 32 内距、gap 8；A 档（≤409）：8+8 = 16 内距、gap 4。
+ *   ⚠️ 两个档位的 tracks / gap / 内距都不同，**不要用一档的 Σmin 去核另一档的 min-width**。
+ * 每列括号里是「实测该列需要的最小宽度」来源（表头 vs 最长正文取大）。
+ */
+
+/* 机场 · 4 列（五班两侧 / 抵澳当日）：航班号(44) 到达地·出发地(52) 计划出发·计划到达(47) 状态(109) */
+.tbl-air4 .xb-th,
+.tbl-air4 .xb-tr {
+  grid-template-columns: 48px minmax(56px, 1fr) 50px minmax(112px, 1fr);
+}
+.tbl-air4 {
+  min-width: 322px; /* 32 + (48+56+50+112) + 8×3 = 322 */
+}
+/* 机场 · 5 列（离澳当日）：+ 登机口(35)。
+   ★ 2026-11-07（负责人裁定，回退 498 版）：**只有机场「状态」列允许在本列轨道内折行**，
+     其余列与表头保持 nowrap。理由（三条，按裁决原文）：
+       ① 需求原文是「码头/机场**表头**字段名不换行不省略」——只管表头；
+          把数据格也 nowrap 是**加码**，加码带来副作用就该退回去。
+       ② 状态是上游自由文本，长度不可控：多数是「已啟航 預計到達 09:05」109px，
+          偶发才是「航班延誤至 15:10 櫃檯 D7-D11 開放時間為 12:25」**237px**。
+          用轨道去追 237 会让一条最长文案决定整张表宽（曾把本表撑到 498px）。
+       ③ 登机口是机场场景的**关键信息**。498 宽在 390 视口下用户每次都要左滑才能
+          确认去哪个口 —— 这个代价远大于「状态偶尔折两行」。
+     ⇒ 轨道回到 112 起（390 视口下状态列实得 132px，237px 文案折两行、行高 52→69.2），
+       min-width 370 ≤ 390 ⇒ **390 视口不横滑即可看到登机口**；320 视口需横滑（可接受）。
+     ⚠️ 破例**仅限这一列**（见下方 `.tbl-air4 .xb-c--st, .tbl-air5 .xb-c--st`），
+        不要让它变成「以后哪列挤了都能折」的先例；船侧状态最长 52/76px 都在轨内，不破例。 */
+.tbl-air5 .xb-th,
+.tbl-air5 .xb-tr {
+  grid-template-columns: 48px minmax(56px, 1fr) 50px minmax(112px, 1fr) 40px;
+}
+.tbl-air5 {
+  min-width: 370px; /* 32 + (48+56+50+112+40) + 8×4 = 370 */
+}
+
+/* ── 唯一例外：机场「状态」列允许在自列轨道内折行（不 nowrap、不 ellipsis、不降字号）──
+   判据见上方 tbl-air5 注释。船侧 `.xb-c--st` 不受影响（仍 nowrap）。
+   `.xb-c` 已有 `min-width: 0` ⇒ 折行不会撑破轨道。 */
+.tbl-air4 .xb-c--st,
+.tbl-air5 .xb-c--st {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* 船 · 最近五班（4 列：船名 / 船务公司 / 到达地·出发地 / 计划出发·计划到达）
+   ★ 抵澳时表头是「出发地 / 计划到达」，见 XbTable.tsx tableSpec —— 同一个模板，只换文案。 */
+/* 船务公司列 56 → **72**（B 档，2026-11-07）：13px 下兜底串 `资料未公开` 实需 **65.00**，
+   56 装不下 —— 溢 9px，且 nowrap 溢出会吃穿 `column-gap` 后压进「到达地/出发地」**1.00px**
+   （列间分组被隐性削弱，无任何告警）。A 档走 11px（55.00 ≤ 56）⇒ **A 档仍是 56，不跟着放大**。 */
+.tbl-sea3 .xb-th,
+.tbl-sea3 .xb-tr {
+  grid-template-columns: minmax(72px, 1fr) 72px 56px 50px;
+}
+.tbl-sea3 {
+  min-width: 306px; /* 32 + (72+72+56+50) + 8×3 = 306 */
+}
+/* 船 · 离澳 · 当日所有（6 列：+状态 +闸口）。
+   状态列 56 → **57**（B 档）：12px 下 `08:20 啟航` 实测 **56.67**，轨 56 短 0.67
+   ⇒ nowrap 会溢出 0.67px 吃进列距。**A 档 56 不动**：11px 装得下 51.95（余 4.05）。 */
+.tbl-sea5 .xb-th,
+.tbl-sea5 .xb-tr {
+  grid-template-columns: minmax(72px, 1fr) 72px 56px 50px 57px 26px;
+}
+.tbl-sea5 {
+  min-width: 405px; /* 32 + (72+72+56+50+57+26) + 8×5 = 405 */
+}
+/**
+ * **船 · 抵澳 · 当日所有**（5 列：船名 / 船务公司 / 出发地 / 计划到达 / 状态）。
+ *   设计稿只给了 sea3（五班）与 sea5（离港全量：+状态+闸口），arr 侧上游无闸口列
+ *   ⇒ 拿 sea5 顶会多出一列空气。取值 = sea5 去掉闸口那 26px，其余逐字相同。
+ *
+ * ★ 状态列 80 → **84**（B 档，designer 2026-11-07 裁定）：
+ *   实测 12px 下 `預計 11:45 到達` = **83.36**，轨 80 短 **3.36**。加宽三条理由（裁定原文）：
+ *     ① 稿子认可的兜底只有折行（L1937「允许状态换行到两行」）。nowrap 溢出吃列距
+ *        ⇒ 邻近列实际间距从 gap 8 被压到 **4.64 / 7.33**，低于设计的 gap 8，
+ *        列间分组被隐性削弱，且没有任何告警。
+ *     ② 状态词是运营可变数据，文案一变长就立刻压字。今天短 3.36 / 0.67 不可见，
+ *        明天多两个字就是可见缺陷。
+ *     ③ 代价为 0：修后 sea4 **398 ≤ 410**、sea5 **405 ≤ 410**。
+ *   ⚠️ **A 档（11px）两列不动**：sea4 80 装 **76.41**（余 3.59）、sea5 56 装 **51.95**（余 4.05），
+ *      够用 ⇒ A 档仍写 80 / 56，**不是漏改**，别按 B 档的值去"补齐"。
+ */
+.tbl-sea4 .xb-th,
+.tbl-sea4 .xb-tr {
+  grid-template-columns: minmax(72px, 1fr) 72px 56px 50px 84px;
+}
+.tbl-sea4 {
+  min-width: 398px; /* 32 + (72+72+56+50+84) + 8×4 = 398 */
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   跨境交通 · 窄屏 A 档（≤409px，覆盖手机 320 / 375 / 390 三档）
+
+   ⚠️ 位置是约定的一部分：紧接最后一条 `.tbl-sea4 { min-width }` 之后、
+      `.xb-th--sticky` 之前。本块所有规则与被覆盖规则特异性相同，靠源序决胜；
+      提前插入 ⇒ 被基础档反压（表现为「改了没生效」）。
+   ⚠️ 表头短名切换两条规则（`.xb-th__c--short .xb-th__full { display:none }` /
+      `.xb-th__c--short .xb-th__short { display:inline }`）**已并入本块尾部**，
+      不要再另起第二个 409 断点块（同一断点只许一条块，否则条件会漂）；
+      `.xb-th__short { display:none }` 的基础隐藏留在块外（不受媒体条件约束）。
+
+   ── 参数来源
+     `column-gap: 4`        ← 设计稿 320 档（表头行内联 `column-gap:4px`、四条数据行内联逐字相同、
+                               定量表「列间距 8 / 8 / **4**」第三格、散文「列间距 8 → 4」）
+     `表体 11 / 状态 11`     ← 稿「表体 11px / 状态 11px」
+     `表头 10px / .04em`    ← 稿定量表「10 / .04em（短名：到达·出发）」。
+                               **层级守恒**：稿内每一档表头都比正文小一号（390 = 11/13、320 = 10/11），
+                               从不存在「表头与正文同号」的档位；本档正文已降到 11，表头取 10
+                               恰好复现 320 档「差 1 号」。表头行内联那句 `letter-spacing:0`
+                               是稿子手误，权威值取自定量表 = `.04em`。
+                               上了短名后窄屏渲染的是 `出发`（10px/.04em = 20.81），
+                               40 列绰绰有余 ⇒ 表头字号与 `计划` 列宽互不牵连。
+     `短名 到达·出发`        ← 稿「10 / .04em（短名：到达·出发）」。短名不是省宽手段，是设计决定。
+     `air5 五列 44/46/40/flex/32 + 状态 112` ← 稿定量表 + 「状态列可用 112」
+     `内距 8/侧`            ← **不是设计稿值**。稿值 14/侧 在 320 下 sea4 溢 5、sea5 溢 7；
+                               且 `--sheet-gutter` 必须单一来源（按表分叉会让 .xb-note / .xb-src /
+                               .xb-brd / .xb-link / .xb-sheet__hd 与表体错开，见下方取舍表）。
+
+   ── 本档算式（盒对盒）
+     总宽 = Σmin + gap×(列数−1) + padL + padR
+     gap = 4（`--space-1`）；padL + padR = 8 + 8 = 16（`--sheet-gutter` 重定义为 8）
+       · air4  Σmin(44+46+40+112)=242 · +4×3=254 · +16 = 270 → 320 余 50
+       · air5  Σmin(242+32)=274      · +4×4=290 · +16 = 306 → 320 余 14
+       · sea3  Σmin(59+56+46+40)=201 · +4×3=213 · +16 = 229 → 320 余 91
+       · sea4  Σmin(201+80)=281      · +4×4=297 · +16 = 313 → 320 余 7
+       · sea5  Σmin(201+56+22)=279   · +4×5=299 · +16 = 315 → 320 余 5
+
+   ── 内距为什么从稿值 14/侧 压到 8/侧（同一套轨道，两列可直接对账）
+     表     8/侧(pad16)   14/侧(pad28)   320 余（8/侧）   320 余（14/侧）
+     air4      270           282             +50              +38
+     air5      306           318             +14               +2
+     sea3      229           241             +91              +79
+     sea4      313           325              +7             **−5**
+     sea5      315           327              +5             **−7**
+     ⇒ 稿值 14/侧 在 320 下 sea4 溢 5、sea5 溢 7 ⇒ 不可用。
+        全局 8/侧 的**代价如实记**：air5 比稿少 6px 呼吸（稿 318 余 2 → 本方案 306 余 14）。
+        这是**为保对齐链完整付的价**，不是「与设计稿对齐」。
+     ⇒ **不许按表分叉内距**：`.xb-note / .xb-src / .xb-brd / .xb-link / .xb-sheet__hd` 都是
+        `.xb-sheet__body` 的直接子元素、**不是表格的子元素**；`.tbl-sea4 .xb-th { padding-left:8px }`
+        只作用于表格行，作用不到它们 ⇒ sea4/sea5 那张 sheet 里表体 8、来源与注释 14，错开 6px，
+        正是本轮要修掉的那类对齐缺陷。且 token 一旦分叉就不再是「单一来源」，
+        QA 的判6（token 引用 + 门禁侧独立枚举白名单）就写不成确定性断言。
+
+   ── 知情取舍（不是手误）
+     ① 表体/状态 11 ⇒ 375、390 上正文比设计稿小一号。这是「不横滚」的代价，负责人已知情。
+     ② 内距 8/侧 的理由见上表；B 档仍是 16/侧。
+     ③ 本档与 B 档共用同一份 DOM：不隐藏列、不省略、不改 ellipsis、不裁切。
+     ④ 现有 `@media (max-width: 400px) { .xb-c--st { font-size: var(--text-2xs) } }`
+        已被本档完全覆盖（同值）⇒ **保留作本档被回退时的兜底，不要当冗余删掉**。
+     ⑤ 到达列用 `minmax(46px,1fr)` 与稿的 `minmax(0,46px)` **不同**：本实现沿用现网 B 档的
+        `1fr` 共享语义（不引入第二套），两个 1fr 平分、状态列下限 112 冻结 ⇒
+        到达列实得 48、状态列实得 112（稿的封顶算法给状态列 114）。
+        **状态列 112 仍 ≥ 所需 108，判据不变。**
+   ══════════════════════════════════════════════════════════════════════ */
+@media (max-width: 409px) {
+  /* 内距：改 token，不动各处字面量 */
+  :root {
+    --sheet-gutter: var(--space-2); /* 16 → 8（压缩容忍下限，非设计标准值） */
+  }
+
+  .xb-th,
+  .xb-tr {
+    column-gap: var(--space-1); /* 8 → 4（设计稿 320 档） */
+  }
+
+  /* 表头 11 → 10；字距 .06em → .04em（nowrap 不变：仍不折行、不省略） */
+  .xb-th {
+    font-size: 10px;
+    letter-spacing: 0.04em;
+  }
+
+  /* 正文 13 → 11（`.xb-c--num` 不设 font-size，随父继承 ⇒ 航班号/时刻/船名/闸口一并降） */
+  .xb-c {
+    font-size: var(--text-2xs);
+  }
+
+  /* 状态列 12 → 11。必须显式写：基础档 `.xb-c--st` 是 12px，而现有
+     `@media (max-width:400px)` 只覆盖到 400 ⇒ 401–409 这一段会漏。
+     漏了会怎样：sea4 状态 80 装 12px 的 `預計 11:45 到達` = 83.36 ⇒ 溢 3.36。 */
+  .xb-c--st {
+    font-size: var(--text-2xs);
+  }
+
+  /* ── 五张表的轨道与 min-width（零赘肉：min-width === Σmin + gap和 + pad）── */
+  .tbl-air4 .xb-th,
+  .tbl-air4 .xb-tr {
+    grid-template-columns: 44px minmax(46px, 1fr) 40px minmax(112px, 1fr);
+  }
+  .tbl-air4 {
+    min-width: 270px; /* 242 + 12 + 16 */
+  }
+
+  .tbl-air5 .xb-th,
+  .tbl-air5 .xb-tr {
+    grid-template-columns: 44px minmax(46px, 1fr) 40px minmax(112px, 1fr) 32px;
+  }
+  .tbl-air5 {
+    min-width: 306px; /* 274 + 16 + 16 */
+  }
+
+  .tbl-sea3 .xb-th,
+  .tbl-sea3 .xb-tr {
+    grid-template-columns: minmax(59px, 1fr) 56px 46px 40px;
+  }
+  .tbl-sea3 {
+    min-width: 229px; /* 201 + 12 + 16 */
+  }
+
+  .tbl-sea5 .xb-th,
+  .tbl-sea5 .xb-tr {
+    grid-template-columns: minmax(59px, 1fr) 56px 46px 40px 56px 22px;
+  }
+  .tbl-sea5 {
+    min-width: 315px; /* 279 + 20 + 16 */
+  }
+
+  .tbl-sea4 .xb-th,
+  .tbl-sea4 .xb-tr {
+    grid-template-columns: minmax(59px, 1fr) 56px 46px 40px 80px;
+  }
+  .tbl-sea4 {
+    min-width: 313px; /* 281 + 16 + 16 */
+  }
+
+  /* 表头短名切换（补丁 §7.4）：只作用于配了短名的列（`.xb-th__c--short`），
+     其余列不受影响。基础隐藏 `.xb-th__short { display: none }` 在本块外（无媒体条件）。
+     ⚠️ 不另开第二个 409 断点块：同一断点只许一条块，避免两处条件漂移。 */
+  .xb-th__c--short .xb-th__full { display: none; }
+  .xb-th__c--short .xb-th__short { display: inline; }
+}
+.xb-th__short { display: none; }
+
+/* 表头吸附（70+ 行时唯一可靠的定位锚）。与小时分组无关：分组节点当年也不是 sticky。 */
+.xb-th--sticky {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* `.xb-hr` / `.xb-hr__c`（小时分组「08 時 / 3 班」）已于 2026-11-07 取消分组时删除。 */
+
+/* 「現在」游标（全屏唯一强调色横线） */
+.xb-now {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px var(--sheet-gutter);
+  color: var(--accent);
+}
+.xb-now__t {
+  font-size: var(--text-2xs);
+  font-weight: var(--fw-announce);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+.xb-now__l {
+  flex: 1;
+  height: 1px;
+  background: currentColor;
+}
+
+/* 板块切换（下划线 tab；44px 命中） */
+.xb-brd {
+  flex: none;
+  display: flex;
+  gap: var(--space-5);
+  padding: 0 var(--sheet-gutter);
+  border-bottom: 1px solid var(--border);
+}
+.xb-brd__t {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--text-md);
+  font-weight: var(--fw-emphasize);
+  letter-spacing: var(--tracking-title);
+  color: var(--muted);
+}
+.xb-brd__t:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-btn);
+}
+.xb-brd__t.is-on {
+  color: var(--fg);
+}
+.xb-brd__t.is-on::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+}
+.xb-brd__n {
+  font-size: var(--text-2xs);
+  font-weight: var(--fw-read);
+  color: var(--meta);
+  letter-spacing: 0.02em;
+}
+
+/* 链接行（「查看详细信息」：**站内**跳转，不是外链） */
+.xb-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 48px;
+  padding: 0 var(--sheet-gutter);
+  border-top: 1px solid var(--border);
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-emphasize);
+  letter-spacing: 0.01em;
+  text-decoration: none;
+  background: none;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  width: 100%;
+  font-family: inherit;
+  cursor: pointer;
+}
+.xb-link:hover {
+  background: var(--surface-2);
+}
+.xb-link:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.xb-link .mm-icon {
+  margin-left: auto;
+}
+
+/* 空态 / 骨架 / 错误 */
+.xb-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-9) var(--space-5);
+  text-align: center;
+}
+.xb-empty__ic {
+  color: var(--border-2);
+}
+.xb-empty__t {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--fw-emphasize);
+  color: var(--fg);
+  letter-spacing: var(--tracking-title);
+}
+.xb-empty__b {
+  margin: 0;
+  max-width: 30ch;
+  font-size: var(--text-sm);
+  color: var(--muted);
+  line-height: var(--leading-loose);
+}
+.xb-sk {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) 16px;
+}
+.xb-sk__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 32px;
+}
+.xb-sk__b {
+  height: 11px;
+  border-radius: 3px;
+  background: var(--surface-2);
+}
+.xb-err {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4) 16px;
+}
+.xb-err__t {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--danger);
+  font-weight: var(--fw-emphasize);
+}
+.xb-err__b {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+.xb-retry {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--fw-emphasize);
+  cursor: pointer;
+}
+.xb-retry:hover {
+  background: var(--accent-soft);
+}
+.xb-retry:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .xb-card,
+  .xb-sheet,
+  .xb-brd__t {
+    transition: none;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   需求 7 · 地图首页跨境地标（需求 7 / 2026-11-07）
+   ──────────────────────────────────────────────────────────────────────────
+   机场 1 + 码头 3 的圆点，以及点开后的卡片。**全部追加在文件末尾**，不插进任何
+   既有区块（表格区 `.tbl-*` 正在被别人重算轨道，插进去会让行号锚点漂移）。
+
+   与站点圆点的关系：**不复用** `.nav-map__station`（那是 11/13px 的站点规格，
+   受「站标只有一套规格」门禁保护）。地标是 14px + 更重的边，语义也不同
+   （`role="button"` + 「查看班次」），所以独立一套。
+   视觉语言仍对齐：同样「白描边 + 1px 深外圈」，只是尺寸与层级不同。
+   ══════════════════════════════════════════════════════════════════════════ */
+:root {
+  /* 地标圆点直径 —— **必须与 `xborder-pins.ts#XB_PIN_SIZE` 同值**（聚合阈值按它算，
+     两处不一致会导致"明明看着分开了却还聚合"）。改一处就要改两处。 */
+  --xb-pin-size: 14px;
+  /* 外圈深描边：与站点标同值（`--tqh-map-edge` 是同一颜色的历史 token），
+     单列一条是为了地标日后独立调深浅时不动站点 */
+  --xb-pin-edge: rgba(15, 23, 32, 0.42);
+}
+
+.nav-map__xbpin {
+  box-sizing: border-box;
+  width: var(--xb-pin-size);
+  height: var(--xb-pin-size);
+  border-radius: 50%;
+  /* 白描边与站点标同口径（1.5px）—— 白是允许的例外值 */
+  border: 1.5px solid #fff;
+  box-shadow: 0 0 0 1px var(--xb-pin-edge);
+  /* 地标要"能点"，但不要抢站点标的点击面积：cursor 由 AMap marker 容器承载 */
+  cursor: pointer;
+  /* 位置由 AMap 的 offset 定（Pixel(-7,-7)），这里不写 transform，避免双重偏移 */
+}
+/* 机场：主题强调色（青花蓝系）—— 与码头的区分靠**色相 + 图标语义**，不靠尺寸 */
+.nav-map__xbpin--air {
+  background: var(--accent);
+}
+/* 码头：次级表面色底 + 强调色描边（比机场"轻"一档，因为机场是更强的心智锚点） */
+.nav-map__xbpin--pier {
+  background: var(--surface);
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px var(--xb-pin-edge),
+    inset 0 0 0 2px var(--accent);
+}
+
+/* 聚合点：多一个圆形底盘 + 计数，尺寸随内容（比单点大，暗示"这里有两个"） */
+.nav-map__xbpin--cluster {
+  width: auto;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px var(--xb-pin-edge);
+}
+.nav-map__xbpin__count {
+  color: var(--accent-on);
+  font-size: 11px;
+  font-weight: var(--fw-announce);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+/* ── 卡片内容（挂在既有 `.nav-card-overlay` 里，与其他卡同层同宽）────────────
+   ★ 2026-11-07 修「卡片底部多出约 20px」：**本类不再自带任何容器视觉**
+   （白底 / 边框 / 圆角 / 阴影 / 内距 一律由 `.nav-card-overlay`（`:6527`）承担）。
+
+   病根 = 双层容器把内距叠了两份。实测量法：真浏览器 `getBoundingClientRect`
+   （DPR2，Chromium），取最后一个 `.nav-xborder-card__row` 的底边 → 可见卡底边：
+     card padding (12，≤360 时 8) + card border 1 + overlay padding 12 + overlay border 1
+     = **26px（390）/ 22px（320）**。修掉双层容器后两条都是 **13px**。
+
+   ★ 内距数值定案（2026-11-07 负责人裁定：**接受 13，不凑 14**）：
+     13 = overlay padding 12 + **1px 边框**（实测 `getComputedStyle(overlay).borderWidth` = 1px）。
+     §9.2 记的 14，按「12 padding + 2 边框」估算得来；实测边框只有 1px ⇒ 真实值是 13。
+     差这 1px **不修**：凑到 14 只有两条路——改共享的 `.nav-card-overlay`（波及站卡/车卡/
+     通琴号卡，不归本卡），或让本卡自带容器（**那正是刚治好的「卡中卡」复发路径**）。
+     一致性优先：本卡与全 app 其余浮层卡同一个内距预算，比孤立 14 更对。06 清单同步由负责人交办。
+
+   两层还同色（白）、同圆角（10px）、各带 1px 边，肉眼就是「卡中卡」，
+   多出来的那圈白边被读成"卡片下方空白"。
+
+   范式对齐：`.nav-card-overlay .nav-station-card`（`:6546`）早就是这么做的 ——
+   **内层不自带容器，只由 overlay 画一次**。本类此前反着来（既留 overlay 的内距，
+   自己又画一整套容器 + 再叠一份内距），是唯一的偏离点。
+
+   ⚠ 不要在本类里加回 padding / border / background / box-shadow 去"补"样式：
+   内距只有一个来源 = overlay。真要单独用在 overlay 之外时，另起一个显式修饰类，
+   不要复活本类（否则 20px 空白会原封不动回来）。
+
+   ★ 归属核实（2026-11-07，只读）：`XborderCard` **唯一**挂载点是
+   `NavShell.tsx:2403`，其外层 `:2399-2400` 是 `station || rv.selected || tqhStation ||
+   xbPinIds` 的条件渲染块，里面只有一个 `div.nav-card-overlay` —— 卡片出现的条件恰恰是
+   overlay 出现条件的子集 ⇒ **无条件在 overlay 内**，无 portal、无第二处渲染。
+   真浏览器实测（聚合态 + 单点态各一次）：`card.parentElement.className === "nav-card-overlay"`、
+   `overlayCount === 1`、卡片中心点 `elementFromPoint` 命中自身（`hitTest=true`）、
+   overlay 计算值 bg=rgb(255,255,255) / borderWidth=1px / radius=10px
+   ⇒ 容器视觉确实由 overlay 提供，本卡不会变成透明不可见。 */
+.nav-xborder-card__hd {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+}
+.nav-xborder-card__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 17px;
+  font-weight: var(--fw-announce);
+  letter-spacing: -0.01em;
+  color: var(--fg, var(--text, inherit));
+  /* 专名可能较长（「澳門國際機場 · 氹仔碼頭」）：**允许折行**，不省略 ——
+     标题被截断比多一行更糟（用户靠它确认点对了地方） */
+  overflow-wrap: anywhere;
+}
+.nav-xborder-card__close {
+  flex: none;
+  /* 触摸目标 ≥ 44×44（WCAG 2.5.5），视觉图标仍 20px */
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: -10px -10px -10px 0;
+  border: 0;
+  background: transparent;
+  color: var(--meta);
+  cursor: pointer;
+  border-radius: var(--radius-full);
+}
+.nav-xborder-card__close:hover {
+  color: var(--fg, var(--text, inherit));
+}
+.nav-xborder-card__sub {
+  margin: 2px 0 var(--space-3);
+  font-size: 12px;
+  color: var(--meta);
+}
+.nav-xborder-card__rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+}
+.nav-xborder-card__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  min-height: 44px;
+  padding: 6px var(--space-3);
+  border: var(--frame-w) solid var(--stroke);
+  border-radius: var(--radius-md, 10px);
+  background: var(--surface);
+  color: inherit;
+  text-decoration: none;
+  transition:
+    background-color var(--motion-fast, 150ms) var(--ease-standard, ease),
+    border-color var(--motion-fast, 150ms) var(--ease-standard, ease);
+}
+.nav-xborder-card__row:hover {
+  background: var(--surface-2);
+  border-color: var(--accent);
+}
+.nav-xborder-card__row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.nav-xborder-card__row-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg, var(--text, inherit));
+  overflow-wrap: anywhere;
+}
+.nav-xborder-card__row-sub {
+  font-size: 11px;
+  color: var(--meta);
+  letter-spacing: 0.01em;
+}
+.nav-xborder-card__row-action {
+  flex: none;
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 窄屏（≤360）：卡片本身由 overlay 的左右 16px 约束，这里只收紧标题字号。
+   **不新增断点参数**（`@media (max-width:360px)` 那一段归别人，别在这里另开一段）。
+   ⚠ 2026-11-07：原先这里还有一条 `.nav-xborder-card { padding: var(--space-2, 8px) }`，
+   随"卡片不再自带容器"一并删除 —— 留着它就是给内距开第二个来源，
+   320 下会把已经去掉的底部空白重新叠回 8px（实测 22px）。 */
+@media (max-width: 360px) {
+  .nav-xborder-card__title {
+    font-size: 15px;
   }
 }

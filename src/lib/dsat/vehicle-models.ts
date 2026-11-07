@@ -232,8 +232,15 @@ const SEGMENTS: readonly Segment[] = [
   },
 ];
 
-/** 车队编号拆成「字母前缀 + 数字」（`HE380` → `HE` / `380`）；不匹配返回 null */
-function parseCode(busCode: string): { prefix: string; num: number } | null {
+/**
+ * 车队编号拆成「字母前缀 + 数字」（`HE380` → `HE` / `380`）；不匹配返回 null。
+ *
+ * ★ 2026-11-07 导出（原为模块私有 `parseCode`）：`src/lib/vehicle/model-shared.ts`
+ *   需要用它区分 `unknown_code`（格式对、车不在库）与 `unparsable`（格式就拆不开）。
+ *   拆解口径必须**只有一份** —— 若那里另外写一条正则，两处对 `HE 380` / `he380`
+ *   的处理迟早分叉，而症状是"接口说车号解析不了，区段表却认得"。
+ */
+export function parseBusCode(busCode: string): { prefix: string; num: number } | null {
   const s = String(busCode ?? "")
     .trim()
     .toUpperCase()
@@ -250,7 +257,7 @@ function parseCode(busCode: string): { prefix: string; num: number } | null {
  * 取**完整字母段**再匹配，故 `YE01`/`ZE01` 不会被单字母 `E` 规则误判成澳巴。
  */
 export function companyOf(busCode: string): Company | null {
-  const p = parseCode(busCode);
+  const p = parseBusCode(busCode);
   if (!p) return null;
   switch (p.prefix) {
     case "HE": // 海格/苏州金龙主力车队
@@ -269,7 +276,7 @@ export function companyOf(busCode: string): Company | null {
 
 /** busCode → 型号标定；区段表查不到返回 null（**绝不猜**） */
 export function modelOf(busCode: string): VehicleModelInfo | null {
-  const p = parseCode(busCode);
+  const p = parseBusCode(busCode);
   if (!p) return null;
   for (const seg of SEGMENTS) {
     if (seg.prefix !== p.prefix) continue;

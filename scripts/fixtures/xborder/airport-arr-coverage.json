@@ -1,0 +1,586 @@
+[
+  {
+    "time": "06-11 09:35",
+    "airline": "JX",
+    "origin": "台中",
+    "flightNo": "JX329",
+    "status": "航班著陸 09:09",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 10:10",
+    "airline": "NX",
+    "origin": "台中",
+    "flightNo": "NX671",
+    "status": "航班著陸 09:52",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 10:25",
+    "airline": "NX",
+    "origin": "高雄",
+    "flightNo": "NX657",
+    "status": "航班著陸 10:16",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 10:35",
+    "airline": "JX",
+    "origin": "台北",
+    "flightNo": "JX201",
+    "status": "航班著陸 10:40",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 10:40",
+    "airline": "NX",
+    "origin": "貴陽",
+    "flightNo": "NX371",
+    "status": "航班著陸 10:28",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 10:50",
+    "airline": "9C",
+    "origin": "上海浦東",
+    "flightNo": "9C8875",
+    "status": "航班著陸 10:35",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 11:20",
+    "airline": "NX",
+    "origin": "杭州",
+    "flightNo": "NX221",
+    "status": "航班著陸 10:45",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 11:30",
+    "airline": "NX",
+    "origin": "首爾仁川",
+    "flightNo": "NX825",
+    "status": "航班著陸 11:01",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 11:50",
+    "airline": "MU",
+    "origin": "南京",
+    "flightNo": "MU9797",
+    "status": "航班著陸 11:33",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 11:55",
+    "airline": "BR",
+    "origin": "台北",
+    "flightNo": "BR801",
+    "status": "航班著陸 11:48",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:05",
+    "airline": "ZH",
+    "origin": "無錫",
+    "flightNo": "ZH9097",
+    "status": "航班著陸 11:43",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:10",
+    "airline": "NX",
+    "origin": "成都",
+    "flightNo": "NX385",
+    "status": "航班著陸 12:02",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:20",
+    "airline": "AK",
+    "origin": "吉隆坡",
+    "flightNo": "AK188",
+    "status": "航班著陸 11:58",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:25",
+    "airline": "FM",
+    "origin": "上海浦東",
+    "flightNo": "FM805",
+    "status": "航班著陸 13:04",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:30",
+    "airline": "NX",
+    "origin": "上海",
+    "flightNo": "NX111",
+    "status": "航班著陸 12:26",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:35",
+    "airline": "NX",
+    "origin": "台北",
+    "flightNo": "NX631",
+    "status": "航班著陸 12:10",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:40",
+    "airline": "FM",
+    "origin": "上海",
+    "flightNo": "FM817",
+    "status": "航班著陸 12:22",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 13:15",
+    "airline": "MU",
+    "origin": "南昌",
+    "flightNo": "MU865",
+    "status": "航班著陸 13:07",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 13:30",
+    "airline": "QH",
+    "origin": "峴港",
+    "flightNo": "QH9588",
+    "status": "航班著陸 13:51",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 13:40",
+    "airline": "MF",
+    "origin": "廈門",
+    "flightNo": "MF8681",
+    "status": "航班著陸 13:14",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 13:45",
+    "airline": "KE",
+    "origin": "首爾仁川",
+    "flightNo": "KE2015",
+    "status": "航班著陸 13:25",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 14:15",
+    "airline": "NX",
+    "origin": "台中",
+    "flightNo": "NX673",
+    "status": "航班著陸 13:40",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 14:20",
+    "airline": "7C",
+    "origin": "首爾仁川",
+    "flightNo": "7C6001",
+    "status": "航班著陸 13:35",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 14:50",
+    "airline": "VJ",
+    "origin": "峴港",
+    "flightNo": "VJ5880",
+    "status": "航班著陸 14:56",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 14:55",
+    "airline": "CZ",
+    "origin": "北京大興",
+    "flightNo": "CZ6081",
+    "status": "航班著陸 14:31",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 15:20",
+    "airline": "VU",
+    "origin": "峴港",
+    "flightNo": "VU8567",
+    "status": "航班著陸 15:28",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 15:30",
+    "airline": "MU",
+    "origin": "上海浦東",
+    "flightNo": "MU2007",
+    "status": "航班著陸 15:19",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 15:55",
+    "airline": "MU",
+    "origin": "無錫",
+    "flightNo": "MU2961",
+    "status": "航班著陸 15:51",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:00",
+    "airline": "CA",
+    "origin": "武漢",
+    "flightNo": "CA119",
+    "status": "航班著陸 16:06",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:05",
+    "airline": "NX",
+    "origin": "北京首都",
+    "flightNo": "NX005",
+    "status": "航班著陸 15:40",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:10",
+    "airline": "AK",
+    "origin": "吉隆坡",
+    "flightNo": "AK186",
+    "status": "航班取消",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:15",
+    "airline": "NX",
+    "origin": "高雄",
+    "flightNo": "NX667",
+    "status": "航班著陸 16:10",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:20",
+    "airline": "VJ",
+    "origin": "峴港",
+    "flightNo": "VJ5884",
+    "status": "航班著陸 18:25",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:30",
+    "airline": "MU",
+    "origin": "北京大興",
+    "flightNo": "MU2015",
+    "status": "航班著陸 16:01",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:35",
+    "airline": "NX",
+    "origin": "台北",
+    "flightNo": "NX611",
+    "status": "航班著陸 16:24",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:40",
+    "airline": "ZH",
+    "origin": "南京",
+    "flightNo": "ZH9089",
+    "status": "航班著陸 16:46",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:45",
+    "airline": "NX",
+    "origin": "上海",
+    "flightNo": "NX115",
+    "status": "航班著陸 16:30",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:00",
+    "airline": "VJ",
+    "origin": "芽莊",
+    "flightNo": "VJ5386",
+    "status": "航班著陸 18:37",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:05",
+    "airline": "NX",
+    "origin": "首爾仁川",
+    "flightNo": "NX821",
+    "status": "航班著陸 17:04",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:10",
+    "airline": "NX",
+    "origin": "大阪關西",
+    "flightNo": "NX855",
+    "status": "航班著陸 16:55",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:20",
+    "airline": "MF",
+    "origin": "杭州",
+    "flightNo": "MF8719",
+    "status": "航班著陸 17:01",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:25",
+    "airline": "FD",
+    "origin": "曼谷廊曼",
+    "flightNo": "FD764",
+    "status": "航班著陸 17:45",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:30",
+    "airline": "MF",
+    "origin": "福州",
+    "flightNo": "MF8671",
+    "status": "航班著陸 16:51",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:35",
+    "airline": "NX",
+    "origin": "曼谷",
+    "flightNo": "NX935",
+    "status": "航班著陸 17:32",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:40",
+    "airline": "NX",
+    "origin": "重慶",
+    "flightNo": "NX181",
+    "status": "航班著陸 17:35",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:50",
+    "airline": "TR",
+    "origin": "新加坡",
+    "flightNo": "TR904",
+    "status": "航班著陸 18:09",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:55",
+    "airline": "VZ",
+    "origin": "曼谷",
+    "flightNo": "VZ3732",
+    "status": "航班著陸 20:02",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:05",
+    "airline": "NX",
+    "origin": "杭州",
+    "flightNo": "NX225",
+    "status": "航班著陸 19:06",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:10",
+    "airline": "NX",
+    "origin": "成都",
+    "flightNo": "NX387",
+    "status": "航班著陸 18:12",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:25",
+    "airline": "BR",
+    "origin": "台北",
+    "flightNo": "BR805",
+    "status": "航班著陸 18:05",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:30",
+    "airline": "JX",
+    "origin": "台中",
+    "flightNo": "JX331",
+    "status": "航班著陸 18:21",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:40",
+    "airline": "BR",
+    "origin": "高雄",
+    "flightNo": "BR833",
+    "status": "航班著陸 18:30",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:55",
+    "airline": "MU",
+    "origin": "上海",
+    "flightNo": "MU2055",
+    "status": "航班著陸 18:17",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:00",
+    "airline": "NX",
+    "origin": "南京",
+    "flightNo": "NX127",
+    "status": "航班著陸 19:27",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:05",
+    "airline": "VU",
+    "origin": "河內",
+    "flightNo": "VU8501",
+    "status": "航班著陸 19:40",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:05",
+    "airline": "NX",
+    "origin": "峴港",
+    "flightNo": "NX977",
+    "status": "已啟航 預計到達 21:12",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:15",
+    "airline": "Z2",
+    "origin": "馬尼拉",
+    "flightNo": "Z2092",
+    "status": "航班著陸 19:34",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:20",
+    "airline": "MU",
+    "origin": "上海",
+    "flightNo": "MU239",
+    "status": "航班著陸 19:19",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:25",
+    "airline": "JX",
+    "origin": "台北",
+    "flightNo": "JX205",
+    "status": "航班著陸 19:10",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:40",
+    "airline": "QH",
+    "origin": "歸仁市",
+    "flightNo": "QH9586",
+    "status": "航班著陸 19:14",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:45",
+    "airline": "NX",
+    "origin": "上海浦東",
+    "flightNo": "NX117",
+    "status": "航班著陸 19:47",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:50",
+    "airline": "NX",
+    "origin": "北京首都",
+    "flightNo": "NX007",
+    "status": "航班著陸 19:36",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 20:05",
+    "airline": "NX",
+    "origin": "東京成田",
+    "flightNo": "NX861",
+    "status": "航班著陸 19:30",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 20:20",
+    "airline": "MU",
+    "origin": "上海浦東",
+    "flightNo": "MU9991",
+    "status": "航班著陸 20:07",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 21:05",
+    "airline": "SL",
+    "origin": "曼谷廊曼",
+    "flightNo": "SL370",
+    "status": "已啟航 預計到達 20:53",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 21:10",
+    "airline": "NX",
+    "origin": "新加坡",
+    "flightNo": "NX907",
+    "status": "已啟航 預計到達 21:55",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 21:25",
+    "airline": "5J",
+    "origin": "馬尼拉",
+    "flightNo": "5J362",
+    "status": "已啟航 預計到達 21:04",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 21:45",
+    "airline": "NX",
+    "origin": "廈門",
+    "flightNo": "NX131",
+    "status": "0",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 22:05",
+    "airline": "NX",
+    "origin": "台北",
+    "flightNo": "NX615",
+    "status": "0",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 22:55",
+    "airline": "NX",
+    "origin": "河內",
+    "flightNo": "NX949",
+    "status": "0",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 23:00",
+    "airline": "NX",
+    "origin": "峴港",
+    "flightNo": "NX985",
+    "status": "0",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 23:30",
+    "airline": "NX",
+    "origin": "曼谷",
+    "flightNo": "NX991",
+    "status": "0",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:35",
+    "airline": "KW",
+    "origin": "科威特",
+    "flightNo": "KW4001D",
+    "status": "0",
+    "date": "06-11-2026"
+  }
+]

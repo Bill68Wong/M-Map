@@ -44,6 +44,11 @@ import {
   IconClock,
   IconCurrentLocation,
   IconDownload,
+  /* ★ 2026-11-07（跨境交通）：港口分组 / 卡片 + 机场分组 / 卡片 —— Tabler 同库 3.47.0 */
+  IconFerry,
+  IconPlane,
+  IconWorld,
+  IconWorldFilled,
   IconGauge,
   IconHome,
   IconHomeFilled,
@@ -195,6 +200,23 @@ const REGISTRY: Record<string, any> = {
   walkArrive: IconFlag,
   /** 偏航警示（设计 §2.2 `alertTriangle`） */
   alertTriangle: IconAlertTriangle,
+  /* ── ★ 2026-11-07（跨境交通 · 设计稿 05 §7.2 图标清单）───────────────────
+     4 个语义名，全部 Tabler **同库 3.47.0**（不混库）、stroke=2 方头方角：
+       · `crossBorderIcon` / `crossBorderFilledIcon`：底导第 4 个 tab（地球；实心变体 =
+         选中态的第二通道，与 home/bookmark/book 的「切实心」惯例一致）；
+       · `ferryIcon`：客运港口分组头 + 三张码头卡（內港 / 外港 / 氹仔 同形 ——
+         设计稿 §7.2 明确「三码头靠 11px 地名标签区分，图形级区分在 16/20px 不可行」）；
+       · `planeIcon`：机场分组头 + 机场卡 + 午夜空态。
+     ⚠️ 设计稿**刻意不用** `IconPlaneDeparture`：它由「机身弧 + 跑道横线」两条路径组成，
+        20px/2px 下整体读成船体，与 `IconFerry`（上舱 + 下横线）几乎同形（实测放大 4 倍
+        仍无法区分）。同理不用 `IconMoonStars` / `IconAlertTriangle` 做空态（两者含
+        **零长度段**，在 `strokeLinecap="butt"` 下点/收尾不渲染，见 `.verify/audit-icon-dots.mjs`）。
+     ⚠️ 这 4 个名字若拼错，`Icon` 会**静默 `return null`**（不报错、只是没有图标）
+        ⇒ 断言脚本 `scripts/check-xborder-ui.tsx` 逐名渲染并断言产出的 `<svg>` 非空。 */
+  crossBorderIcon: IconWorld,
+  crossBorderFilledIcon: IconWorldFilled,
+  ferryIcon: IconFerry,
+  planeIcon: IconPlane,
 };
 
 export type IconName = keyof typeof REGISTRY;

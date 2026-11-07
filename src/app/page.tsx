@@ -55,12 +55,36 @@ export default async function Home({
   const initialFrom: NavPoint | null = parsed?.origin ?? null;
   let initialTo: NavPoint | null = parsed?.dest ?? null;
   /**
+   * 单值取名（`?a=1&a=2` 取首个）。
+   *
+   * ⚠️ 原先这行只声明在下面 `if (!initialTo)` 的**块作用域**里；需求 4 要在块外读 `board`
+   *    ⇒ 必须提到块外。不要改回块内（块内声明在块外不存在 ⇒ `tsc` 直接报
+   *    `Cannot find name 'first'`，而不是运行期才炸）。
+   */
+  const first = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) ?? "";
+  /**
+   * ★ 需求 4：`/cross-border` 的「通琴号」卡用 `/?board=tqh&no=A1` 指向首页的通琴号板块。
+   *
+   * ── 改前为什么"点了没反应"──────────────────────────────────────────────
+   *   本页只解析 `from` / `to*`（`parseNavParams` + 下面单独解「只有终点」的形态）
+   *   ⇒ `board` / `no` 一路无人读取，被静默丢弃。
+   *
+   * ── 口径（负责人裁定，逐条落地）──────────────────────────────────────
+   *   · `board` **严格相等**白名单：只认 `"tqh"`；未知值 / 空值一律当没传 ——
+   *     不做前缀匹配、不做包含匹配（与 `/cross-border` 的 `from` 同口径）。
+   *   · `no` **完全不接**：落点只到「公共交通路线 → 通琴号板块」，
+   *     **不自动选中/弹出 A1 站序面板**。故此处既不读 `no`，也不向 `NavShell` 透传
+   *     —— 连 `const _no = …` 这种占位都不留（`eslint.config.mjs` 的
+   *     `no-unused-vars` 只豁免 `^_` 参数、不豁免变量，留着会让 lint 红）。
+   *   · 兜底由 `RouteLinesSheet` 自己的 `defaultBoard = "bus"` 承担。
+   */
+  const tqhBoard = first(sp.board) === "tqh";
+  /**
    * ★ v3.3.0（AC-116 · 收藏地点回放）：**仅 `to…`** 的 URL（起点留空 ⇒ 首页默认「我的位置」）。
    * `parseNavParams` 要求 from/to 同时存在 ⇒ 这里单独解析「只有终点」的形态，
    * 让「点地点卡 = 首页式选点（目的地已设、不自动规划）」成立。
    */
   if (!initialTo) {
-    const first = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) ?? "";
     const toLng = Number(first(sp.toLng));
     const toLat = Number(first(sp.toLat));
     if (Number.isFinite(toLng) && Number.isFinite(toLat) && toLng !== 0 && toLat !== 0) {
@@ -73,7 +97,14 @@ export default async function Home({
 
   return (
     <>
-      <NavShell jsKey={jsKey} mapStyleId={mapStyleId} colors={colors} initialFrom={initialFrom} initialTo={initialTo} />
+      <NavShell
+        jsKey={jsKey}
+        mapStyleId={mapStyleId}
+        colors={colors}
+        initialFrom={initialFrom}
+        initialTo={initialTo}
+        initialBoard={tqhBoard}
+      />
       {/* ★ v2.10.0：底部合规条**已从地图页移除**（内容迁至 `/help`），
           既解决「选线路弹窗被底部遮挡」，也避免与底导重复。
           `/nav`、`/nav/detail`、`/favorites` 仍各自保留合规条（未受影响）。 */}

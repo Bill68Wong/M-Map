@@ -1,0 +1,70 @@
+<!--
+  真实快照（非构造）。来源：https://www.marine.gov.mo/arrival.aspx?local=TP&port=ALL
+  抓取：2026-11-06 23:2x（澳门时间）· HTTP 200 · 整页 179930 字节
+  本文件内容 = 该页航班表区块（class=item_table 的那张表）**逐字节原样**，
+  上方这段说明与下方结束标记是本仓库加的注释（解析器只认 table 区块，不受影响）。
+  用途：`scripts/test-xborder-parse.ts` 断言"解析器能吃真实结构"，
+        以及 `scripts/test-xborder-compliance.ts` 的字符级等值断言。
+  ⚠️ 这份快照同时是「页面跨午夜」的证据：23 点档的页面里出现了次日 07:30/08:30/09:00
+     的「待航」行（见 parse.ts 文件头的换日规则）。
+-->
+<table class='item_table table-striped'>
+<tr><th>航班</th><th>啟航港</th><th>狀態</th><th>船名(船種)</th><th>船務公司</th></tr>
+<tr>
+<td>20:30</td>
+<td>香港</td>
+<td  style='color:fuchsia;' >21:30 到達</td>
+<td>倫敦人名匯<br>雙體高速船</td>
+<td>金光飛航<br><img width=70 src='images/ctj80.jpg'></td>
+</tr>
+<tr>
+<td>21:00</td>
+<td>深圳蛇口</td>
+<td  style='color:fuchsia;' >22:06 到達</td>
+<td>新迅隆壹號<br>雙體船</td>
+<td>粵通船務<br><img width=70 src='images/yts80.jpg'></td>
+</tr>
+<tr>
+<td>21:30</td>
+<td>香港</td>
+<td  style='color:fuchsia;' >22:31 到達</td>
+<td>巴黎人<br>雙體高速船</td>
+<td>金光飛航<br><img width=70 src='images/ctj80.jpg'></td>
+</tr>
+<tr>
+<td>22:30</td>
+<td>香港</td>
+<td  style='color:fuchsia;' >23:33 到達</td>
+<td>四季名店<br>雙體高速船</td>
+<td>金光飛航<br><img width=70 src='images/ctj80.jpg'></td>
+</tr>
+<tr>
+<td>07:30</td>
+<td>香港</td>
+<td >待航</td>
+<td><br></td>
+<td>金光飛航<br><img width=70 src='images/ctj80.jpg'></td>
+</tr>
+<tr>
+<td>08:00</td>
+<td>深圳蛇口</td>
+<td >待航</td>
+<td><br></td>
+<td>粵通船務<br><img width=70 src='images/yts80.jpg'></td>
+</tr>
+<tr>
+<td>08:30</td>
+<td>香港</td>
+<td >待航</td>
+<td><br></td>
+<td>金光飛航<br><img width=70 src='images/ctj80.jpg'></td>
+</tr>
+<tr>
+<td>09:00</td>
+<td>深圳蛇口</td>
+<td >待航</td>
+<td><br></td>
+<td>粵通船務<br><img width=70 src='images/yts80.jpg'></td>
+</tr>
+</table>
+<!-- fixture end -->
