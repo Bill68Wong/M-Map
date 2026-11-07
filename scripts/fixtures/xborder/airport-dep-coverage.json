@@ -1,0 +1,650 @@
+[
+  {
+    "time": "06-11 08:00",
+    "airline": "NX",
+    "destination": "台北",
+    "flightNo": "NX632",
+    "gate": "16",
+    "status": "已啟航 08:20",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 08:15",
+    "airline": "NX",
+    "destination": "大阪關西",
+    "flightNo": "NX856",
+    "gate": "8",
+    "status": "已啟航 08:24",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 08:25",
+    "airline": "NX",
+    "destination": "首爾仁川",
+    "flightNo": "NX822",
+    "gate": "13",
+    "status": "已啟航 08:31",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 09:30",
+    "airline": "NX",
+    "destination": "東京成田",
+    "flightNo": "NX862",
+    "gate": "7",
+    "status": "已啟航 09:40",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 09:50",
+    "airline": "NX",
+    "destination": "台中",
+    "flightNo": "NX672",
+    "gate": "12",
+    "status": "已啟航 09:53",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 10:20",
+    "airline": "NX",
+    "destination": "曼谷",
+    "flightNo": "NX936",
+    "gate": "6",
+    "status": "已啟航 10:23",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 10:25",
+    "airline": "NX",
+    "destination": "上海",
+    "flightNo": "NX112",
+    "gate": "9",
+    "status": "已啟航 10:42",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 10:35",
+    "airline": "JX",
+    "destination": "台中",
+    "flightNo": "JX330",
+    "gate": "8",
+    "status": "已啟航 10:36",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 11:40",
+    "airline": "JX",
+    "destination": "台北",
+    "flightNo": "JX202",
+    "gate": "10",
+    "status": "已啟航 12:12",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 11:45",
+    "airline": "NX",
+    "destination": "重慶",
+    "flightNo": "NX182",
+    "gate": "7",
+    "status": "已啟航 11:50",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 11:50",
+    "airline": "9C",
+    "destination": "上海浦東",
+    "flightNo": "9C8876",
+    "gate": "6",
+    "status": "已啟航 11:52",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 11:55",
+    "airline": "NX",
+    "destination": "北京首都",
+    "flightNo": "NX006",
+    "gate": "15",
+    "status": "已啟航 12:04",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:00",
+    "airline": "NX",
+    "destination": "台北",
+    "flightNo": "NX612",
+    "gate": "12",
+    "status": "已啟航 12:17",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:05",
+    "airline": "NX",
+    "destination": "新加坡",
+    "flightNo": "NX908",
+    "gate": "13",
+    "status": "已啟航 12:28",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:10",
+    "airline": "NX",
+    "destination": "杭州",
+    "flightNo": "NX222",
+    "gate": "15",
+    "status": "已啟航 13:41",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:20",
+    "airline": "NX",
+    "destination": "成都",
+    "flightNo": "NX388",
+    "gate": "8",
+    "status": "已啟航 12:39",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:25",
+    "airline": "NX",
+    "destination": "高雄",
+    "flightNo": "NX668",
+    "gate": "9",
+    "status": "已啟航 12:32",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:50",
+    "airline": "MU",
+    "destination": "南京",
+    "flightNo": "MU9798",
+    "gate": "1",
+    "status": "已啟航 13:08",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 12:55",
+    "airline": "NX",
+    "destination": "南京",
+    "flightNo": "NX128",
+    "gate": "10",
+    "status": "已啟航 13:27",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 13:00",
+    "airline": "AK",
+    "destination": "吉隆坡",
+    "flightNo": "AK189",
+    "gate": "12",
+    "status": "已啟航 13:21",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 13:05",
+    "airline": "ZH",
+    "destination": "無錫",
+    "flightNo": "ZH9098",
+    "gate": "16",
+    "status": "已啟航 13:16",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 13:15",
+    "airline": "BR",
+    "destination": "台北",
+    "flightNo": "BR802",
+    "gate": "7",
+    "status": "已啟航 13:36",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 13:20",
+    "airline": "NX",
+    "destination": "上海浦東",
+    "flightNo": "NX116",
+    "gate": "13",
+    "status": "已啟航 13:46",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 13:25",
+    "airline": "FM",
+    "destination": "上海浦東",
+    "flightNo": "FM806",
+    "gate": "6",
+    "status": "已啟航 14:09",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 13:40",
+    "airline": "FM",
+    "destination": "上海",
+    "flightNo": "FM818",
+    "gate": "9",
+    "status": "已啟航 13:52",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 14:15",
+    "airline": "MU",
+    "destination": "南昌",
+    "flightNo": "MU866",
+    "gate": "18",
+    "status": "已啟航 14:19",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 14:25",
+    "airline": "QH",
+    "destination": "歸仁市",
+    "flightNo": "QH9585",
+    "gate": "8",
+    "status": "已啟航 14:44",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 14:35",
+    "airline": "NX",
+    "destination": "峴港",
+    "flightNo": "NX978",
+    "gate": "15",
+    "status": "已啟航 17:10",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 14:40",
+    "airline": "MF",
+    "destination": "廈門",
+    "flightNo": "MF8682",
+    "gate": "12",
+    "status": "已啟航 14:38",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 14:55",
+    "airline": "KE",
+    "destination": "首爾仁川",
+    "flightNo": "KE2016",
+    "gate": "7",
+    "status": "已啟航 14:57",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 15:20",
+    "airline": "7C",
+    "destination": "首爾仁川",
+    "flightNo": "7C6002",
+    "gate": "10",
+    "status": "已啟航 15:41",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 15:50",
+    "airline": "VJ",
+    "destination": "峴港",
+    "flightNo": "VJ5881",
+    "gate": "6",
+    "status": "已啟航 16:11",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 15:55",
+    "airline": "CZ",
+    "destination": "北京大興",
+    "flightNo": "CZ6082",
+    "gate": "13",
+    "status": "已啟航 15:54",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:15",
+    "airline": "VU",
+    "destination": "峴港",
+    "flightNo": "VU8568",
+    "gate": "7",
+    "status": "已啟航 16:35",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:30",
+    "airline": "MU",
+    "destination": "上海浦東",
+    "flightNo": "MU2008",
+    "gate": "8",
+    "status": "已啟航 16:42",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:50",
+    "airline": "NX",
+    "destination": "曼谷",
+    "flightNo": "NX992",
+    "gate": "16",
+    "status": "已啟航 17:23",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 16:55",
+    "airline": "MU",
+    "destination": "無錫",
+    "flightNo": "MU2962",
+    "gate": "9",
+    "status": "已啟航 17:15",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:00",
+    "airline": "CA",
+    "destination": "武漢",
+    "flightNo": "CA120",
+    "gate": "10",
+    "status": "已啟航 17:07",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:05",
+    "airline": "AK",
+    "destination": "吉隆坡",
+    "flightNo": "AK187",
+    "gate": "0",
+    "status": "已取消",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:15",
+    "airline": "NX",
+    "destination": "杭州",
+    "flightNo": "NX226",
+    "gate": "6",
+    "status": "已啟航 17:46",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:20",
+    "airline": "VJ",
+    "destination": "峴港",
+    "flightNo": "VJ5885",
+    "gate": "1",
+    "status": "已啟航 19:58",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:25",
+    "airline": "NX",
+    "destination": "台北",
+    "flightNo": "NX616",
+    "gate": "13",
+    "status": "已啟航 17:29",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:30",
+    "airline": "MU",
+    "destination": "北京大興",
+    "flightNo": "MU2016",
+    "gate": "12",
+    "status": "已啟航 17:37",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:40",
+    "airline": "ZH",
+    "destination": "南京",
+    "flightNo": "ZH9090",
+    "gate": "16",
+    "status": "已啟航 18:06",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:45",
+    "airline": "NX",
+    "destination": "廈門",
+    "flightNo": "NX132",
+    "gate": "9",
+    "status": "已啟航 18:19",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:50",
+    "airline": "NX",
+    "destination": "河內",
+    "flightNo": "NX950",
+    "gate": "7",
+    "status": "已啟航 18:00",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 17:55",
+    "airline": "FD",
+    "destination": "曼谷廊曼",
+    "flightNo": "FD765",
+    "gate": "10",
+    "status": "已啟航 18:43",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:00",
+    "airline": "VJ",
+    "destination": "芽莊",
+    "flightNo": "VJ5387",
+    "gate": "5",
+    "status": "已啟航 20:09",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:05",
+    "airline": "NX",
+    "destination": "貴陽",
+    "flightNo": "NX372",
+    "gate": "7",
+    "status": "已啟航 19:16",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:10",
+    "airline": "NX",
+    "destination": "首爾仁川",
+    "flightNo": "NX826",
+    "gate": "8",
+    "status": "已啟航 18:33",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:15",
+    "airline": "NX",
+    "destination": "峴港",
+    "flightNo": "NX986",
+    "gate": "13",
+    "status": "已啟航 18:59",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:20",
+    "airline": "MF",
+    "destination": "杭州",
+    "flightNo": "MF8720",
+    "gate": "18",
+    "status": "已啟航 18:27",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:30",
+    "airline": "MF",
+    "destination": "福州",
+    "flightNo": "MF8672",
+    "gate": "1",
+    "status": "已啟航 18:39",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 18:50",
+    "airline": "TR",
+    "destination": "新加坡",
+    "flightNo": "TR905",
+    "gate": "16",
+    "status": "已啟航 20:04",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:00",
+    "airline": "VZ",
+    "destination": "曼谷",
+    "flightNo": "VZ3733",
+    "gate": "18",
+    "status": "航班延誤                      \u0000d檯已關閉",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:10",
+    "airline": "NX",
+    "destination": "上海",
+    "flightNo": "NX120",
+    "gate": "6",
+    "status": "已啟航 19:21",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:30",
+    "airline": "JX",
+    "destination": "台中",
+    "flightNo": "JX332",
+    "gate": "9",
+    "status": "已啟航 19:43",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:45",
+    "airline": "NX",
+    "destination": "北京首都",
+    "flightNo": "NX010",
+    "gate": "6",
+    "status": "停止登機",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:50",
+    "airline": "VU",
+    "destination": "河內",
+    "flightNo": "VU8502",
+    "gate": "13",
+    "status": "停止登機",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 19:55",
+    "airline": "MU",
+    "destination": "上海",
+    "flightNo": "MU2056",
+    "gate": "15",
+    "status": "已啟航 20:14",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 20:05",
+    "airline": "Z2",
+    "destination": "馬尼拉",
+    "flightNo": "Z2093",
+    "gate": "1",
+    "status": "停止登機",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 20:10",
+    "airline": "BR",
+    "destination": "高雄",
+    "flightNo": "BR834",
+    "gate": "16",
+    "status": "已啟航 20:26",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 20:15",
+    "airline": "BR",
+    "destination": "台北",
+    "flightNo": "BR806",
+    "gate": "12",
+    "status": "停止登機",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 20:25",
+    "airline": "NX",
+    "destination": "台中",
+    "flightNo": "NX674",
+    "gate": "7",
+    "status": "停止登機",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 20:35",
+    "airline": "JX",
+    "destination": "台北",
+    "flightNo": "JX206",
+    "gate": "8",
+    "status": "停止登機",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 20:40",
+    "airline": "QH",
+    "destination": "峴港",
+    "flightNo": "QH9589",
+    "gate": "18",
+    "status": "停止登機",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 20:45",
+    "airline": "MU",
+    "destination": "上海",
+    "flightNo": "MU240",
+    "gate": "10",
+    "status": "停止登機",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 21:25",
+    "airline": "NX",
+    "destination": "高雄",
+    "flightNo": "NX658",
+    "gate": "1",
+    "status": "櫃檯 C1-C14 已開放",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 21:40",
+    "airline": "MU",
+    "destination": "上海浦東",
+    "flightNo": "MU9992",
+    "gate": "9",
+    "status": "櫃檯 B3-B9 已開放",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 22:00",
+    "airline": "NX",
+    "destination": "成都",
+    "flightNo": "NX386",
+    "gate": "7",
+    "status": "航班延誤至 22:45                    櫃檯 C1-D6 已開放",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 22:05",
+    "airline": "SL",
+    "destination": "曼谷廊曼",
+    "flightNo": "SL371",
+    "gate": "10",
+    "status": "櫃檯 D9-D11 已開放",
+    "date": "06-11-2026"
+  },
+  {
+    "time": "06-11 22:25",
+    "airline": "5J",
+    "destination": "馬尼拉",
+    "flightNo": "5J363",
+    "gate": "12",
+    "status": "櫃檯 A10-A12 已開放",
+    "date": "06-11-2026"
+  }
+]

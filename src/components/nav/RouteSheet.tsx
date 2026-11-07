@@ -169,6 +169,32 @@ export default function RouteSheet({
   const dFirst = detail?.card.rides[0] ?? null;
   const dTrackStops = dStrips?.[dLegIdx]?.stops ?? [];
   /**
+   * ★ 修复批 #7 转交项（fe-plate）：底栏**车队编号**（DSAT `busCode`，如 `HE247`）。
+   *
+   * ── 来源链路 ────────────────────────────────────────────────────────────
+   *   `/api/route-vehicles` 的 `busCode`
+   *     → `useRideTracking` 的 `mapVehicles`（**接口原样**的 `VehicleLite[]`，含 `busCode`）
+   *     → 本处按 `plate` 精确配对
+   *     → `NavTrackBar` 的 `busCode` prop（渲染成车牌右侧的 `.vcode` 角标）。
+   *   全程零新增请求、零新增字段：`VehicleLite.busCode` 本就存在（`VehicleMarker.tsx:49`）。
+   *
+   * ── 为什么必须按 `plate` 配对，而不是取 `mapVehicles[0].busCode` ──────────
+   *   `plate === null` 时 `mapVehicles` 是**本线路全部在途车**（无牌会话的既定行为，
+   *   见 `useRideTracking` 的 `mapVehicles` 注释）⇒ 取首车会把**别台车**的编号贴到
+   *   无牌状态行上：数字看着合理、归属却是错的（静默错误，比不显示更糟）。
+   *
+   * ── 本帧找不到该车 ⇒ `null`（不渲染），**不缓存上一帧的值** ────────────────
+   *   车牌是**锁定态**（会话级），车号是「本帧这台车是谁」的证据：车丢了就该消失，
+   *   否则会出现「车牌还在、车号停在 3 分钟前那台车」的僵尸标识。
+   *   ⚠️ 语义仍是「整个键可能不存在」⇒ 消费方（`NavTrackBar`）用 `busCode && …` 判断，
+   *      本处 `?? null` 只做归一化，不改变判据。
+   */
+  const dBusCode = useMemo(() => {
+    const p = dTrack?.plate;
+    if (!p) return null;
+    return dTrack?.mapVehicles.find((v) => v.plate === p)?.busCode ?? null;
+  }, [dTrack?.plate, dTrack?.mapVehicles]);
+  /**
    * ★ 2026-11-06（R5 / R7）：线路名一律走**唯一文案出口** `lineNameOf()`。
    *   ⚠️ 旧写法是「`轻轨 ` + 线号」与「线号 + ` 路`」两串**字符串拼接**（v3.1.0 `0e50f81`
    *   建本文件时抄回的弃用形态：带「路」字 + 简体线名 + 「轻轨」前缀）⇒ 同一条轻轨线在全站
@@ -283,6 +309,8 @@ export default function RouteSheet({
           ""
         }
         plate={dTrack.plate}
+        /* ★ 修复批 #7：车号（来源/配对纪律见上方 `dBusCode`） */
+        busCode={dBusCode}
         alarm={dTrack.alarm}
         lrt={dLrt}
         boardDetect={dTrack.boardDetect}

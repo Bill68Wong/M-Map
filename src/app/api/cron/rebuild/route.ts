@@ -29,6 +29,8 @@
  * 幂等：可重复调用。
  */
 import { NextRequest, NextResponse } from "next/server";
+import { cleanupXborder } from "@/lib/cross-border/store-write";
+import { addDays, macauDate } from "@/lib/cross-border/time";
 import { getPool } from "@/lib/db";
 import { rebuildSegmentStats } from "@/lib/rebuild/segment-stats";
 import { trimSegmentSampleWindow } from "@/lib/rebuild/segment-samples";
@@ -70,10 +72,7 @@ function authorized(req: NextRequest): boolean {
 }
 
 /** 跑一个重算步骤，吞掉异常转为 ok=false（不中断另一步骤） */
-async function step(
-  name: string,
-  fn: () => Promise<Record<string, unknown>>,
-): Promise<StepResult> {
+async function step(name: string, fn: () => Promise<Record<string, unknown>>): Promise<StepResult> {
   const t0 = Date.now();
   try {
     const summary = await fn();
@@ -150,6 +149,21 @@ async function handle(req: NextRequest) {
           inserted: r.inserted,
           totalSamples: r.totalSamples,
         };
+      }),
+    );
+
+    // v3.8.0 第四步：跨境交通两张表的保留窗口清理（`xborder_flights` / `xborder_sailings`）。
+    //   保留 `sched_date >= 澳门当日 - 2`：需求只显示当日，留 2 天是为了排查
+    //   "昨天为什么是空表"。**复用本 cron 槽位**——Hobby 每个 job 每天只能触发一次，
+    //   为此新增一个 cron 只会多一个失败点，零收益（契约 §1.7）。
+    //   ⚠️ 边界用**澳门日期**算，不用 SQL 的 `current_date`：Supabase 会话时区是 UTC，
+    //      在澳门 00:00–08:00 之间 `current_date` 会比澳门日期早一天（详见 store-write.ts）。
+    results.push(
+      await step("xborder_cleanup", async () => {
+        const before = addDays(macauDate(), -2);
+        if (!before) throw new Error("澳门日期计算失败");
+        const r = await cleanupXborder(before, pool);
+        return { before, flights: r.flights, sailings: r.sailings };
       }),
     );
 

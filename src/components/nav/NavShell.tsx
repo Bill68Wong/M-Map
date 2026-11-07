@@ -161,6 +161,7 @@ import type { RecommendCard } from "@/lib/recommend/types";
 import type { NavPoint } from "@/lib/nav/types";
 /** ★ 2026-11-06（#5a）：站序接口响应类型（纯 type，无 pg 依赖） */
 import type { RouteStopsOk, RouteStopsResp } from "@/lib/line/line-shared";
+import XborderCard from "@/components/map/XborderCard";
 
 const MY_LOCATION = "我的位置";
 /**
@@ -190,6 +191,14 @@ export interface NavShellProps {
   initialFrom?: NavPoint | null;
   /** 由「地点对收藏」带入的目的地 */
   initialTo?: NavPoint | null;
+  /**
+   * ★ 需求 4：URL `?board=tqh` ⇒ 首帧就打开「公共交通路线」弹窗并落在**通琴号板块**。
+   *
+   * ⚠️ 只做"落到板块"这一件事，**不自动选中任何班次**（不弹 A1 站序面板）。
+   *   配套：`?no=A1` 这个参数**首页侧完全不接**（见 `page.tsx` 的口径注释）——
+   *   调用方那个 `no` 是历史遗留，不要为了"物尽其用"在这里复活它。
+   */
+  initialBoard?: boolean;
 }
 
 export default function NavShell({
@@ -198,6 +207,7 @@ export default function NavShell({
   colors = {},
   initialFrom = null,
   initialTo = null,
+  initialBoard = false,
 }: NavShellProps) {
   /** 定位点（GCJ-02）；null = 尚未定位/定位失败 */
   const [userPos, setUserPos] = useState<{ lng: number; lat: number } | null>(null);
@@ -221,6 +231,13 @@ export default function NavShell({
   const [from, setFrom] = useState<NavPoint | null>(initialFrom);
   const [to, setTo] = useState<NavPoint | null>(initialTo);
   const [station, setStation] = useState<StationCardStation | null>(null);
+  /**
+   * ★ 需求 7：跨境地标小窗的选中组（机场 / 码头）。
+   * `null` = 没开；`[id]` = 单点；`[idA, idB]` = 聚合点两行。
+   * 与 `station` / `tqhStation` **互斥**：三者共用 `.nav-card-overlay`，
+   * 同一时刻只应有一张卡（点地标时由 `onXborderPinClick` 顺手清掉另两个）。
+   */
+  const [xbPinIds, setXbPinIds] = useState<string[] | null>(null);
 
   /** 底层舞台（带 initialTo 时直接进「半屏可出发」= 与旧版一致） */
   /**
@@ -260,7 +277,15 @@ export default function NavShell({
   /**
    * 路线查看模式（选线路看实时车辆）；`picked` 非空 ⇒ 地图画该线 + 底部主题色标签。
    */
-  const [lineSheet, setLineSheet] = useState(false);
+  /**
+   * ★ 需求 4：弹窗**在不在 DOM** 的开关。`?board=tqh` ⇒ 首帧即为 `true`。
+   *
+   * 为什么只改初值、不新增第二套状态：`RouteLinesSheet` 的 `board` 是它自己的
+   * `useState(defaultBoard)`（`RouteLinesSheet.tsx:65`）⇒ 只要本开关初始为真，
+   * 弹窗首帧就在，且带着下面传下去的 `defaultBoard` 直接落在通琴号板块。
+   * 用户之后手动开关弹窗走既有逻辑，不受 URL 影响（有意如此，`board` 不是"我在看哪一屏"）。
+   */
+  const [lineSheet, setLineSheet] = useState(Boolean(initialBoard));
   const rv = useRouteVehicles();
   const favs = useCombos();
 
@@ -1849,6 +1874,8 @@ export default function NavShell({
   const onMapClick = useCallback(() => {
     setStation(null);
     setTqhStation(null);
+    /* ★ 需求 7：点地图空白处也收起地标卡（与另两张卡同一口径） */
+    setXbPinIds(null);
   }, []);
 
   /** 车辆点击：打开车辆卡 + 收起面板（导航态不清面板） */
@@ -2220,6 +2247,19 @@ export default function NavShell({
           onLocate={onLocate}
           onStationClick={onStationClick}
           onMapClick={onMapClick}
+          /**
+           * ★ 需求 7：跨境地标圆点。
+           *   · `!navActive`：**导航 / 步行态不画** —— 那时地图要装路线与转向，
+           *     地标属于"看地图找机场"的场景，混进导航只会增加误点；
+           *   · 点地标时先清掉另两张卡：三者共用 `.nav-card-overlay`，不清就是两张卡叠着。
+           */
+          showXborderPins={!navActive}
+          onXborderPinClick={(ids) => {
+            setStation(null);
+            setTqhStation(null);
+            rv.closeVehicle();
+            setXbPinIds(ids);
+          }}
           /* ★ v2.10.0：路线查看模式 + 实时车辆；★ 2026-09-23：detail pane 打开时让位给总览 */
           routeLine={detailActive ? null : rv.picked}
           onRouteDirs={rv.reportDirs}
@@ -2356,8 +2396,11 @@ export default function NavShell({
 
       {/* ★ 卡片浮层（车卡/站卡）—— 挂在 wrap **之外**，`.nav-card-overlay`（fixed z90）
           ⇒ 面板打开时点地图带上的车/站，卡片不被面板（z70）压住。 */}
-      {(station || rv.selected || tqhStation) && (
+      {(station || rv.selected || tqhStation || xbPinIds) && (
         <div className="nav-card-overlay">
+          {/* ★ 需求 7：跨境地标卡（机场/码头；聚合点为两行链接）。
+              放在最前：点地标时上面三个状态已被清空，实际同屏只有它一张。 */}
+          {xbPinIds && <XborderCard ids={xbPinIds} onClose={() => setXbPinIds(null)} />}
           {station && (
             <StationCard
               station={station}
@@ -2494,7 +2537,11 @@ export default function NavShell({
           onPickTrip={pickTqhTrip}
           activeTripCode={tqhTrip?.trip_code ?? null}
           /* 已在地图上查看某班次时再打开弹窗 ⇒ 直接落回通琴号板块（不用重找标号） */
-          defaultBoard={tqhTrip ? "tqh" : "bus"}
+          /**
+           * ★ 需求 4：`?board=tqh` 优先于"当前是否正看着某班"。
+           * 缺省（两者皆假）由被调方自己的 `defaultBoard = "bus"` 兜底 —— 这里不写第三套逻辑。
+           */
+          defaultBoard={initialBoard || tqhTrip ? "tqh" : "bus"}
           onClose={() => setLineSheet(false)}
         />
       )}

@@ -39,6 +39,7 @@
  *   ⚠️ 新增行**一律复用既有 `__row` / `__k` / `__v`**，不新增尺寸/间距规格。
  */
 import Icon from "@/components/ui/Icon";
+import BusCodeChip from "./BusCodeChip";
 import { VEHICLE_STATE_LABEL, type VehicleLite } from "./VehicleMarker";
 
 /** 站点引用（与 `VehicleLite.atStation` / `interval.to` 同形，避免上层再定义一套） */
@@ -168,12 +169,13 @@ export default function VehicleCard({
             车牌与编号同指**一台车**，相邻才有归属感；末班是**状态**，放最外。
             ⚠️ 判据必须是 `vehicle.busCode && …`：后端刻意让缺字段**整个键不存在**，
               写成 `busCode !== null` 会因 `undefined !== null` 成立而渲染出空角标。
+            ★ 2026-11-07（需求 #8）：`<span class="vcode">` 换成共用件 `<BusCodeChip>` ——
+              点击弹「车型信息卡」（无叉 · 点外部/Esc 关闭）。视觉与 `data-*` 属性不变
+              （`.vcode` 仍是同一个类，只把标签换成 `<button type="button">`），
+              这样车辆卡与吸底底栏**两处的点击行为一致**，不会出现"一处能点、一处点不动"。
+              `plate` 必填（`VehicleLite.plate`）⇒ 弹窗能拿到最权威的查询键。
           */}
-          {vehicle.busCode && (
-            <span className="vcode" title="车队编号">
-              {vehicle.busCode}
-            </span>
-          )}
+          {vehicle.busCode && <BusCodeChip code={vehicle.busCode} plate={vehicle.plate} />}
           {vehicle.isLast ? (
             <span className="nav-vehicle-card__last" title="末班车" aria-label="末班车">
               末班

@@ -10,6 +10,19 @@
  *   · 涂装色由行内 `--vbus-livery` 注入（**运营商色是数据**，不写进 CSS）。
  *   ⚠️ 车辆图标**不经 Tabler**（它是自绘插画）；卡内功能图标才用 Tabler。
  *
+ * ── ★ 2026-11-07（返工 #1）：图形本体已抽成 `<BusGlyph>` ────────────────
+ *   车主反馈站序弹窗纵条上的巴士「画错了，我要地图上那种」⇒ 图形只能有**一份**。
+ *   · 本文件从此**不再持有任何 rect/circle 坐标**，只保留 44×44 命中盒这一层
+ *     交互壳（`<button class="vbus-wrap" data-state + --vbus-livery>`）；
+ *   · 12 个图形组 / 状态修饰全部搬进 `nav/BusGlyph.tsx`，两处共用；
+ *   · **视觉零变化**的证据（不是"应该没变"）：
+ *       `.verify/_fe-c-glyph-snap.tsx` 拿改动前的 SSR 基线做逐字节比对（只剥掉
+ *       BusGlyph 引入的三处等价替换），并逐条对读 CSS 的 `display` 值；
+ *       `.verify/_fe-c-glyph-pixel.mjs` 再做**真浏览器截图逐字节比对**。
+ *   ⚠️ `data-state` 仍留在 wrap 上：涂装淡色（terminal）/ 转灰（lost）/
+ *      末班琥珀（data-last）全部是 `.vbus-wrap[data-state=…]` 的 CSS 派生色，
+ *      删了就会静默变成满色。
+ *
  * ── 状态的两个正交维度 ────────────────────────────────────────────────
  *   · `data-state` ∈ moving | stopping | terminal | lost | unknown
  *   · `data-last="1"` = 末班车（**独立属性** —— 末班车同时也在行驶，不能挤进 data-state）
@@ -18,6 +31,7 @@
  *   屏距 ≤ `VEHICLE_MERGE_DIST`（28px）合并为一枚图标；角标 ≤9 显数字、>9 显 `9+`。
  */
 import type { CSSProperties } from "react";
+import BusGlyph, { type BusGlyphState } from "./BusGlyph";
 import type { VehicleProgress } from "@/lib/nav/progress";
 
 /** `/api/route-vehicles` 单车（前端视图模型；`company` 由调用方从响应顶层注入） */
@@ -65,6 +79,24 @@ export const VEHICLE_LIVERY = {
   transmac: "#E26A0E",
   nfb: "#1466B8",
 } as const;
+
+/**
+ * 车辆状态 → `<BusGlyph>` 的视觉修饰（**不是**语义改名，只是图形层的映射表）：
+ *   · `stopping` ⇒ `stop`（右下角「‖」）
+ *   · `terminal` ⇒ `ready`（虚线白圈；地图侧另有 CSS 把涂装调淡，靠 wrap 的 data-state）
+ *   · `lost`     ⇒ `lost`（虚线白圈 + 左下角「!」）
+ *   · `moving` / `unknown` ⇒ 无修饰
+ *
+ * ⚠️ `unknown` 归到 `moving`（无修饰）是**有意的**：旧版 CSS 对 `data-state="unknown"`
+ *    没有任何修饰规则 ⇒ 归到 `moving` 才能保持逐像素一致。**不要**给它加新修饰。
+ */
+export const VEHICLE_GLYPH_STATE: Record<VehicleLite["status"], BusGlyphState> = {
+  moving: "moving",
+  stopping: "stop",
+  terminal: "ready",
+  lost: "lost",
+  unknown: "moving",
+};
 
 /** 把后端可能的多种运营商写法归一为 `transmac` | `nfb` */
 export function normalizeCompany(raw?: string | null): "transmac" | "nfb" {
@@ -158,41 +190,9 @@ export default function VehicleMarker({ items, onClick }: VehicleMarkerProps) {
       title={label}
       onClick={onClick}
     >
-      <svg className="vbus" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-        {/* ① 硬投影：车身剪影 translate(3 3)、零模糊（后视镜不投影，避免出画布） */}
-        <g className="vbus__shadow" transform="translate(3 3)">
-          <rect x="5" y="4" width="22" height="24" rx="5" />
-        </g>
-        {/* ② 白描边层 */}
-        <rect className="vbus__white" x="5" y="4" width="22" height="24" rx="5" />
-        {/* ③ 墨色描边层（1.5px）—— 用同心矩形而非 stroke：stroke 居中会吃掉 3px 硬投影 */}
-        <rect className="vbus__ink" x="6.5" y="5.5" width="19" height="21" rx="3.6" />
-        {/* ④ 涂装车身（运营商色，由 --vbus-livery 注入） */}
-        <rect className="vbus__body" x="8" y="7" width="16" height="18" rx="2.2" />
-        {/* ⑤ 后视镜（顶部两侧 ⇒ 「车头在上」的强线索） */}
-        <rect className="vbus__mirror" x="2.2" y="10.2" width="3" height="2.6" rx="1.2" />
-        <rect className="vbus__mirror" x="26.8" y="10.2" width="3" height="2.6" rx="1.2" />
-        {/* ⑥ 极简扁平细节：线路牌 / 挡风玻璃 / 左右大灯 / 前保险杠 */}
-        <rect className="vbus__sign" x="11.5" y="7" width="9" height="1.2" rx="0.6" />
-        <rect className="vbus__glass" x="9.2" y="8.4" width="13.6" height="7.2" rx="1.8" />
-        <circle className="vbus__lamp" cx="11.4" cy="19.4" r="1.9" />
-        <circle className="vbus__lamp" cx="20.6" cy="19.4" r="1.9" />
-        <rect className="vbus__bumper" x="8" y="22.4" width="16" height="2.2" rx="1.1" />
-        {/* ⑦ 状态修饰 A：虚线白圈（总站待发 / 信号丢失） */}
-        <rect className="vbus__dash" x="5.75" y="4.75" width="20.5" height="22.5" rx="4.25" />
-        {/* ⑦ 状态修饰 B：停靠中 ‖（右下） */}
-        <g className="vbus__stop">
-          <circle className="vbus__badge-bg" cx="26" cy="26" r="4.8" />
-          <rect className="vbus__badge-mark" x="23.7" y="23.4" width="1.6" height="5.2" rx="0.8" />
-          <rect className="vbus__badge-mark" x="26.7" y="23.4" width="1.6" height="5.2" rx="0.8" />
-        </g>
-        {/* ⑦ 状态修饰 C：信号丢失 !（左下） */}
-        <g className="vbus__lost">
-          <circle className="vbus__badge-bg" cx="6" cy="26" r="4.8" />
-          <rect className="vbus__badge-mark" x="5.35" y="23.2" width="1.3" height="3.3" rx="0.65" />
-          <circle className="vbus__badge-mark" cx="6" cy="28" r="0.8" />
-        </g>
-      </svg>
+      {/* 图形本体（32px = ViewBox 原名尺寸；**不传 livery** ⇒ 沿用本按钮的 --vbus-livery，
+          避免同一份涂装色在两处各写一遍） */}
+      <BusGlyph size={32} state={VEHICLE_GLYPH_STATE[state]} />
       {count > 1 && (
         <span className="vbus__count" aria-hidden="true">
           {count > 9 ? "9+" : count}

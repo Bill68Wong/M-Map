@@ -63,6 +63,7 @@ import UserDotLayer from "./UserDotLayer";
 import VehicleLayer from "./VehicleLayer";
 import TqhStationLayer from "./TqhStationLayer";
 import TqhPathLayer from "./TqhPathLayer";
+import XborderPinLayer from "@/components/map/XborderPinLayer";
 import type { TqhSegment, TqhStation } from "./tqh-model";
 import type { VehicleLite } from "./VehicleMarker";
 import type { UserFix } from "./useUserFix";
@@ -339,6 +340,16 @@ export interface NavMapProps {
   tqhWhitelist?: ReadonlySet<number> | null;
   /** 点通琴号站点（纯通琴号站 → 通琴号卡片；`ids` > 1 表示同物理点合并组） */
   onTqhStationClick?: (s: TqhStation, ids: number[]) => void;
+  /**
+   * ★ 需求 7：是否画「跨境地标」圆点（机场 1 + 码头 3）。
+   *
+   * 与站点层**刻意无关**：站点层受 `STATION_MIN_ZOOM`（浏览 15）门控，
+   * 而地标要"首页就能看到机场在哪"⇒ 常显，重叠交给聚合处理
+   * （`xborder-pins.ts#groupXbPins`）。别把它塞进 `stationZoomOk`。
+   */
+  showXborderPins?: boolean;
+  /** ★ 需求 7：点地标 / 聚合点 ⇒ 宿主开小窗（参数 = 该组地标 id，1 个或 2 个） */
+  onXborderPinClick?: (ids: string[]) => void;
   /** 附加类名（承载全屏布局） */
   className?: string;
 }
@@ -377,6 +388,8 @@ export default function NavMap({
   tqhBusWhitelist = null,
   tqhWhitelist = null,
   onTqhStationClick,
+  showXborderPins = false,
+  onXborderPinClick,
 }: NavMapProps) {
   const canvasRef = useRef<HTMLDivElement | null>(null);
   /** `.nav-map` 根元素（写观测钩子：data-map-follow / data-map-zoom / …） */
@@ -2042,6 +2055,15 @@ export default function NavMap({
         onStationClick={onTqhStationClick}
         /* ★ 观测钩子：已绘通琴号 marker 数（96 = 全量纯站；0 = 阈值以下/被白名单清空） */
         onCount={onTqhStationCount}
+      />
+      {/* ★ 需求 7：跨境地标（机场 1 + 码头 3）。**刻意不接 `stationZoomOk`**：
+          地标要首页低倍就可见，站点门（15）会让它永远不显示；重叠由聚合解决。
+          详见 `xborder-pins.ts#groupXbPins` 与 `XborderPinLayer` 头部注释。 */}
+      <XborderPinLayer
+        map={phase === "ready" ? mapRef.current : null}
+        amap={phase === "ready" ? amapRef.current : null}
+        enabled={phase === "ready" && showXborderPins}
+        onPick={onXborderPinClick}
       />
       {/* ★ 2026-09-23：在途巴士图标（**原生 AMap.Marker** + DOM content；拖拽期零 JS） */}
       <VehicleLayer
