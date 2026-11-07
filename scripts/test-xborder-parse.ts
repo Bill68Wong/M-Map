@@ -460,6 +460,93 @@ assertThrows(
   "目的港为空 ⇒ 抛",
 );
 
+/* ══════════════════════════════════════════════════════════════════
+ * E. 船解析：未闭合注释 / 未闭合脚本 / 裸 `<`（CodeQL #7/#8 回归）
+ *    不变量：**任何输出文本字段不得含 `<`**（ferry/parse.ts 的终点兜底）。
+ * ══════════════════════════════════════════════════════════════════ */
+console.log("\nE. 船解析：未闭合标记与裸 `<`（CodeQL #7/#8 回归）");
+const DIRTY_ROW = (cell: string) =>
+  wrap(
+    `${HDR_DEP}<tr><td>18:00</td><td>香港</td><td>${cell}</td><td>6</td><td>測試船<br>雙體船</td><td>噴射飛航</td></tr>`,
+  );
+const FIELDS = (r: (typeof sail)[number]) =>
+  [r.statusRaw, r.placeRaw, r.operatorRaw, r.vesselRaw, r.vesselTypeRaw, r.gateRaw].filter(
+    (v): v is string => v !== null,
+  );
+const noLt = (rows: ReturnType<typeof parseFerrySailings>, msg: string) =>
+  assert(
+    rows.every((r) => FIELDS(r).every((v) => !v.includes("<"))),
+    msg,
+  );
+
+// ① 裸 `<`（无配对 `>`，标签剥离吃不掉）⇒ 终点兜底清除，其余字符原样
+{
+  const rows = parseFerrySailings(DIRTY_ROW("18:03 啟航 <05:00"), "PE", "dep", AT);
+  assertEq(rows[0].statusRaw, "18:03 啟航 05:00", "裸 `<` 被清除，其余字符原样");
+  noLt(rows, "裸 `<`：输出字段零 `<`");
+}
+// ② 未闭合 `<script`（连 `>` 都没有）：兜底按浏览器容错吃到串尾 ⇒ 表格结构被吃
+//    ⇒ 结构校验**抛错**（失败即抛，绝不静默出数据）；「零 `<`」不变量因无输出而空真
+assertThrows(
+  () => parseFerrySailings(DIRTY_ROW("18:03 啟航<script alert(1)"), "PE", "dep", AT),
+  /找不到 class='item_table'/,
+  "无 `>` 的未闭合 `<script` 兜底吃到串尾 ⇒ 结构被吃 ⇒ 抛（不静默出数据）",
+);
+// ③ 成对 `<script>…</script>` ⇒ 整块删除（含块内内容）
+{
+  const rows = parseFerrySailings(DIRTY_ROW("18:03 啟航<script>alert(1)</script>"), "PE", "dep", AT);
+  assertEq(rows[0].statusRaw, "18:03 啟航", "成对 `<script>` 整块删除（含其内容）");
+  noLt(rows, "成对 script：输出字段零 `<`");
+}
+// ④ 未闭合 `<!--` 在页面尾部：吃到串尾，其后的"假数据行"绝不成为班次
+{
+  const rows = parseFerrySailings(
+    wrap(
+      `${HDR_DEP}<tr><td>18:00</td><td>香港</td><td>18:03 啟航</td><td>6</td><td>測試船</td><td>噴射飛航</td></tr>`,
+    ) +
+      `<!--<tr><td>00:00</td><td>假港</td><td>待航</td><td>0</td><td>假船</td><td>假公司</td></tr>`,
+    "PE",
+    "dep",
+    AT,
+  );
+  assertEq(rows.length, 1, "未闭合注释吃掉其后的假数据行（不炸、不静默出数据）");
+  noLt(rows, "未闭合 `<!--`：输出字段零 `<`");
+}
+// ⑤ 未闭合 `<script>`（带 `>`）在页面尾部：同上
+{
+  const rows = parseFerrySailings(
+    wrap(
+      `${HDR_DEP}<tr><td>18:00</td><td>香港</td><td>18:03 啟航</td><td>6</td><td>測試船</td><td>噴射飛航</td></tr>`,
+    ) + "<script>evil()",
+    "PE",
+    "dep",
+    AT,
+  );
+  assertEq(rows.length, 1, "未闭合脚本（带 >）吃到串尾：不产生数据、不破坏解析");
+  noLt(rows, "未闭合 `<script>`：输出字段零 `<`");
+}
+// ⑥ 注释里的"模板表格"（ASP.NET 常见残留）：成对注释删除同时治它
+{
+  const fake =
+    "<!-- <table class='item_table table-striped'><tr><th>x</th></tr><tr><td>假</td></tr></table> -->";
+  const rows = parseFerrySailings(
+    fake +
+      wrap(
+        `${HDR_DEP}<tr><td>18:00</td><td>香港</td><td>18:03 啟航</td><td>6</td><td>測試船</td><td>噴射飛航</td></tr>`,
+      ),
+    "PE",
+    "dep",
+    AT,
+  );
+  assertEq(rows.length, 1, "注释里的模板表格不成为数据（TABLE_RE 不再命中注释内表格）");
+  noLt(rows, "注释模板表格：输出字段零 `<`");
+}
+// ⑦ 真实快照回归：全部字段零 `<`
+{
+  noLt(sail, "真实快照（外港离港 10 条）输出字段零 `<`");
+  noLt(arrSail, "真实快照（氹仔到港 8 条）输出字段零 `<`");
+}
+
 console.log(`\n结果：通过 ${pass} · 失败 ${fail}`);
 if (fail) {
   console.error("\n❌ 解析器与预期不符 —— 每条 ✗ 都可能意味着「库里的日期/班次是错的」。");

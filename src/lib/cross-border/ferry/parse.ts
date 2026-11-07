@@ -32,7 +32,9 @@
  *     全部原样落库。本文件里**唯一**允许的文本加工是：
  *       ① 去 HTML 标签（`<br>` / `<img>` 是页面排版，不是内容）；
  *       ② 每个文本片段两侧 `trim()`（判空用，条款允许的边界内）；
- *       ③ `&amp;` 等 HTML 实体的**还原**（还原才是"准确"，不还原等于把显示层的转义写进库）。
+ *       ③ `&amp;` 等 HTML 实体的**还原**（还原才是"准确"，不还原等于把显示层的转义写进库）；
+ *       ④ 破损标记兜底（CodeQL #7/#8，2026-11-07 裁定）：未闭合注释/脚本按浏览器容错
+ *          吃到串尾；产物中残留的裸 `<` 一律清除 —— 正常页面无此字符，字符级等值断言不受影响。
  *   ⚠️ `scripts/test-xborder-compliance.ts` 用固定样例做**字符级等值**断言。
  *
  * ── 失败即抛（绝不返回"空数组"冒充"今天没船"）──────────────────────────
@@ -50,11 +52,23 @@ const ROW_RE = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
 const TD_RE = /<td[^>]*>([\s\S]*?)<\/td>/gi;
 const TH_RE = /<th[^>]*>([\s\S]*?)<\/th>/gi;
 /**
- * HTML 注释：**先剥掉再解析**。
- * ASP.NET 页面常有被注释掉的表格/季节模块残留，若不剥离，`TABLE_RE` 可能匹配到注释里的
- * 一份"模板表格"，解析出来的是根本不在页面上的班次（静默错数据，比抛错糟得多）。
+ * 危险块整删（CodeQL #7/#8 的共用净化入口，**两处必须同一份手法**）：
+ *   ① `<script>` / `<style>` 整块删除 —— 成对 + **未闭合兜底**（吃到串尾）；
+ *   ② HTML 注释删除 —— 成对 + **未闭合兜底**。
+ * 根因：旧实现是「多步逐步 replace」且注释只删成对，CodeQL 判
+ * `Incomplete multi-character sanitization`（残留 `<script` / 未闭合 `<!--`）。
+ * 未闭合兜底的语义 = 浏览器对损坏标记的容错（注释/脚本吃到串尾）：
+ * 结构性内容被吃掉时由调用方的结构校验（表头/列数）抛错，**绝不静默出数据**。
+ * ASP.NET 页面常有被注释掉的表格/季节模块残留，若不剥离，`TABLE_RE` 可能匹配到
+ * 注释里的一份"模板表格"（静默错数据，比抛错糟得多）—— 成对注释删除同时治它。
  */
-const COMMENT_RE = /<!--[\s\S]*?-->/g;
+function dropDangerousBlocks(html: string): string {
+  return html
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<(script|style)\b[^>]*>[\s\S]*$/i, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<!--[\s\S]*$/g, "");
+}
 
 /** 表头（等于列定义；对不上就是页面改版，必须炸） */
 const HEADERS: Record<XbDir, readonly string[]> = {
@@ -87,13 +101,17 @@ const ENTITIES: Record<string, string> = {
  * 故统一折成行数组，由调用方按位置取。
  */
 function cellLines(html: string): string[] {
-  const noImg = html.replace(/<img\b[^>]*>/gi, "");
-  const withBreak = noImg.replace(/<br\s*\/?>/gi, "\n");
-  const noTags = withBreak.replace(/<[^>]*>/g, "");
-  const decoded = noTags
+  const noTags = dropDangerousBlocks(html)
+    .replace(/<img\b[^>]*>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
     .replace(/&#(\d+);/g, (_, d: string) => String.fromCodePoint(Number(d)))
-    .replace(/&[a-z]+;|&#39;/gi, (m) => ENTITIES[m.toLowerCase()] ?? m);
-  return decoded
+    .replace(/&[a-z]+;|&#39;/gi, (m) => ENTITIES[m.toLowerCase()] ?? m)
+    // 终点兜底（CodeQL 认可的口径）：产物**零 `<` 残留**。实体还原可能产生 `<`
+    // （`&lt;` / `&#60;`），按负责人 2026-11-07 裁定清除 —— 船名/状态是纯文本展示
+    // 字段，不依赖 `<` 语义；正常页面不含此字符，字符级等值断言不受影响。
+    .replace(/</g, "");
+  return noTags
     .split("\n")
     .map((s) => s.trim())
     .filter((s) => s !== "");
@@ -113,7 +131,7 @@ export function parseFerrySailings(
   direction: XbDir,
   collectedAt: Date = new Date(),
 ): SailingUpsertRow[] {
-  const table = TABLE_RE.exec(html.replace(COMMENT_RE, ""));
+  const table = TABLE_RE.exec(dropDangerousBlocks(html));
   if (!table) fail("找不到 class='item_table' 的表格（页面改版或拿到错误页）");
   const body = table[1];
   const rows = [...body.matchAll(ROW_RE)];
