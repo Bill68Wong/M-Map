@@ -63,11 +63,17 @@ const TH_RE = /<th[^>]*>([\s\S]*?)<\/th>/gi;
  * 注释里的一份"模板表格"（静默错数据，比抛错糟得多）—— 成对注释删除同时治它。
  */
 function dropDangerousBlocks(html: string): string {
-  return html
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
-    .replace(/<(script|style)\b[^>]*>[\s\S]*$/i, "")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<!--[\s\S]*$/g, "");
+  let prev: string;
+  let cur = html;
+  do {
+    prev = cur;
+    cur = cur
+      .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+      .replace(/<(script|style)\b[^>]*>[\s\S]*$/i, "")
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/<!--[\s\S]*$/g, "");
+  } while (cur !== prev);
+  return cur;
 }
 
 /** 表头（等于列定义；对不上就是页面改版，必须炸） */
