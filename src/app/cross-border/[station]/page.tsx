@@ -7,8 +7,9 @@
  *   设计稿 §7.5 明确要求**不要**做 4 个复制页 —— 复制出来的第 3 天就会有人漏改一处。
  *
  * ── 三种粒度用同一个路由的两种形态 ──────────────────────────────────────
- *   `/cross-border/airport`            ⇒ `after=now`（最近五班，需求 5）
- *   `/cross-border/airport?after=day`  ⇒ `after=day`（当日所有，需求 6）
+ *   `/cross-border/airport?after=day`  ⇒ `after=day`（当日所有，需求 6）—— **入口默认**
+ *   `/cross-border/airport?after=now`  ⇒ `after=now`（最近五班，需求 5）
+ *   完全不带 `after`（`/cross-border/airport`）⇒ **重定向**到 `?after=day`（见下方注释）
  *   用 query 而不是两个路由：**同一屏的两种粒度**，用 URL 表达"我现在看的是哪一种"，
  *   浏览器返回键天然可用（比自持 state 更少 bug）。
  *
@@ -17,7 +18,7 @@
  *   若把它渲染成空态，用户会以为这个码头今天停航。
  */
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import type { PierCode } from "@/lib/cross-border/types";
 import { stationName } from "@/components/cross-border/xb-view";
 import StationClient from "./StationClient";
@@ -47,6 +48,24 @@ export default async function Page({ params, searchParams }: PageProps) {
 
   const name = stationName(station);
   if (!name) notFound();
+
+  /**
+   * 无 `after` 参数 ⇒ 重定向到「当日所有」（2026-11-08 · 入口直达详情页）。
+   *
+   * 为什么是 `=== undefined` 而不是 `=== null`：这里的 `searchParams` 是 Next 解析后的
+   * **普通对象**（不是 `URLSearchParams`），"参数不存在"表现为 `undefined`。
+   * 判据只认**完全没有这个参数**：`?after=`（空串）与 `?after=now` 都算"用户说了"，不拦。
+   *
+   * `from` 原样保留（有就带、没有就不带）：它是关闭键的来路
+   * （`from=map` ⇒ 关闭回首页），丢了会把用户扔到列表页 —— 重定向不该有副作用。
+   * 用 `redirect()`（307）而不是改渲染分支：URL 必须跟着变，用户才复制得走、
+   * 浏览器返回键才符合直觉。
+   */
+  if (sp.after === undefined) {
+    const qs = new URLSearchParams({ after: "day" });
+    if (typeof sp.from === "string" && sp.from) qs.set("from", sp.from);
+    redirect(`/cross-border/${station}?${qs.toString()}`);
+  }
 
   const isAirport = station === "airport";
   const pier: PierCode | null = isAirport ? null : (station.toUpperCase() as PierCode);

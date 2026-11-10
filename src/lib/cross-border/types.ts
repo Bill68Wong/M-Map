@@ -43,9 +43,31 @@ export type PierCode = "PE" | "TP" | "PI";
  */
 export type XbAfter = "now" | "day";
 
-/** 机场状态派生枚举（CHECK 约束同值，见 `db/migrate-v3800.ts`） */
+/**
+ * 机场状态派生枚举（CHECK 约束同值，见 `db/migrate-v3800.ts`）
+ *
+ * `pending` = 上游 `status` 为字面量 `"0"`：**已计划、尚未进入任何流程**，非终态。
+ * 2026-11-07 实测追踪：白天快照 131 行里 42 行是 `"0"`，8 小时后 39 行转成
+ * `航班著陸 HH:MM` / `已啟航 HH:MM` / `航班延誤`，余 4 行为 22:00 后的晚班。
+ * ⇒ 它是合法占位值，不是我方"认不出"。故单列一个 kind，不落 `unknown`。
+ *
+ * `rescheduled` = 上游 `航班更改時間 HH:MM`：**时刻发生了变更**，非终态。
+ * 与 `delayed`（延误）刻意**不合并**（负责人 2026-11-08 裁定）：
+ *   · 延误 = 晚于原计划，原时刻基本仍可用；
+ *   · 更改 = 时刻被改到另一个钟点（可晚可早），用户按原时刻去机场会直接误机。
+ * 两者对用户的行动指令不同 ⇒ 前端文案与配色都必须分得开（见 `xb-view.ts#statusClass`）。
+ * 首次实测于 2026-11-08 00:0x（上游当日 70 条里 1 条），此前从未出现过。
+ */
 export type AirportStatusKind =
-  "departed" | "boarding_closed" | "checkin_open" | "cancelled" | "delayed" | "landed" | "unknown";
+  | "departed"
+  | "boarding_closed"
+  | "checkin_open"
+  | "cancelled"
+  | "delayed"
+  | "landed"
+  | "pending"
+  | "rescheduled"
+  | "unknown";
 
 /** 船状态派生枚举（CHECK 约束同值） */
 export type FerryStatusKind = "departed" | "arrived" | "eta" | "pending" | "unknown";

@@ -43,6 +43,13 @@ export interface LineStopListProps {
   vehOf?: (stop: LineStop) => LineStopVeh | null | undefined;
   /** ★ 2026-11-06（#5c）：点巴士图标 → 开巴士信息弹窗；不传 ⇒ 图标非交互（不做死键） */
   onOpenBusCard?: ((stop: LineStop, veh: LineStopVeh) => void) | null;
+  /**
+   * ★ 2026-11-08：每站的**计划时刻**（已格式化 `HH:MM`，由调用方算好）。
+   *   只有通琴号站序弹窗传；**不传 ⇒ 每行 `plannedTime` 为 undefined
+   *   ⇒ 不渲染任何元素 ⇒ DOM 与改前逐字节一致**（`/line/[code]` 页与
+   *   `RouteStopsSheet` 零回归）。
+   */
+  plannedTimeOf?: (stop: LineStop) => string | null | undefined;
 }
 
 /** 换乘列最多显示的线路条数（设计 §2.8：最多列 3 条） */
@@ -58,6 +65,7 @@ export default function LineStopList({
   sideOf,
   vehOf,
   onOpenBusCard,
+  plannedTimeOf,
 }: LineStopListProps) {
   return (
     <ol className="lp-list">
@@ -80,6 +88,7 @@ export default function LineStopList({
             registerEl={registerEl}
             side={sideOf?.(stop)}
             veh={veh}
+            plannedTime={plannedTimeOf?.(stop) ?? null}
             onOpenBusCard={veh && onOpenBusCard ? (v) => onOpenBusCard(stop, v) : null}
           />
         );
