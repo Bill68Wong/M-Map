@@ -10,8 +10,9 @@
  *                    / minutes / hops / levels / waitMin / liveText / tier / tierText / tierHint
  *     RecStatic:     routeIdx{dirStops, nameOf}
  *     响应：          ok / remainingMin / arriveAt / recomputedAt / serverNowMs / strips[].rideMin
- *   长期值守请迁到 `scripts/`（tsc 会检查），但本脚本**强依赖真实库**，需先加「库不可达则跳过」
- *   的降级分支才能进 CI 纯函数门。
+ *   长期值守已迁到 `scripts/`（tsc 会检查）；它**强依赖真实库**。
+ *   ⚠️ **它就在 `verify` 链里**（`verify` → `test:remaining-all` → `test:remaining-route`），
+ *      所以 **fail-closed（连库失败 exit 1）会让无库环境下整条 verify 链变红** —— 这是刻意取舍。
  *
  * 目的：跳过 HTTP 层，直接构造 `NextRequest` 调 `POST`，验证
  *   ① 无 Origin/Referer ⇒ 403（同源校验生效）
@@ -27,8 +28,12 @@
  *   `.verify/` 被 `.gitignore:51` 忽略 ⇒ **不入库**，队友 checkout 看不到（前端就报了「文件不存在」）；
  *   且它不在 tsc 覆盖内（点目录不被 glob 匹配）⇒ 字段改名会静默腐坏。
  *   ⇒ 迁到 `scripts/`：入库、tsc 会检查、队友可直接跑。
- *   ⚠️ 它**强依赖真实库**（用真实 `route_stations` 造卡），故连库失败时**整体跳过、不判失败**，
- *     保证在无库环境（CI 纯函数门）不会误红。
+ *   ⚠️ 它**强依赖真实库**（用真实 `route_stations` 造卡）。
+ *   ★ 批 4 / T5 口径变更：连库失败原为「整体跳过、不判失败（exit 0）」，现改为 **fail-closed**
+ *     （打印 `❌ 连库失败 ⇒ 判失败` 后 `exit 1`）。原因：`SKIP + exit 0` 是假绿出口 ——
+ *     库不可达时整轮记 0 条并以 0 退出，会被人当「通过」，等于门禁不存在。
+ *     ⚠️ **代价必须说清**：本脚本在 `verify` 链内（`test:remaining-all` 的成员之一），
+ *        所以无库环境下**整条 verify 会红**。这是刻意的 —— 宁可红，也不给「0 条即通过」留口子。
  */
 process.loadEnvFile("D:/Projects/University/Studio/musttoukou/.env");
 
@@ -40,6 +45,22 @@ import type { RecommendCard } from "../src/lib/recommend/types";
 
 let pass = 0;
 let fail = 0;
+/**
+ * ★ 批 4 / T5（D）：⑤ 里 5 条不变量要求「两次请求落在同一个 2s 桶」。
+ *   桶 = `Math.floor(nowMs / CACHE_TTL_MS)`（`route.ts:211`）⇒ 跨桶必 miss。
+ *   **先把时钟对齐到桶内**（见 ③b），判据就变成确定性的。
+ *   ⚠️ miss 直接由 :356 那条断言判 FAIL，**不设独立跳过计数** ——
+ *     否则同一次 miss 会既记 FAIL 又记 SKIP（同一事件判两次）。
+ */
+const CACHE_TTL_MS = 2_000;
+const CACHE_HEADROOM_MS = 1_500;
+/** ③b 对齐后实测的桶余量（ms），仅用于诊断输出：区分「环境慢跨桶」还是「缓存真坏了」 */
+let bucketRemMs = -1;
+/** ④ 首次调用与 ⑤ 第二次调用的间隔（ms），同上 */
+let cacheGapMs = -1;
+/** ④ 首次调用时刻，供 ⑤ 算间隔 */
+let firstCallAtMs = 0;
+
 const round1 = (v: number): number => Math.round(v * 10) / 10;
 const ok = (c: boolean, label: string, extra = "") => {
   if (c) {
@@ -103,7 +124,7 @@ function mkCard(st: RecStatic, planId: number, routeKey: string, minutes: number
 }
 
 (async () => {
-  console.log("═══ /api/nav/remaining handler smoke（连库；不可达则跳过）═══\n");
+  console.log("═══ /api/nav/remaining handler smoke（连库；**库不可达则判失败**，fail-closed）═══\n");
 
   let st: RecStatic;
   let pool: ReturnType<typeof getPool>;
@@ -112,9 +133,11 @@ function mkCard(st: RecStatic, planId: number, routeKey: string, minutes: number
     pool = getPool();
     st = await loadStatics(pool);
   } catch (e) {
-    console.log(`  SKIP  连库失败（${(e as Error).message}）⇒ 整体跳过，不判失败`);
-    console.log(`\n═══ 合计 0 条：PASS 0 / FAIL 0（SKIP）═══`);
-    process.exit(0);
+    // ★ 批 4 / T5：原写法 `SKIP + process.exit(0)` 是**假绿出口** —— 库不可达时整轮记 0 条并
+    //   以 0 退出，CI 与 `verify` 都会当它通过，等于「门禁不存在」。改为 fail-closed。
+    console.log(`  ❌ 连库失败（${(e as Error).message}）⇒ 判失败（fail-closed，不跳过）`);
+    console.log(`\n═══ 合计 0 条：PASS 0 / FAIL 1（连库失败，非 SKIP）═══`);
+    process.exit(1);
   }
 
   const keys = [...st.routeIdx.dirStops.keys()]
@@ -236,11 +259,31 @@ function mkCard(st: RecStatic, planId: number, routeKey: string, minutes: number
     }
   }
 
+  /* ③b ★ 批 4 / T5（D）：把时钟对齐到 2s 桶内，让 ⑤ 的微缓存判据变成**确定性**的。
+   *
+   *   为什么需要：⑤ 要证明「同一个 planId 在桶内命中缓存」。缓存键含
+   *     `Math.floor(nowMs / CACHE_TTL_MS)`（route.ts:211）⇒ 两次请求一旦跨桶必 miss。
+   *   原写法是「先打一次，睡 60ms 再打一次」——若第一次恰好落在桶尾，第二次就跨桶，
+   *   概率约 60/2000 ≈ 3% ⇒ ⑤ 的 5 条断言随机不跑（覆盖静默丢失，还会被误当成「环境问题」）。
+   *
+   *   做法：若当前桶余量不足 `CACHE_HEADROOM_MS`，先等到下一桶开头 +20ms。
+   *   之后 ④ 与 ⑤ 的两次请求都落在同一桶的前 ~200ms 内（余量 1.5s 以上）。
+   *   ⇒ 于是 miss 已经是一个**确定性的失败**：直接由 ⑤ 的 `cacheHit && …` 那条判 FAIL，
+   *     **不设独立跳过计数**（否则同一次 miss 会既记 FAIL 又记 SKIP，同一事件判两次）。
+   */
+  {
+    const rem = CACHE_TTL_MS - (Date.now() % CACHE_TTL_MS);
+    if (rem < CACHE_HEADROOM_MS) await new Promise((r) => setTimeout(r, rem + 20));
+    // 对齐后**重新量一次**：这才是 ④/⑤ 两次请求真正可用的桶余量，收尾红行要打它（自诊用）。
+    bucketRemMs = CACHE_TTL_MS - (Date.now() % CACHE_TTL_MS);
+  }
+
   /* ④ 正常调用（★ U3 后 `segRemainSec` 与 `nextIdx` 必须成对：nextIdx = 基准站） */
   let firstRecomputedAt = 0;
   let firstRemaining = 0;
   let firstArriveAt = 0;
   {
+    firstCallAtMs = Date.now();
     const res = await POST(reqWith({ card: cardA, legIndex: 0, segRemainSec: 150, nextIdx: 2 }, `http://${HOST}`));
     ok(res.status === 200, "正常调用 ⇒ 200", `实际 ${res.status}`);
     ok(res.headers.get("cache-control") === "no-store", "cache-control: no-store");
@@ -303,14 +346,32 @@ function mkCard(st: RecStatic, planId: number, routeKey: string, minutes: number
   {
     await new Promise((r) => setTimeout(r, 60));
     const res = await POST(reqWith({ card: cardA, legIndex: 0, segRemainSec: 150, nextIdx: 2 }, `http://${HOST}`));
+    cacheGapMs = Date.now() - firstCallAtMs;
     const j = (await res.json()) as {
       recomputedAt: number;
       serverNowMs: number;
       remainingMin: number;
       arriveAt: number;
     };
-    if (j.recomputedAt === firstRecomputedAt) {
-      ok(true, "命中微缓存：recomputedAt 保持原值（staleSec 的分子，**不得刷新**）");
+    // ★ 批 4 / T5（D）：原为 `if (…) { ok(true, …) }` —— 判据在外层 if，`ok(true)` 只是打勾，
+    //   却被日志打成 PASS，审计者会当成独立断言。改为**把等值条件挪进断言本体**，
+    //   并用同一个布尔量做分支（等值只判一次，不两处各判一次）。
+    //   ⚠️ 标题只声明本条**真正验到**的东西：值域（有限 / >0 / 不晚于现在）。
+    //      「保持原值」由 `cacheHit` 与下方 `if` 保证，不体现在本行标题里（免得标题宽于实测）。
+    // ⚠️ 防回归（别「简化」掉它）：`cacheHit` 必须**同时**留在断言条件与 if 分支里。
+    //   ⑤ 其余 4 条断言全在 if 内（miss 时一条不跑），⑥ 在 miss 时两张卡各自重算仍各对各的
+    //   ⇒ 一旦把 `cacheHit` 从断言里摘掉，一次 miss 会变成「0 红 + 总数 57→53 + 日志全绿」：
+    //   门禁悄悄退化却**不报任何错**（tsc/eslint 都看不见，且它看起来像「去掉重复判断」）。
+    //   这不是「分母可变」，是**无兜底的假绿通道**。
+    const cacheHit = j.recomputedAt === firstRecomputedAt;
+    ok(
+      cacheHit && Number.isFinite(j.recomputedAt) && j.recomputedAt > 0 && j.recomputedAt <= Date.now(),
+      "命中微缓存：recomputedAt 保持原值且为合法过去时刻（cacheHit + 值域，同条判定）",
+      // 自诊用：真红时一眼分辨「环境慢/DB 抖动导致跨桶」（桶余量 < 间隔）还是「缓存真坏了」
+      // （桶余量远大于间隔却仍 miss）——不必再回来读代码。
+      `cacheHit=${cacheHit} recomputedAt=${j.recomputedAt} 桶余量=${bucketRemMs}ms 间隔=${cacheGapMs}ms`,
+    );
+    if (cacheHit) {
       ok(j.serverNowMs > firstRecomputedAt, "命中微缓存：serverNowMs 已刷新为新时刻");
       ok(j.remainingMin === firstRemaining, "命中微缓存：remainingMin 复用（与 recomputedAt 成对）");
       ok(j.arriveAt === firstArriveAt, "命中微缓存：arriveAt 也保持原值（与 remainingMin **成对**，不得单刷）");
@@ -320,8 +381,6 @@ function mkCard(st: RecStatic, planId: number, routeKey: string, minutes: number
         "★ 恒等式 arriveAt === recomputedAt + remainingMin×60000 在命中缓存时仍成立",
         `残差 ${j.arriveAt - (j.recomputedAt + j.remainingMin * 60_000)}ms`,
       );
-    } else {
-      console.log("  SKIP  未命中缓存（跨过了 2s 桶边界或进程刚重启），本条不作判据");
     }
   }
 
