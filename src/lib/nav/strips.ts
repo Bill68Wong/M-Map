@@ -2,7 +2,9 @@
  * 详情页纵向站条构建（src/lib/nav/strips.ts，v1.3.0 · T04）
  *
  * 把 `RecommendCard`（`.rides[].board/alight/route`）→ `SegmentStrip[]`
- * （**一趟一条**、含逐跳分钟与命中层级），供 `StationStrip` 渲染。
+ * （**一趟一条**、含逐跳分钟与命中层级），供 `NavStrip`（导航纵轴）与详情层渲染。
+ * ⚠️ 卡片页旧站条 `StationStrip` 已随 v3.6.0 删除；纵轴**逐站分钟**已随需求 7（2026-11-09）
+ *    整块删除渲染 —— 但本文件的 `minToNext` / `minToNextEst` 仍是「到下车分钟」的输入，**不要删**。
  * 与旧 `/card` 的 `strips` **同源同口径**：逐跳一律 `lookupHop`、`rideMin` = 卡面 `rides[i].minutes`。
  *
  * ⚠️ server-only（用 `segmentsOf` 解析站序）；`SegmentStrip` 是纯视图类型，可安全传客户端。
@@ -71,21 +73,27 @@ export function buildStrips(card: RecommendCard, ctx: StripBuildCtx): SegmentStr
       const isFirst = k === 0;
       const isLast = k === codes.length - 1;
       const next = codes[k + 1];
-      const hop = !isLast && next ? lookupHop(ctx.segIdx, ride.route, code, next, ctx.nowBucket) : null;
+      const hop = !isLast && next
+        ? lookupHop(ctx.segIdx, ride.route, code, next, ctx.nowBucket, {
+            // ★ 2026-11-09 裁定：下一站就是本次下车站（末跳）⇒ 纯行驶；中间跳含停站。
+            final: k === codes.length - 2,
+          })
+        : null;
       return {
         code,
         label: ctx.nameOf.get(code) ?? code,
         /**
          * ⚠️ 逐跳分钟**不受 `patchedCard` 影响**（本函数只从 card 取 `ride.minutes` / `waitMin` 等
-         * 段级时间，`minToNext` 一律现查 `lookupHop`）⇒ 服务端下发的 `liveStrips` 与前端静态
+         * 段级时间，`minToNext`/`minToNextEst` 一律现查 `lookupHop`）⇒ 服务端下发的 `liveStrips` 与前端静态
          * `strips` 在这一列上**逐字节相同**。
-         * 正因如此，前端 `NavDetailBody` 的「到下车**分钟**」可以用**静态** `strips` 的 `minToNext`
-         * 与 `remainFromIdxOf` 配对（下标不会错位）；「还有几站」只吃 `lastIdx`，**不涉本列**。
+         * 正因如此，前端 `NavDetailBody` 的「到下车**分钟**」可以用**静态** `strips` 的
+         * **`minToNextEst`** 与 `remainFromIdxOf` 配对（下标不会错位）；「还有几站」只吃 `lastIdx`，**不涉本列**。
          * ⇒ 若服务端将来只 patch 本列（分钟变、`stops.length` 不变），**只有「到下车分钟」要改读
          *   `liveStrips`**；若改的是 **`stops[]` 本身**（例如裁掉已走站），那两处都要跟 ——
-         *   站数虽然不读 `minToNext`，但它吃 `lastIdx`，站序一变就会错位。
+         *   站数虽然不读这两列，但它吃 `lastIdx`，站序一变就会错位。
          */
         minToNext: hop ? hop.minutes : 0,
+        minToNextEst: hop ? hop.estMinutes : 0,
         level: hop ? hop.level : 0,
         role: isFirst ? "board" : isLast ? "alight" : "mid",
       };

@@ -54,6 +54,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import RouteStack from "@/components/RouteStack";
 import Icon from "@/components/ui/Icon";
+import SetPointActions from "./SetPointActions";
 import { EtaText } from "@/components/RoutePieces";
 import { TqhStationTrips } from "./TqhStationCard";
 import type { TqhStationEntry, TqhTrip } from "./tqh-model";
@@ -176,6 +177,7 @@ export default function StationCard({
   onSetTo,
   onPickLine,
   pickLineDisabled = false,
+  navActive = false,
   tqh = null,
 }: {
   station: StationCardStation;
@@ -183,6 +185,12 @@ export default function StationCard({
   onClose: () => void;
   onSetFrom: () => void;
   onSetTo: () => void;
+  /**
+   * ★ M4（需求 4）：导航语境 ⇒ 「设为起点/目的地」整块不渲染。
+   * 判定在 `SetPointActions` 内部（唯一判定点），本组件只是把宿主状态透传下去 ——
+   * 不要在调用点再写一遍 `!navActive &&`，否则新增弹窗必然漏判。
+   */
+  navActive?: boolean;
   /**
    * ★ 2026-11-06（修复批 #4 / R3）：点报站行 ⇒ 进入该线路的查看模式。
    * 弹窗本体由前端 C 的 `RouteStopsSheet` 提供，本组件只负责**触发与传参**
@@ -464,14 +472,8 @@ export default function StationCard({
           ))}
       </div>
 
-      <div className="nav-station-card__acts">
-        <button className="btn btn--outline btn--sm" type="button" onClick={onSetFrom}>
-          设为起点
-        </button>
-        <button className="btn btn--primary btn--sm" type="button" onClick={onSetTo}>
-          设为目的地
-        </button>
-      </div>
+      {/* ★ M4（需求 4）：设点按钮统一由 `SetPointActions` 渲染（导航态整块不渲染） */}
+      <SetPointActions navActive={navActive} onSetFrom={onSetFrom} onSetTo={onSetTo} />
     </div>
   );
 }

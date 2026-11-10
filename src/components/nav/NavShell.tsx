@@ -162,6 +162,13 @@ import type { NavPoint } from "@/lib/nav/types";
 /** ★ 2026-11-06（#5a）：站序接口响应类型（纯 type，无 pg 依赖） */
 import type { RouteStopsOk, RouteStopsResp } from "@/lib/line/line-shared";
 import XborderCard from "@/components/map/XborderCard";
+import { xbPinById } from "@/components/map/xborder-pins";
+/* ★ M4（需求 2/3/5/6）：图层偏好 + 图层面板 + 公厕弹窗 */
+import { useLayerPrefs } from "@/lib/map/useLayerPrefs";
+import type { PublicToilet } from "@/lib/map/public-toilets";
+import type { XbPinKind } from "@/components/map/xborder-pins";
+import LayerSheet from "./LayerSheet";
+import PublicToiletCard from "./PublicToiletCard";
 
 const MY_LOCATION = "我的位置";
 /**
@@ -365,18 +372,6 @@ export default function NavShell({
     [tqhTrip, tqh.data.trips],
   );
   /**
-   * ★ 2026-11-06（修复批 #1）：**双色巴士标集合**（主码）。
-   *
-   * 带 `bus_station_code` 的通琴号站不再单独画 marker ⇒ 通琴号信息改挂到巴士站标上：
-   * `NavMap` 给命中集合的巴士 marker 染「左蓝右粉」。实测 41 站 → 35 站台码 → **33 主码**
-   * （`/api/stations` 按主码去重，`M172/15`+`/16`、`T551/1`+`/2` 各共用一个蓝点）。
-   * 数据未到位 ⇒ `null` ⇒ 巴士层保持原样（降级安全）。
-   */
-  const tqhSharedCodes = useMemo<ReadonlySet<string> | null>(
-    () => (tqh.data.stations.length ? sharedBusMainCodes(tqh.data.stations) : null),
-    [tqh.data.stations],
-  );
-  /**
    * 关联巴士站（有 `bus_station_code`）⇒ 在**既有**站卡下方追加的通琴号分组。
    * ★ 2026-11-06（#2）：改为**按通琴号站逐个成组**（`通琴号-<站名>`），一个主码可能有多个
    *   通琴号站（`M172` → F/G 两个站台；`T429` → 3 个）⇒ 不再合并成一坨。
@@ -540,6 +535,35 @@ export default function NavShell({
   navActiveRef.current = navActive;
 
   /**
+   * ★ 2026-11-06（修复批 #1）：**双色巴士标集合**（主码）。
+   *
+   * 带 `bus_station_code` 的通琴号站不再单独画 marker ⇒ 通琴号信息改挂到巴士站标上：
+   * `NavMap` 给命中集合的巴士 marker 染「左蓝右粉」。实测 41 站 → 35 站台码 → **33 主码**
+   * （`/api/stations` 按主码去重，`M172/15`+`/16`、`T551/1`+`/2` 各共用一个蓝点）。
+   * 数据未到位 ⇒ `null` ⇒ 巴士层保持原样（降级安全）。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   * ★ 2026-11-08（负责人裁定）：**导航态一律不染色**
+   * ══════════════════════════════════════════════════════════════════════════
+   * 导航模式（`navActive`）下通琴号的站点视觉必须**全部消失**。这 33 个双色巴士标
+   * 与下面 96 个纯通琴号标是**同一类视觉**（同一条线的两种呈现），只隐一半等于没隐：
+   * 屏幕上会留下「左蓝右粉」的巴士点——它们既不是纯巴士站（改过色），
+   * 也不是通琴号站（没有独立 marker），是最难解释的第三种东西。
+   *
+   * ⇒ 导航态返回 `null`（`NavMap` 的契约：`null` = 不染，见 `NavMap.tsx:1397` 的
+   *   `!!tqhSharedBusCodes && …`），与 `tqhSegments={navActive ? null : tqhPath}`
+   *   （本文件 :2328）**同口径**。退出导航 ⇒ 依赖变化 ⇒ 站点图层重建 ⇒ 双色自动恢复。
+   *
+   * ⚠️ 本 memo **必须排在 `navActive` 之后**：`navActive` 是 `const`，提前引用会命中 TDZ
+   *    （这也是它不再和 `tqhSiblings` 挨着放的原因）。
+   */
+  const tqhSharedCodes = useMemo<ReadonlySet<string> | null>(
+    () =>
+      navActive ? null : tqh.data.stations.length ? sharedBusMainCodes(tqh.data.stations) : null,
+    [navActive, tqh.data.stations],
+  );
+
+  /**
    * ★ 本批（需求② / AC-29~31）：**站点白名单**（主码）。
    *   导航/路线查看模式 ⇒ 本程各腿站点**并集**（`ov.body.strips`，`mainOf` 归一）；
    *   空集保护：`size > 0` 才过滤（否则折成 `null` ⇒ 不过滤）。
@@ -552,37 +576,38 @@ export default function NavShell({
   }, [rsOpen, pane, ov.body]);
 
   /**
-   * ★ 2026-11-06（修复批 #3 / R2）：**通琴号站点白名单**（与上面 `lineStops` 并列的第二个白名单）。
+   * ★ 2026-11-06（修复批 #3）：**通琴号站点白名单**（与上面 `lineStops` 并列的第二个白名单）。
    * 优先级（顺序即语义，不要重排）：
-   *   ① **导航态**（`navActive` = rsOpen && pane==='detail'）⇒ `null` = 不过滤 ——
-   *      R2 原话「导航模式现有白名单逻辑不动」，通琴号侧同样**一个字不改**；
+   *   ① **导航态**（`navActive` = rsOpen && pane==='detail'）⇒ **空集** ⇒ 96 个通琴号标**全部隐藏**；
    *   ② 通琴号班次详情（`tqhTrip`）⇒ 本班站点；
    *   ③ 巴士/轻轨线路详情（`rv.picked`）⇒ **空集** ⇒ 通琴号标全部隐藏
    *      （R2：其余站点「含其它通琴号站、其它巴士站」一律隐藏）；
-   *   ④ 其余（浏览）⇒ `null`。
+   *   ④ 其余（浏览）⇒ `null` = 不过滤。
    * ⚠️ 空集必须是**稳定引用**（`EMPTY_ID_SET`）：`TqhStationLayer` 的 `plan` 依赖它，
    *    每次新建 Set 都会重建 96 个 marker。
    * ⚠️ 必须放在 `navActive` 之后：`navActive` 是 `const`，提前引用会命中 TDZ。
    *
    * ══════════════════════════════════════════════════════════════════════════
-   * ★ 2026-11-06（修复批 #6c）：**已知边界，明示保持现状（负责人裁决）**
+   * ★ 2026-11-08（负责人裁定）：**导航态传空集 ⇒ 全部隐藏 —— 作废当年的 R2 裁决**
    * ══════════════════════════════════════════════════════════════════════════
-   * 「**导航态 ∧ 已选班次**」（`navActive && tqhTrip`）同时成立时：
-   *   通琴号**不做本班过滤** —— 因为优先级 ① 先命中并返回 `null`（R2 裁决）。
-   *   实际表现 = 96 个通琴号标全画，只有非本班站降 0.42 透明（`tqhActiveIds`）。
+   * 背景：优先级 ① 原先写的是 `return null`（= 不过滤），依据 2026-11-06 的 R2
+   *   「导航模式现有白名单逻辑不动」。`null` 与「不过滤」在 `TqhStationLayer` 里是
+   *   **同一个值**，于是导航态把 96 个通琴号站一个不落地全画了出来 —— 这是当年
+   *   **显式裁决**的结果，不是漏写；本次由负责人明确改判为「导航模式下这些图标全部隐藏」，
+   *   故 R2 那一条**作废**，改为返回 `EMPTY_ID_SET`。
    *
-   * 为什么现在可以接受：
-   *   · `pickTqhTrip` 已加 `navActiveRef` 守卫 ⇒ **导航开始后无法再选班次**，
-   *     该组合只剩「用户导航**之前**就选了班次」这一条路径；
-   *   · 导航态不再绘制班次路径线（`tqhSegments={navActive ? null : tqhPath}`）
-   *     ⇒ 屏幕上不会出现第二条线，最伤人的那半已经消掉。
+   * ⇒ 现口径：导航态 / 班次详情 / 巴士轻轨线详情，通琴号标一律**不建 marker**
+   *   （`TqhStationLayer` 是数据层过滤，不是 `display:none`）；
+   *   只有**浏览态**（`null`）才画全量 96 个。
    *
-   * ⚠️ **若将来要改（让 `tqhTrip` 优先于 `navActive`），必须由负责人重新裁决** ——
-   *   这不是"顺手调一下顺序"：该优先级同时决定**导航态的整体站点密度**，
-   *   而那是已验收行为（R2）。不要为了让班次模式更"正确"而顺手重排。
+   * ⚠️ **不要把它改回 `null`**：那会让 96 个通琴号标在导航态重新出现（实测读数），
+   *   而导航态本就只该看见本程路线上的站；同批的双色巴士标（`tqhSharedCodes`）
+   *   也一起按导航态收掉了，两边必须同进同退，否则屏幕上可能仍留着「左蓝右粉」孤点。
+   * ⚠️ 次序仍然重要：① 只把「导航态」从 `null` 换成空集，**没有**改动 ②③④ 的相对顺序，
+   *   班次详情与本线详情的既有行为逐字不变。
    */
   const tqhWhitelist = useMemo<ReadonlySet<number> | null>(() => {
-    if (navActive) return null;
+    if (navActive) return EMPTY_ID_SET;
     if (tqhTrip) return tripStationIds(tqhTrip);
     if (rv.picked) return EMPTY_ID_SET;
     return null;
@@ -1288,14 +1313,35 @@ export default function NavShell({
     if (process.env.NODE_ENV === "production") return;
     const w = window as unknown as { __qa?: Record<string, unknown> };
     w.__qa = { ...(w.__qa ?? {}), forceWalkArrived: endWalk };
+    /**
+     * ★ M4（P1 收口 · team-lead 已批准）：`__qa.getEndpoints()` —— **只读**回吐当前起终点。
+     *
+     * ── 为什么需要 ──────────────────────────────────────────────────────────
+     *   「跨境聚合态的两条设施行是否**各用自己**的坐标」这件事，界面上完全看不出来
+     *   （两行都点得动、都跳、pageerror=0）。唯一能暴露「两条行共用一份坐标」的办法
+     *   就是把真正被设进 `from` / `to` 的 `lng/lat` 读出来做数值比对。
+     *   设点后不会立刻发算路请求（还差另一个端点）⇒ 抓网络请求这条路走不通（实测 0 个 POST）。
+     *
+     * ── 纪律（同 `forceWalkArrived`，四条缺一不可）────────────────────────────
+     *   ① 仅非生产；② 展开合并 `window.__qa`；③ 卸载摘键；④ **只读**，零副作用 ——
+     *      它只读 state，不 setState、不触发算路、不改任何行为。
+     */
+    w.__qa = {
+      ...(w.__qa ?? {}),
+      getEndpoints: () => ({
+        from: from ? { lng: from.lng, lat: from.lat, label: from.label } : null,
+        to: to ? { lng: to.lng, lat: to.lat, label: to.label } : null,
+      }),
+    };
     return () => {
       const cur = w.__qa;
       if (!cur) return;
       const next = { ...cur };
       delete next.forceWalkArrived;
+      delete next.getEndpoints;
       w.__qa = next;
     };
-  }, [endWalk]);
+  }, [endWalk, from, to]);
 
   /**
    * ★ v3.10.0：**进入 riding 后必须清掉「出发段」步行**（`walkSeg === "out"`）。
@@ -1876,6 +1922,11 @@ export default function NavShell({
     setTqhStation(null);
     /* ★ 需求 7：点地图空白处也收起地标卡（与另两张卡同一口径） */
     setXbPinIds(null);
+    /* ★ M4（需求 6）：点地图空白处关图层面板。
+       ⚠️ 刻意**不 return、不 stopPropagation** —— 上面三条清卡行为必须照常执行；
+       面板只是个浮层，关它不该改变"点地图 = 收起所有卡片"的既有语义。 */
+    setToilet(null);
+    setLayerSheet(false);
   }, []);
 
   /** 车辆点击：打开车辆卡 + 收起面板（导航态不清面板） */
@@ -1978,6 +2029,28 @@ export default function NavShell({
     stops: RouteStopsOk["stops"];
   } | null>(null);
   const [stopsDetent, setStopsDetent] = useState<Detent>("half");
+  /* ★ M4：图层偏好的**唯一真相**（地图图层与图层面板都读它；面板内部另有一份订阅实例，
+     二者通过 `must:layers` 事件同步 ⇒ 拨开关后地图立刻跟） */
+  const layers = useLayerPrefs();
+  /** ★ M4：图层面板开关（挂在 `.nav-map-wrap` 之外，见 JSX 注释） */
+  const [layerSheet, setLayerSheet] = useState(false);
+  /** ★ M4：当前打开的公厕卡（null = 未打开） */
+  const [toilet, setToilet] = useState<PublicToilet | null>(null);
+  /**
+   * ★ M4（缺陷修复）：站点/公厕图层的缩放门状态（由 `NavMap` 回写）。
+   * 默认 `ok: true` ⇒ 首帧不闪提示；拿到真实 zoom 前也不该吓用户。
+   */
+  const [mapZoom, setMapZoom] = useState<{ ok: boolean; zoom: number }>({ ok: true, zoom: 0 });
+  /**
+   * ★ M4（需求 6）：码头 / 机场分开控制 —— 必须 `useMemo`：
+   *   这个 Set 进 `XborderPinLayer` 的 effect 依赖，每次渲染新建会全量重建 marker。
+   */
+  const xborderKinds = useMemo(() => {
+    const s = new Set<XbPinKind>();
+    if (layers.prefs.pier) s.add("pier");
+    if (layers.prefs.airport) s.add("airport");
+    return s;
+  }, [layers.prefs.pier, layers.prefs.airport]);
   const pickedCode = rv.picked?.code ?? null;
   const pickedDir = rv.picked?.dir ?? null;
 
@@ -2254,6 +2327,31 @@ export default function NavShell({
            *   · 点地标时先清掉另两张卡：三者共用 `.nav-card-overlay`，不清就是两张卡叠着。
            */
           showXborderPins={!navActive}
+          /* ★ M4（需求 6）：码头 / 机场分别由图层开关控制（聚合本身仍在全量地标上算） */
+          xborderKinds={xborderKinds}
+          /* ★ M4（需求 2/3）：巴士站点 / 公共厕所图层开关（默认 4 开 1 关，来自图层偏好） */
+          showBusStations={layers.prefs.bus}
+          /**
+           * ★ 需求 3（负责人原话：「只在首页地图显示，导航时隐藏」）：
+           *   这里承载**两件事** —— 用户偏好 × **相位门**。
+           *   用 `navPhase === "off"`（全站统一的「非首页地图」口径，与 `navMode`
+           *   `NavShell.tsx:2448` 同一判据），**不用 `navActive`**：后者是
+           *   `rsOpen && pane === "detail"`，推荐层下仍为 false ⇒ 得到「推荐面板开着、
+           *   公厕照样显示」，违反需求。
+           *   ⚠️ 改名提醒：本 prop 不是「用户偏好」，是「此刻该不该画」。
+           */
+          showToilets={layers.prefs.toilet && navPhase === "off"}
+          /* ★ 用「值相同则返回原对象」的写法：`NavMap` 的 render 会在 zoomend/moveend 反复跑，
+             每次都 new 一个对象会让父组件无限重渲染（React 只按引用比较）。 */
+          onStationZoomChange={(ok, zoom) => setMapZoom((p) => (p.ok === ok && p.zoom === zoom ? p : { ok, zoom }))}
+          onToiletClick={(t) => {
+            /* 与另两张卡同一口径：先清同类卡，三者共用 `.nav-card-overlay` */
+            setStation(null);
+            setTqhStation(null);
+            setXbPinIds(null);
+            rv.closeVehicle();
+            setToilet(t);
+          }}
           onXborderPinClick={(ids) => {
             setStation(null);
             setTqhStation(null);
@@ -2326,14 +2424,16 @@ export default function NavShell({
           tqhStations={tqhMapStations}
           tqhActiveIds={tqhActiveIds}
           tqhSegments={navActive ? null : tqhPath}
-          /* ★ 2026-11-06（修复批 #1）：双色巴士标集合（通琴号关联站不再单独成标） */
+          /* ★ 2026-11-06（修复批 #1）：双色巴士标集合（通琴号关联站不再单独成标）；
+             `null` = 不染 —— 导航态恒 `null`（2026-11-08 裁定，与 tqhSegments 同口径） */
           tqhSharedBusCodes={tqhSharedCodes}
           /* ★ 2026-11-06（#1 配套）：本班次经过、但已并入巴士标的站 ⇒ 巴士标加白环 */
           tqhActiveBusCodes={tqhActiveBusCodes}
           /* ★ 2026-11-06（修复批 #6 · P0）：班次模式下**巴士站点层**的白名单
              （只留关联巴士主码；空集 = 巴士站全隐；`null` = 不管，导航态/浏览态行为不变） */
           tqhBusWhitelist={tqhBusWhitelist}
-          /* ★ 2026-11-06（修复批 #3 / R2）：通琴号站点白名单（null = 不过滤） */
+          /* ★ 2026-11-06（修复批 #3）：通琴号站点白名单
+             （`null` = 不过滤 = 仅浏览态；导航态传空集 ⇒ 全隐，2026-11-08 裁定） */
           tqhWhitelist={tqhWhitelist}
           onTqhStationClick={onTqhStationClick}
         />
@@ -2357,6 +2457,8 @@ export default function NavShell({
           navMode={navPhase !== "off"}
           /* ★ v3.6.1：「查看全部站点」⇒ `/line/[code]` 深链页（保留为可达入口，不是孤儿页） */
           onOpenAllStops={openAllStops}
+          /* ★ M4（需求 5）：图层面板入口（右栏最上；导航态由 NavBrandBar 内部隐藏） */
+          onOpenLayers={() => setLayerSheet(true)}
         />
 
         {/* 顶置搜索条 + 提示条槽（★ v3.6.0 AC-54：收藏带入横幅及其专用 props 已删除） */}
@@ -2394,17 +2496,72 @@ export default function NavShell({
         </div>
       )}
 
+      {/* ★ M4（需求 5/6）：图层面板 —— 必须挂在 `.nav-map-wrap` **之外**：
+          `.nav-shell--full .nav-map-wrap` 是 `position:fixed; z-index:0`，挂进去会被那个
+          堆叠上下文困住，被 z70 的半屏面板盖死。打开即 half 档（几何取 `detentTopsPx`），
+          点面板外地图由 `onMapClick` 关闭（不吞掉原有清卡行为）。 */}
+      <LayerSheet
+        open={layerSheet}
+        onClose={() => setLayerSheet(false)}
+        winH={winH}
+        safeTop={safeTop}
+        zoomOk={mapZoom.ok}
+        zoom={mapZoom.zoom}
+      />
+
       {/* ★ 卡片浮层（车卡/站卡）—— 挂在 wrap **之外**，`.nav-card-overlay`（fixed z90）
           ⇒ 面板打开时点地图带上的车/站，卡片不被面板（z70）压住。 */}
-      {(station || rv.selected || tqhStation || xbPinIds) && (
+      {(station || rv.selected || tqhStation || xbPinIds || toilet) && (
         <div className="nav-card-overlay">
+          {/* ★ M4（需求 3）：公厕卡 —— 与另三张共用同一个 `.nav-card-overlay`（z90）。
+              点 pin 时上面几个状态已被清空 ⇒ 实际同屏只有它一张。 */}
+          {toilet && (
+            <PublicToiletCard
+              toilet={toilet}
+              navActive={navActive}
+              onClose={() => setToilet(null)}
+              onSetFrom={() => {
+                setFrom(toiletToNavPoint(toilet));
+                setToilet(null);
+                setStage("panel");
+              }}
+              onSetTo={() => {
+                setTo(toiletToNavPoint(toilet));
+                setToilet(null);
+                setStage("panel");
+              }}
+            />
+          )}
           {/* ★ 需求 7：跨境地标卡（机场/码头；聚合点为两行链接）。
               放在最前：点地标时上面三个状态已被清空，实际同屏只有它一张。 */}
-          {xbPinIds && <XborderCard ids={xbPinIds} onClose={() => setXbPinIds(null)} />}
+          {xbPinIds && (
+            <XborderCard
+              ids={xbPinIds}
+              onClose={() => setXbPinIds(null)}
+              /* ★ M4（需求 4）：逐条设施设点 —— 每条用**自己**的坐标（`xbPinById`） */
+              navActive={navActive}
+              onSetFrom={(id) => {
+                const pin = xbPinById(id);
+                if (!pin) return;
+                setFrom({ kind: "place", label: pin.name, lng: pin.lng, lat: pin.lat });
+                setXbPinIds(null);
+                setStage("panel");
+              }}
+              onSetTo={(id) => {
+                const pin = xbPinById(id);
+                if (!pin) return;
+                setTo({ kind: "place", label: pin.name, lng: pin.lng, lat: pin.lat });
+                setXbPinIds(null);
+                setStage("panel");
+              }}
+            />
+          )}
           {station && (
             <StationCard
               station={station}
               colors={colors}
+              /* ★ M4（需求 4）：导航态不渲染设点按钮（判定在 SetPointActions 内部） */
+              navActive={navActive}
               onClose={() => setStation(null)}
               onSetFrom={() => {
                 setFrom(stationToNavPoint(station));
@@ -2449,6 +2606,28 @@ export default function NavShell({
               onPickTrip={pickTqhTrip}
               /* ★ 2026-11-06（#6c）：导航态禁用班次行（与 `StationCard` / 线路行同一口径） */
               pickTripDisabled={navActive}
+              /* ★ M4（需求 4）：设点 —— 合并组取代表站坐标（同一物理点，结果等价） */
+              navActive={navActive}
+              onSetFrom={
+                tqhStation?.stations[0]
+                  ? () => {
+                      const st = tqhStation.stations[0];
+                      setFrom({ kind: "place", label: st.name, lng: st.lng, lat: st.lat });
+                      setTqhStation(null);
+                      setStage("panel");
+                    }
+                  : undefined
+              }
+              onSetTo={
+                tqhStation?.stations[0]
+                  ? () => {
+                      const st = tqhStation.stations[0];
+                      setTo({ kind: "place", label: st.name, lng: st.lng, lat: st.lat });
+                      setTqhStation(null);
+                      setStage("panel");
+                    }
+                  : undefined
+              }
               onClose={() => setTqhStation(null)}
             />
           )}
@@ -2815,4 +2994,13 @@ export default function NavShell({
 /** 站点 → NavPoint（`kind='station'`，label 带站码，与 POI 搜索口径一致） */
 function stationToNavPoint(s: StationCardStation): NavPoint {
   return { kind: "station", label: `${s.code} ${s.name}`.trim(), lng: s.lng, lat: s.lat, code: s.code };
+}
+
+/**
+ * ★ M4：公厕 → 导航端点。
+ * `kind: "place"` + **GCJ-02** 坐标（`PublicToilet.lat/lng` 已是换算后的展示坐标，
+ * 再调 `wgs84ToGcj02()` 会偏 ~600m）。标签用「公共厕所-繁體名」，与弹窗标题同口径。
+ */
+function toiletToNavPoint(t: PublicToilet): NavPoint {
+  return { kind: "place", label: `公共厕所-${t.nameTc}`, lng: t.lng as number, lat: t.lat as number };
 }

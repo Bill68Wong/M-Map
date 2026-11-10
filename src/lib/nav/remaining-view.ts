@@ -136,16 +136,24 @@ export function remainServedOf(input: ServedRemainInput): RemainView {
  *
  * ── 与服务端逐字对应 ───────────────────────────────────────────────────
  *   ```
- *   legRemain = segRemainSec / 60 + Σ minToNext[pivotIdx .. 倒数第二站]
+ *   legRemain = segRemainSec / 60 + Σ minToNextEst[pivotIdx .. 倒数第二站]
  *   ```
- *   逐跳项来自 `strips[legIdx].stops[k].minToNext`（`lookupHop` 产物，与服务端同一个源）。
+ *   逐跳项来自 `strips[legIdx].stops[k].minToNextEst`（`lookupHop` 产物的**估算列**，
+ *   与服务端 `hopMinutesFrom` 同一个源）。
+ *   ⚠️ **禁止改成 `minToNext`**：那一列可为 `null`（兜底估算不合物理时留白用），
+ *      `null` 会被 `numOr0` 归 0 ⇒ 剩余时间**静默偏短**、用户按早了赶不上车，
+ *      而且**所有断言都不会红**（顶部数字与竖条一起偏，互相自洽）。累加必须用 est 列。
  */
 export interface LegRemainInput {
   /** 客户端位置模型融合值（`RideSegProgress.segRemainSec`）；`null` = 无位置模型 */
   segRemainSec: number | null;
   /** 基准站下标（`track.ts#remainFromIdxOf(prog)`）；`null` = 无进度 */
   pivotIdx: number | null;
-  /** 本段站条逐跳分钟（末站没有 `minToNext`，传 `0` 或不传即可） */
+  /**
+   * 本段站条逐跳分钟。⚠️ 调用方传的是 **`minToNextEst` 列**（`NavDetailBody.tsx:762`
+   * `trackStops.map((s) => s.minToNextEst)`），不是可为 `null` 的展示列 `minToNext`。
+   * 末站没有下一跳，传 `0` 或不传即可。
+   */
   minToNext: number[];
   /** 本段静态分钟（`card.rides[legIdx].minutes`）—— 契约不成立时的保守回退 */
   legMinutes: number;

@@ -6927,8 +6927,11 @@ body[data-sheet="open"] .nav-searchbar {
 }
 /* ★ 2026-11-06（P0 · 删导航冗余行）：`.navstrip__ride` / `.navstrip__ride-sub` 已随
    「车上约 N 分 · 已过 n 站」整行删除（`NavStrip.tsx` 同步移除渲染 + `data-ride-min` 观测钩子）。
-   删前已全仓 grep 确认这两个类名只被那一行引用，无第二消费方、无 e2e/QA 钩子依赖。 */
-.navstrip__hop { font-size: var(--text-xs); color: var(--meta); white-space: nowrap; }
+   删前已全仓 grep 确认这两个类名只被那一行引用，无第二消费方、无 e2e/QA 钩子依赖。
+   ★ 2026-11-09（需求 7）：**逐站「x 分」标签的样式**也已随之删除（组件侧整块移除、无 DOM 残留）；
+   同理删前已 grep 确认唯二消费点就是那个块的两条分支，该类名在全仓现存 **0** 处。
+   ⚠️ 但 `.rc-val--est`（下方「数值估算」通用类，`globals.css:3680`）**不能删** ——
+   折叠键「途经 N 站 · 车上约 X 分」仍用它标「这是估算值」，另外还有 4 处消费方。 */
 .navstrip__sub { font-size: var(--text-xs); color: var(--muted); white-space: nowrap; }
 /* ★ 2026-09-27（用户需求 3）：换乘处的「换乘后线路报时」（缩进对齐换乘行） */
 .navstrip__xfer {
@@ -8845,6 +8848,19 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* ── 计划时刻（★ 2026-11-08，`LineStopRow` 的 `plannedTime`）──────────────
+   11px / `--meta` / 等宽数字（`tabular-nums`：换班次时 `HH:MM` 列宽不跳）。
+   ⚠️ 它渲染在 **`.lp-stop__eta` 内部**（右对齐列），**不是**独立一列：
+      `.lp-stop__eta` 有 `min-width:96px`，通琴号的报站列恒空（无实时源）——
+      独立开一列在 320px 下会把站名从 125px 压到 90px（实测 7/7 行截断）。
+   ⚠️ **只在传了 `plannedTime` 时渲染**：`/line/[code]` 与 `RouteStopsSheet` 不传
+      ⇒ 该元素不存在 ⇒ 那两处 DOM 零变化。故本规则不会影响老版式。 */
+.lp-stop__time {
+  font-size: 11px;
+  color: var(--meta, var(--muted));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 /* 报站列：三态同高 16px；未加载留空（**不画骨架**，避免滚动跳动） */
 .lp-stop__eta {
   flex: none;
@@ -10654,17 +10670,22 @@ button.lp-stop__veh {
   text-align: center;
 }
 /**
- * 我方**认不出**的字面量 `status_raw === "0"`（机场抵澳实测 6 条）。
- * 渲染成「—」+ `--meta`：连排 6 行裸 `0` 会被读成渲染 bug；留空又会被读成加载失败。
- * 原始值进 `aria-label`（"狀態未能識別，原始值為 0"），并在表下给一行说明，见 `.xb-note`。
- * ⚠️ 类名用 `unrecognized` 而不是 `sentinel`：「哨兵」等于替上游判定这个值是废的，
- *    而我们只知道**自己没读懂**。类名也是描述，同样会繁殖。
+ * 「时刻变更」（上游 `航班更改時間 HH:MM`，`statusKind="rescheduled"`）。
+ *
+ * 与 `.xb-st--warn`（延误）**同档配色**：两者都是"行程受影响、但航班还会飞"，属同一语义组。
+ * 但必须能与延误分辨 —— 延误是"晚于原计划"，改期是"换成另一个钟点"，按原时刻去会误机。
+ * ⇒ 加了**下划虚线**：这是非颜色通道，色觉障碍用户同样能分辨（两个橙色只差深浅不可靠）。
+ *
+ * 颜色一律走 token（`currentColor` 继承 `.xb-st--warn` 的 `--warn`），不硬编码色值。
+ * 不加背景块/内边距：状态列宽度已被上游长文本顶到极限（见上方 `.xb-c` 注释），
+ * 加 padding 会把机场全量表撑宽、390 视口要左滑才能看到登机口。
  */
-.xb-st--unrecognized {
-  color: var(--meta);
+.xb-st--rescheduled {
+  text-decoration: underline dotted currentColor;
+  text-underline-offset: 2px;
 }
 
-/* 表下小字说明（哨兵值 / 资料完整性）；默认不出现，只在确有该情况时由 TSX 渲染 */
+/* 表下小字说明（资料完整性等）；默认不出现，只在确有该情况时由 TSX 渲染 */
 .xb-note {
   margin: 0;
   padding: 6px var(--sheet-gutter) var(--space-2);
@@ -11226,8 +11247,9 @@ button.lp-stop__veh {
    视觉语言仍对齐：同样「白描边 + 1px 深外圈」，只是尺寸与层级不同。
    ══════════════════════════════════════════════════════════════════════════ */
 :root {
-  /* 地标圆点直径 —— **必须与 `xborder-pins.ts#XB_PIN_SIZE` 同值**（聚合阈值按它算，
-     两处不一致会导致"明明看着分开了却还聚合"）。改一处就要改两处。 */
+  /* 地标圆点直径 —— **必须与 `xborder-pins.ts#XB_PIN_SIZE` 同值**
+     （聚合阈值 = 本值 + `XB_PIN_GAP`，即"两圆快撞上"的中心距；
+     两处不一致会导致"明明图标已经撞上了却不合并"）。改一处就要改两处。 */
   --xb-pin-size: 14px;
   /* 外圈深描边：与站点标同值（`--tqh-map-edge` 是同一颜色的历史 token），
      单列一条是为了地标日后独立调深浅时不动站点 */
@@ -11415,3 +11437,296 @@ button.lp-stop__veh {
     font-size: 15px;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   M4（需求 2/3/5/6）：公厕图层 pin + 公厕卡 + 图层面板（2026-11-10）
+   ── 层级（改之前先看这张表，踩错就是"浮层被面板盖死"）──────────────────
+     `.nav-shell--full .nav-map-wrap`  z0   ← position:fixed 的堆叠上下文（`:2919`）
+     `.route-sheet`                    z70  ← 半屏面板
+     `.layer-sheet__panel`             z88  ← 本批：图层面板（压面板、让卡片）
+     `.nav-card-overlay`               z90  ← 站卡/车卡/地标卡/公厕卡
+     `.nav-alarm--top`                 z94
+   ⇒ 三张卡与图层面板都**必须**挂在 `.nav-map-wrap` 之外（NavShell 里已如此）。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 公厕 pin：13px **方形** + 白色「WC」（负责人裁定：方形 pin、上面能看清 WC 两个字母）。
+   ⚠️ 边长由 `PublicToiletLayer.tsx` 的 `TOILET_PIN_SIZE` 同步（marker offset 取一半），
+   改这里必须同时改那里，否则 pin 会整体偏半个身位。
+   13px 在真实底图上处于可辨认边缘 ⇒ 按 team-lead 授权升到 14px / 字号 9px。 */
+.nav-map__toilet {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9px;
+  font-weight: var(--fw-announce);
+  line-height: 1;
+  letter-spacing: 0;
+  border: 1px solid #fff;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.18);
+}
+
+/* ── 公厕卡：字段行用 grid 两列 ⇒ 值折行后**自然悬挂缩进**到值的起点 ──
+   需求原文：字段名与值同一行、不省略号截断；折行时新行从值开始。
+   ⚠️ 不用 `white-space: nowrap` 硬扛（那会溢出卡片）、不用 `text-overflow: ellipsis`
+   （负责人明确禁止截断）。11px 下约 30 个全角字符一行，长地址/开放时间必然折行。 */
+.toilet-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.toilet-card__row {
+  display: grid;
+  grid-template-columns: 4.6em 1fr;
+  column-gap: var(--space-2);
+  align-items: start;
+  font-size: var(--text-2xs);
+  line-height: var(--leading-body);
+}
+.toilet-card__k {
+  color: var(--meta);
+  white-space: nowrap;
+}
+/* 值列默认**单行、不折行、不省略**（负责人 2026-11-10 裁定：只有开放时间允许折行）。
+   ⚠️ 不要在这里加 `overflow-wrap:anywhere` / `white-space:normal` —— 那是把所有值列
+   都放开折行，违反「仅开放时间可折行」。需要折行的只有 `--wrap` 一个变体。 */
+.toilet-card__v {
+  color: var(--fg-2);
+  white-space: nowrap;
+  text-overflow: clip;
+}
+/* 地址专用：**仍是单行不省略**，但值单独降到 10px。
+   依据（team-lead 实测）：地址最长 **25.2 全角**；11px 下 25.2×11≈277px + 字段名列 ≈33px
+   + gap 8px ≈ **318px** > 卡片可用 ≈300px ⇒ 11px 装不下，10px 后 ≈293px 装得下。
+   （≤409px 的窄屏已被 `@media` 整体降到 10px，此处不再区分。） */
+.toilet-card__v--tight {
+  font-size: 10px;
+}
+/* 开放时间：**唯一允许折行**的字段。grid 第二列 ⇒ 折行后每行左边缘 = 值起点（悬挂缩进）。 */
+.toilet-card__v--wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.toilet-card__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+.toilet-card__tag {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 6px;
+  border-radius: var(--radius-chip);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+.toilet-card__tag--warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.toilet-card__photo {
+  display: block;
+  /* ★ 高度上限（team-lead 2026-11-10）：竖拍照片曾把卡片顶掉近半屏。
+     160px + `object-fit: cover` ⇒ 横图按宽度收、竖图按高度裁，卡片永远不超过
+     `.nav-card-overlay` 的 62dvh 可用高度。 */
+  max-width: 100%;
+  max-height: 160px;
+  width: auto;
+  height: auto;
+  object-fit: cover;
+  border-radius: var(--radius-sm, 6px);
+}
+.toilet-card__photo-fallback {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--muted);
+}
+
+/* ── 图层面板：打开即 half 档（top 由 JS 用 detentTopsPx 写入内联样式）── */
+.layer-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 88;
+}
+.layer-sheet__scrim {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: rgba(15, 23, 32, 0.28);
+  cursor: default;
+}
+/* ★ P2：DOM 模型与 `.route-sheet` 一致 —— **全高 + 只靠 `translateY` 定位**。
+   第一版用「bottom:0 + max-height + top=topsPx」与 `useSnapSheet` 混用，双向偏移把面板推出一屏。 */
+.layer-sheet__panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 100dvh;
+  transform: translateY(var(--sheet-y-anim, 100dvh));
+  transition: transform var(--dur-base) var(--ease-standard);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  padding: var(--space-2) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  box-shadow: 0 -8px 24px rgba(15, 23, 32, 0.12);
+}
+/* ★ 抓手：**热区 24px 高**、视觉条 4px —— 4px 的热区在拖动中极易丢 `pointermove`
+   （实测：`peek → half` 上拖只位移 ~16px 就回弹；`half→full`/`half→peek` 因为面板跟着
+   光标走所以没暴露这个问题）。视觉不变，只是把可拖区域撑大。 */
+.layer-sheet__grab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 24px;
+  margin: 0 auto 4px;
+  background: transparent;
+  /* ★ 关键：抓手必须 `touch-action:none` —— 面板自身是 `pan-y`（要能滚内容），
+     手势落在抓手上时若仍允许 pan-y，浏览器会把手势判为滚动并**发出 pointercancel**，
+     拖拽当场中断。实测：`peek → half` 上拖只收到 2 个 pointermove 就 `pointercancel=1`、
+     `pointerup=0`（下拖因为面板到底没有可滚空间，所以侥幸能走完）。 */
+  touch-action: none;
+}
+.layer-sheet__grab::before {
+  content: "";
+  display: block;
+  width: 36px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border-2);
+}
+.layer-sheet__panel:focus {
+  outline: none;
+}
+.layer-sheet__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+}
+.layer-sheet__title {
+  font-size: var(--text-md);
+  font-weight: var(--fw-emphasize);
+  color: var(--fg);
+}
+.layer-sheet__group {
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border);
+}
+.layer-sheet__group-title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-2xs);
+  font-weight: var(--fw-read);
+  color: var(--meta);
+  letter-spacing: var(--tracking-label);
+}
+/* 一行一个开关：**44×44 触控区**，选中态靠「实心方块 + 对钩」而非颜色微差 */
+.layer-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.layer-row__box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 1.5px solid var(--border-2);
+  border-radius: 4px;
+  color: transparent;
+  background: transparent;
+}
+.layer-row.is-on .layer-row__box {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.layer-row.is-on .layer-row__label {
+  color: var(--fg);
+  font-weight: var(--fw-emphasize);
+}
+.layer-sheet__foot {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+.layer-sheet__hint {
+  margin: 0;
+  font-size: var(--text-2xs);
+  color: var(--warn);
+}
+/* 公厕数据署名：合规位，字号最小、颜色最弱，但不许隐藏 */
+.layer-sheet__attr {
+  margin: 0;
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+  color: var(--meta);
+}
+
+/* 窄屏（≤409px）：沿用既有「缩字号不横滚」口径（见 `@media (max-width:409px)` 段）。
+   地址是 nowrap（不换行不省略）⇒ 这里先把字段行整体降到 10px，给它多腾出约 9% 宽度；
+   若 10px 仍装不下，由 team-lead 裁定（不做省略、不自行折行）。 */
+@media (max-width: 409px) {
+  .toilet-card__row {
+    grid-template-columns: 4.2em 1fr;
+    font-size: 10px;
+  }
+}
+
+/* ── 公厕卡标题字号（M4 · 2026-11-10）─────────────────────────────────────
+   ⚠️ 为什么必须显式设：`.nav-station-card` / `__name` 都**没设 font-size**，
+   标题继承 `body` 的 `--text-md`（**15px**）。按 15px 算，带前缀「公共厕所-」的
+   198 条里有 **26 条**超容量（宽屏 295px）/ **59 条**（320px 窄屏），会大面积折行。
+   降到 11px（= 卡片正文 `--text-2xs`）后：**宽屏只剩 1 条**（`PT-22B57F7843D0`，
+   28.5 全角 > 26.8 容量）、窄屏 14 条 ⇒ 这 15 个场合允许折行（**仍不省略**）。
+   ⇒ 不引入 `nowrap`（必溢出）、不引入 `ellipsis`（负责人禁止截断）。 */
+.toilet-card .nav-station-card__name {
+  font-size: var(--text-2xs);
+  line-height: var(--leading-title);
+}
+
+/* ── M4（需求 4）：跨境卡的「逐条设施」容器（链接行 + 它自己的设点按钮）────────
+   为什么需要：`.nav-xborder-card__row` 本身是 flex 行，设点按钮不能塞进 `<a>` 里
+   （无效 HTML），所以在外面包一层纵向容器。间距与站卡 `__acts` 保持同一节奏。 */
+.nav-xborder-card__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-bottom: var(--space-2);
+}
+.nav-xborder-card__item + .nav-xborder-card__item {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+}
+

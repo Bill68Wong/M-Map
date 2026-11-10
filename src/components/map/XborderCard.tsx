@@ -18,15 +18,24 @@
  */
 
 import Icon from "@/components/ui/Icon";
+import SetPointActions from "@/components/nav/SetPointActions";
 import { xbHref, xbPinById } from "./xborder-pins";
 
 interface XborderCardProps {
   /** 该组包含的地标 id（聚合点 2 个，单点 1 个） */
   ids: string[];
   onClose: () => void;
+  /** ★ M4（需求 4）：导航语境 ⇒ 设点按钮整块不渲染（判定在 `SetPointActions` 内部） */
+  navActive?: boolean;
+  /**
+   * ★ M4（需求 4）：**逐条设施**设点。回调收到的是该条地标的 `id`，宿主用
+   * `xbPinById(id)` 取它**自己的**坐标 —— 聚合态两条各用自己的，不存在「取最近一个」。
+   */
+  onSetFrom?: (id: string) => void;
+  onSetTo?: (id: string) => void;
 }
 
-export default function XborderCard({ ids, onClose }: XborderCardProps) {
+export default function XborderCard({ ids, onClose, navActive = false, onSetFrom, onSetTo }: XborderCardProps) {
   const pins = ids.map(xbPinById).filter((p): p is NonNullable<typeof p> => !!p);
   /* 脏 id（理论上进不来）⇒ 不渲染半张空卡，直接交还给宿主的下次渲染 */
   if (!pins.length) return null;
@@ -47,19 +56,34 @@ export default function XborderCard({ ids, onClose }: XborderCardProps) {
 
       <div className="nav-xborder-card__rows">
         {pins.map((p) => (
-          /**
-           * 必须是真正的 `<a href>`：整页跳转、地址栏变化、浏览器返回键可用（需求原话
-           * 「整页替换、网址要变」）。用 `router.push` 也能换页，但会丢掉"这是链接"的
-           * 全部语义（新标签打开、右键、无障碍读屏的都读作 link）。
-           * `?from=map` 不可省：目标页只在 `from === "map"` 时把关闭键指回首页。
+          /*
+           * ★ M4（需求 4）：每条设施 = 「链接行 + 它自己的设点按钮」。
+           *   为什么把 `<a>` 包进 `<div>` 而不是把按钮塞进 `<a>`：`<button>` 不能嵌在 `<a>`
+           *   里（无效 HTML，点击会同时触发跳转）。设点按钮放在链接**下方**，各自独立。
            */
-          <a key={p.id} className="nav-xborder-card__row" href={xbHref(p.id)} data-xb-go={p.id}>
-            <span className="nav-xborder-card__row-main">
-              <span className="nav-xborder-card__row-name">{p.name}</span>
-              <span className="nav-xborder-card__row-sub">{p.sub}</span>
-            </span>
-            <span className="nav-xborder-card__row-action">{isCluster ? "查看班次" : "查看详细信息"}</span>
-          </a>
+          <div className="nav-xborder-card__item" key={p.id} data-xb-item={p.id}>
+            {/**
+             * 必须是真正的 `<a href>`：整页跳转、地址栏变化、浏览器返回键可用（需求原话
+             * 「整页替换、网址要变」）。用 `router.push` 也能换页，但会丢掉"这是链接"的
+             * 全部语义（新标签打开、右键、无障碍读屏的都读作 link）。
+             * `?from=map` 不可省：目标页只在 `from === "map"` 时把关闭键指回首页。
+             */}
+            <a className="nav-xborder-card__row" href={xbHref(p.id)} data-xb-go={p.id}>
+              <span className="nav-xborder-card__row-main">
+                <span className="nav-xborder-card__row-name">{p.name}</span>
+                <span className="nav-xborder-card__row-sub">{p.sub}</span>
+              </span>
+              <span className="nav-xborder-card__row-action">{isCluster ? "查看班次" : "查看详细信息"}</span>
+            </a>
+            {onSetFrom && onSetTo && (
+              /* 聚合态两条各用**自己**的坐标（p 就是这一条的 XbPin） */
+              <SetPointActions
+                navActive={navActive}
+                onSetFrom={() => onSetFrom(p.id)}
+                onSetTo={() => onSetTo(p.id)}
+              />
+            )}
+          </div>
         ))}
       </div>
     </div>

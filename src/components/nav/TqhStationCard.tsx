@@ -27,6 +27,7 @@
  *   `text-shadow` 与 `.rl-chip` 同值（唯一允许的两种补偿之一）。
  */
 import Icon from "@/components/ui/Icon";
+import SetPointActions from "./SetPointActions";
 import {
   hhmm,
   mergedTitleOf,
@@ -141,6 +142,14 @@ export interface TqhStationCardProps {
    * 语义与实现见 `TqhStationTripsProps.disabled`。缺省 `false` ⇒ DOM 与改前一致。
    */
   pickTripDisabled?: boolean;
+  /** ★ M4（需求 4）：导航语境 ⇒ 设点按钮整块不渲染（判定在 `SetPointActions` 内部） */
+  navActive?: boolean;
+  /**
+   * ★ M4（需求 4）：设点回调。宿主用 `stations` 的坐标造 `NavPoint`（合并组取代表站的坐标）。
+   * 两者都传才渲染按钮 ⇒ 收藏页等无地图上下文的调用方 DOM 不变。
+   */
+  onSetFrom?: () => void;
+  onSetTo?: () => void;
 }
 
 /** 侧标（澳 / 琴）：取代表站 */
@@ -156,6 +165,9 @@ export default function TqhStationCard({
   onClose,
   phase = "ready",
   pickTripDisabled = false,
+  navActive = false,
+  onSetFrom,
+  onSetTo,
 }: TqhStationCardProps) {
   const count = entries.reduce((n, e) => n + e.groups.reduce((m, g) => m + g.trips.length, 0), 0);
   const title = mergedTitleOf(stations);
@@ -223,6 +235,12 @@ export default function TqhStationCard({
           ))
         )}
       </div>
+
+      {/* ★ M4（需求 4）：设点按钮 —— 与巴士站卡/公厕卡/跨境卡同一组件（导航态整块不渲染）。
+          合并组（澳科大南門①②）取**代表站**的坐标：两条是同一物理点，设点结果等价。 */}
+      {onSetFrom && onSetTo && (
+        <SetPointActions navActive={navActive} onSetFrom={onSetFrom} onSetTo={onSetTo} />
+      )}
     </div>
   );
 }

@@ -40,6 +40,11 @@ export interface NavBrandBarProps {
    *   不传 ⇒ 不渲染（收藏页等无地图上下文的调用方不受影响）。
    */
   onOpenAllStops?: (code: string) => void;
+  /**
+   * ★ M4（需求 5）：图层面板入口（右栏最上）。
+   *   不传 ⇒ 不渲染（无地图上下文的调用方不受影响）；导航态一律隐藏（AC-84 同口径）。
+   */
+  onOpenLayers?: () => void;
 }
 
 export default function NavBrandBar({
@@ -53,6 +58,7 @@ export default function NavBrandBar({
   onLocate,
   navMode = false,
   onOpenAllStops,
+  onOpenLayers,
 }: NavBrandBarProps) {
   return (
     <div className="nav-brandbar">
@@ -100,8 +106,23 @@ export default function NavBrandBar({
         )}
       </div>
 
-      {/* 右栏：竖排按钮组（刷新 → 公共交通路线 → M Map）※「定位」已移至页面级 `.nav-locate-fab` */}
+      {/* 右栏：竖排按钮组（图层 → 刷新 → 公共交通路线 → M Map）※「定位」已移至页面级 `.nav-locate-fab` */}
       <div className="nav-brandbar__acts">
+        {/* ★ M4（需求 5）：图层面板入口 —— **右栏最上**（负责人指定），搜索框正上方。
+            导航语调整列隐藏（AC-84 同一口径）⇒ 导航中不可达（导航时不该换图层）。
+            图标沿用右栏同一套 20px / 1.8 描边规格，不新造视觉。 */}
+        {!navMode && onOpenLayers && (
+          <button
+            type="button"
+            className="nav-locate"
+            data-open-layers="on"
+            aria-label="图层"
+            title="图层"
+            onClick={onOpenLayers}
+          >
+            <Icon name="pin" size={20} />
+          </button>
+        )}
         {picked?.kind === "bus" && (
           <RefreshButton
             cooling={cooldownSec > 0}
