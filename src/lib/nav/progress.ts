@@ -15,7 +15,7 @@
  *   · 只对 moving 车算（停靠中无意义——区间未开始/已结束）；
  *   · 环线消歧：同一站有多个里程候选 → 取「包含车辆里程的最小区间」；再不行取最近中点；
  *   · 任何一环缺失（无几何/无里程/无 md）→ 该车**不出 progress 字段**（调用方降级）——
- *     宁缺勿错，绝不猜；
+ *     宁缺勿错，绝不猜；★ v4.1.1：`route_hop_stats.samples < HOP_MIN_SAMPLES(5)` 视为「无 md」。
  *   · ★ v3.7.0（缓存专项 · AC5.7）：三份缓存的**键里带三源版本令牌**
  *     （`route_shapes.fetched_at` + `route_station_mileage.updated_at` + `route_hop_stats.updated_at`，
  *     见 `progress-freshness.ts#versionTokenOf`）⇒ 改道 / 重算里程 / 重算时长后**立即**失效。
@@ -83,6 +83,21 @@ interface ShapeRec {
  */
 const TTL_GEOM_MS = 120_000;
 const TTL_HOP_MS = 600_000;
+/**
+ * `route_hop_stats` 的**最小样本门槛**（v4.1.1）。
+ *
+ * 为什么必须有：该表按 (route, from_main, to_main) 聚合，没有下限时 `samples=1` 的行也会被当成
+ * 「该跳的中位时长」。实测全库 2,458 行里 **59 行 samples ≤ 2、70 行 < 5**，它们全是单次观测 ——
+ * 把「跨海 7km 只测到 1 次 40 秒」这种极端值直接喂给 `md` 会让 `remainSecD` 偏差一整段，
+ * 而 `md` 同时决定 `progressTypeOf(segLenM, md)` 的段型与融合权重 `w`（一处错、三处错）。
+ *
+ * 门槛取 5 的依据：与 `long-stop.ts` 的 `MIN_DWELL_SAMPLES=5` 同一档（经验阈值、非文献值）；
+ * 低于它视为**无样本** → 走既有降级路径（`attachProgress` 跳过该车 / `locateSegmentOf` 返回 null），
+ * 而不是用噪声硬算。**宁缺勿错**是本文件一贯的口径（见文件头设计要点）。
+ *
+ * ⚠️ 改这个值等于改「哪些区间有位置模型」：调小 → 噪声进 ETA；调大 → 长尾区间失去进度修正。
+ */
+export const HOP_MIN_SAMPLES = 5;
 const shapeCache = new Map<string, { at: number; rec: ShapeRec | null }>();
 const mileCache = new Map<string, { at: number; map: Map<string, number[]> }>();
 const hopCache = new Map<string, { at: number; map: Map<string, number> }>();
@@ -146,9 +161,12 @@ async function getHops(pool: Pool, route: string, ver: string): Promise<Map<stri
   if (hit && Date.now() - hit.at < TTL_HOP_MS) return hit.map;
   const map = new Map<string, number>();
   try {
+    // ★ v4.1.1：`samples < HOP_MIN_SAMPLES` 的行**不参与**（视为无样本 → 调用方降级）。
+    //   门槛是常量、不是魔数；理由见 `HOP_MIN_SAMPLES` 注释。
     const r = await pool.query(
-      `SELECT from_main, to_main, p50_sec FROM route_hop_stats WHERE route_code = $1`,
-      [route],
+      `SELECT from_main, to_main, p50_sec FROM route_hop_stats
+        WHERE route_code = $1 AND samples >= $2`,
+      [route, HOP_MIN_SAMPLES],
     );
     for (const row of r.rows as { from_main: string; to_main: string; p50_sec: number }[]) {
       map.set(`${row.from_main}|${row.to_main}`, Number(row.p50_sec));

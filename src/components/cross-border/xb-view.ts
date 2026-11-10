@@ -89,6 +89,7 @@ type AnyStatusKind = AirportStatusKind | FerryStatusKind;
  *   离澳 `停止登機`                boarding_closed !terminal ⇒ `--warn`
  *   离澳 `櫃檯 A10-A12 已開放`     checkin_open    !terminal ⇒ `--fg`（不着色）
  *   离澳 `航班延誤至 HH:MM`        delayed         !terminal ⇒ `--warn`
+ *   离澳 `航班更改時間 HH:MM`      rescheduled     !terminal ⇒ `--warn` + 虚线（见下）
  *   离澳 `已取消` / 抵澳 `航班取消` cancelled       terminal  ⇒ `--danger`
  *   **抵澳 `已啟航 預計到達 HH:MM` departed        !terminal ⇒ `--fg`（绝不要 muted）**
  *   抵澳 `航班著陸 HH:MM`          landed          terminal  ⇒ `--muted`
@@ -100,61 +101,90 @@ type AnyStatusKind = AirportStatusKind | FerryStatusKind;
  *
  * ── 为什么「取消」不走 `--past` ────────────────────────────────────────
  *   负责人裁决 2：取消**进**最近五班，且状态要能看清。降权是为了"让位"，不是为了"藏起来"。
+ *
+ * ── `rescheduled` 与 `delayed` 同为 `--warn`，靠**下划虚线**区分 ─────────
+ *   两者都是"行程受影响、但不是终态"，配色同档（`--warn`）是设计稿的语义分组；
+ *   但文字上必须能分辨 —— 延误是"晚点"，改期是"换了钟点"，后者按原时刻去会误机。
+ *   虚线是**非颜色通道**：色觉障碍用户同样能分辨（只靠颜色深浅区分两个橙色不可靠）。
+ *   具体样式在 `globals.css#.xb-st--rescheduled`。
  */
 export function statusClass(kind: AnyStatusKind | string, isTerminal: boolean): string {
   if (kind === "cancelled") return "xb-st--danger";
   if (kind === "delayed") return "xb-st--warn";
+  if (kind === "rescheduled") return "xb-st--warn xb-st--rescheduled";
   /* 停止登機（正在关闸）不是终态，但对赶飞机的人是"最紧急的提示"⇒ 与延误同档 */
   if (kind === "boarding_closed") return "xb-st--warn";
   return isTerminal ? "xb-st--past" : "";
 }
 
 /* ══════════════════════════════════════════════════════════════════════
- * 状态文本：原文直出 + 我方认不出的字面量
+ * 状态文本：绝大多数**原文直出**，两个「需要我方给话术」的形态除外
  * ══════════════════════════════════════════════════════════════════════ */
 
 /**
- * 上游返回过、但**我方认不出**的字面量：`status_raw === "0"`
- * （机场抵澳实测 6 条，是字面量不是空串）。后端按契约保留原样
- * （`statusKind="unknown"`、`isTerminal=false`、行不剔除）。
+ * 上游字面量 `"0"` ⇒ 显示「待定」。
  *
- * ⚠️ 不要把这个值叫「哨兵」：那等于替上游判定"这个值是废的"。
- *    我们只知道**自己没读懂它** —— 它可能在机场系统里有确切含义（例如"已计划但无状态"）。
- *    措辞会繁殖：注释里写"哨兵"，下一个人就会用同样的词写下一个字段。
+ * ── 它是什么（2026-11-07 实证，见 `.verify/flight-status-corpus.md`）──────
+ *   · 是**上游原始值**，不是空串、不是我方解析产物（原始响应里就是 `"status": "0"`）；
+ *   · 语义 = **已计划、尚未进入任何流程**：白天快照 42 行 `"0"` 在 8 小时后
+ *     39 行转成 `航班著陸 HH:MM` / `已啟航 HH:MM` / `航班延誤`，余 4 行为 22:00 后晚班；
+ *   · 后端自 v4.1 起把它归 `statusKind="pending"`（非终态，行保留）。
+ *
+ * ── 为什么改掉旧的「—」+「未能识别」脚注 ─────────────────────────────
+ *   旧实现把 `"0"` 当"我方认不出"，显示破折号并在表下挂"未能识别，共 N 班"。
+ *   两个问题：① 白天离澳/抵澳各 40% 的行都是它 ⇒ 一屏破折号像渲染故障；
+ *   ② 归因是错的 —— 我们读懂了它，它是"还没开始"，不是"没读懂"。
+ *   ⇒ 换成确定的产品文案「待定」。
  */
-const STATUS_UNRECOGNIZED = "0";
+const STATUS_PENDING = "0";
+const STATUS_PENDING_LABEL = "待定";
+
+/**
+ * `航班更改時間 HH:MM` ⇒ 「时刻变更 HH:MM」。
+ *
+ * ── 为什么这里**要**改写措辞（与"原文直出"的其余状态不同）──────────────
+ *   · 项目语种是简体，而上游这句是繁体叙述（`更改時間`），直接原样显示会与全站
+ *     文案不一致；负责人 2026-11-08 裁定统一为「时刻变更」。
+ *   · 机场侧**无"不得修改"条款**（该条款属海事局，见 `airport/parse.ts:55` 注释
+ *     "机场侧无「不得修改」条款"）⇒ 展示层归一不违约。
+ *   · `status` 字段在库里与接口里**仍是原文** `航班更改時間 13:10`（`status_raw` 不改）；
+ *     本函数只决定屏幕上那 12px 的一格怎么显示。想核对原文随时能查。
+ *
+ * ── ⚠️ 时刻必须保留 ─────────────────────────────────────────────────
+ *   新时刻是用户唯一要的行动信息；只写「时刻变更」四个字等于把信息删掉。
+ *   故捕获 `HH:MM` 原样拼回。`航班更改時間`（无时刻）**不匹配**本规则、原文直出，
+ *   由后端落 unknown（漂移探针会看见），我们不在前端猜。
+ *
+ * ⚠️ 与 `status.ts` 的 `^航班更改時間\s+\d{1,2}:\d{2}$` 是**两条独立表达式**：
+ *    这边只管"怎么显示"，那边管"归哪一类"。漂移的最坏后果是显示回原文（可读、仍着色），
+ *    不会静默出错；`check-xborder-ui.tsx` 有逐字断言钉住本文件的输出。
+ */
+const RESCHEDULED_RE = /^航班更改時間\s*(\d{1,2}:\d{2})$/;
+const RESCHEDULED_LABEL = "时刻变更";
 
 export interface StatusCell {
-  /** 屏幕上显示的文本（原文；认不出的字面量除外） */
+  /** 屏幕上显示的文本（已知状态一律是 `status_raw` 原文） */
   text: string;
-  /** 是否「我方认不出」（⇒ 要 .xb-st--unrecognized + aria-label 交代原始值） */
-  unrecognized: boolean;
 }
 
 /**
  * 状态单元格内容。
  *
- * ── 为什么 `"0"` 不能原样渲染 ─────────────────────────────────────────
- *   连排 6 行裸 `0` 会被读成**渲染 bug**；留空又会被读成**加载失败**。
- *   ⇒ 显示「—」+ `--meta`，但把原始值放进 `aria-label`（"状态未能识别，原始值为 0"），
- *     并在表下用 `.xb-note` 说清"共 N 班"。
- *   ⚠️ 这是本批唯一允许把上游文本**替换成符号**的地方，替换的是"我方无法识别的字面量"，
- *     不是"改写内容"（海事局条款禁止的是后者）。
- *
  * ── 空值口径：为什么是「状态未识别」而不是「資料未公開」────────────────
  *   「資料未公開」是在说**上游没公开** —— 那是归因，而我们并不知道是不是真没公开
- *   （上游可能返回了空串、返回了 `0`、返回了我们白名单里没有的词）。
+ *   （上游可能返回了空串、返回了我们白名单里没有的词）。
  *   「未識別」只陈述**我方认知边界**，永远不会错。
- *   这条不是措辞洁癖：将来有人排查"为什么抵澳有 6 班没状态"，
+ *   这条不是措辞洁癖：将来有人排查"为什么某班没状态"，
  *   看到「未識別」会来查我们的白名单；看到「未公開」会去问机场 —— **前者才是正确方向**。
  *   ⚠️ `vessel` 为空仍用「资料未公开」（船名确实是"上游没给"，与本条不同）。
  */
 export function statusCell(status: string): StatusCell {
   const raw = status ?? "";
-  if (raw.trim() === STATUS_UNRECOGNIZED) return { text: "—", unrecognized: true };
-  /* 真空串（上游给了空）同样归入「我方认不出」—— 不替上游断言"没公开" */
-  if (!raw.trim()) return { text: "状态未识别", unrecognized: false };
-  return { text: raw, unrecognized: false };
+  if (raw.trim() === STATUS_PENDING) return { text: STATUS_PENDING_LABEL };
+  const re = RESCHEDULED_RE.exec(raw.trim());
+  if (re) return { text: `${RESCHEDULED_LABEL} ${re[1]}` };
+  if (!raw.trim()) return { text: "状态未识别" };
+  return { text: raw };
 }
 
 /* ══════════════════════════════════════════════════════════════════════

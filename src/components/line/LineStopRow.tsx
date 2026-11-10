@@ -11,6 +11,7 @@
  *     │   ├ .lp-stop__name  站名（繁体原文，**不做简繁转换**）
  *     │   └ .lp-stop__xfer  「换乘 3 路、25 路」（可选，最多 3 条）
  *     └ .lp-stop__eta   报站三态，固定 16px 高（**不画骨架**，列表零跳动）
+ *         └ .lp-stop__time  计划时刻 `HH:MM`（★ 2026-11-08，**可选**；不传即不渲染）
  *
  * ── ★ 2026-11-06（问题 #5c）：纵条上的**四态巴士图标** ────────────────────
  *   新增尾元素 `.lp-stop__veh`（`position:absolute`，**不入 flex 流**）：
@@ -168,6 +169,19 @@ export interface LineStopRowProps {
    */
   veh?: LineStopVeh | null;
   /**
+   * ★ 2026-11-08：本站的**计划时刻**（已格式化 `HH:MM`，通琴号用）。
+   *
+   *   · **不传 / `null` / 空串 ⇒ 该元素完全不渲染** ⇒ 既有消费方
+   *     （`/line/[code]` 页、`RouteStopsSheet`）的 DOM 与改前逐字节一致（硬要求）。
+   *   · 这是**计划时刻表**里的时刻，不是报站：文案只放时刻本身，
+   *     禁止出现「还有 N 分钟」「即将到站」「实时」这类暗示实时的措辞。
+   *   · ⚠️ 渲染在 **`.lp-stop__eta` 内部**（不是新增一列），原因见下方 `render` 处注释：
+   *     320px 实测新增独立列会把站名从 125px 压到 90px（7/7 行被省略号截断）。
+   *   · `data-eta` 三态契约**不变**：属性取值与「on/none 文案」逻辑逐字未动，
+   *     计划时刻只是在同一格里**追加**（两者不会同时出现：通琴号无实时源）。
+   */
+  plannedTime?: string | null;
+  /**
    * ★ 2026-11-06（#5c）：点巴士图标 → 打开巴士信息弹窗。
    *   不传 ⇒ 图标渲染为**非交互 `span`**（不做「死键」：绝不渲染一个点了没反应的 button）。
    */
@@ -190,6 +204,7 @@ export default function LineStopRow({
   registerEl,
   side,
   veh,
+  plannedTime,
   onOpenBusCard,
 }: LineStopRowProps) {
   const isFirst = index === 0;
@@ -225,8 +240,18 @@ export default function LineStopRow({
           <span className="lp-stop__xfer">换乘 {xfer.join("、")}</span>
         )}
       </span>
-      {/* 三态同高 16px：idle 留空（不放骨架/省略号），出现与替换时列表不跳动 */}
+      {/* 三态同高 16px：idle 留空（不放骨架/省略号），出现与替换时列表不跳动。
+          ★ 2026-11-08：计划时刻 `plannedTime` 渲染在**同一个格子里**（右对齐列）。
+          ⚠️ 为什么不是独立一列（真浏览器实测，不是估算）：
+             视口 320px 时 `.lp-list` 内宽 288 − 左内距 36 − 两处 gap 16 − `.lp-stop__eta`
+             的 `min-width:96px` ⇒ 站名只剩 125px；再塞一列时刻（27px）后掉到 **90px**，
+             7/7 行全部出现省略号（改前是 0/7 需要时……实测 7/7 已截断，本列再压 28%）。
+             而通琴号的报站列**恒空**（无实时源，`etaOf` 恒 idle）⇒ 这 96px 本来就是空转的，
+             把计划时刻放进去：站名宽度**回到改前**，时刻贴右边缘对齐，不留空洞。
+          ⚠️ `data-eta` 仍是 `eta.phase`（属性逐字未动），只有「on / none」才出文案，
+             计划时刻是**追加**内容 ⇒ 三态契约不变。 */}
       <span className="lp-stop__eta">
+        {plannedTime ? <span className="lp-stop__time">{plannedTime}</span> : null}
         {eta.phase === "on" ? eta.text : eta.phase === "none" ? "—" : null}
       </span>
       {veh && <VehMark veh={veh} onOpen={onOpenBusCard ?? null} disabled={!vehOnRideable(veh)} />}

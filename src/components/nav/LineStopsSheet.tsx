@@ -28,6 +28,9 @@
  * ── 纵条（§17-R4 裁决：**不做巴士图标、不做巴士信息弹窗**）────────────
  *   只留 rail + 节点（样式统一，不区分已过/当前/未到），站名后加「澳 / 琴」小标签。
  *   因此不存在"车在哪"的语义 ⇒ 也**没有**伪装实时的风险面。
+ *   ★ 2026-11-08：每站追加**计划时刻**（`.lp-stop__time`，来自 `tqh_trip_stops.stop_time`）。
+ *     它是时刻表里的计划值，不是报站 ⇒ 文案只有 `HH:MM`，禁止「还有 N 分钟」类措辞。
+ *     此前这一列在映射时被丢弃，行内 `data-eta` 又恒 `none` ⇒ 整列全是「—」。
  *
  * ── 刷新冷却（§8.4 / §14-R5）─────────────────────────────────────────
  *   通琴号是静态班次表 ⇒ 独立常量 `COOLDOWN_TQH_SEC`（3s），**不复用车辆冷却**。
@@ -179,6 +182,28 @@ export default function LineStopsSheet({
     [stationById],
   );
 
+  /**
+   * ★ 2026-11-08：逐站**计划时刻**（`HH:MM`）—— 以通琴号站 `id` 为键。
+   *
+   * ── 数据链路（本来一路都有，是前端映射时丢的）────────────────────────────
+   *   `tqh_trip_stops.stop_time`（`TIME NOT NULL`，库内注释「计划到站时刻」）
+   *     → `/api/tqh/lines`（`src/lib/tqh/query.ts` 的 `to_char(stop_time,'HH24:MI:SS')`）
+   *     → `TqhStop.stop_time`（`tqh-model.ts:44`）
+   *     → **此处**（此前 `stops` 映射只取 `seq`/`station_id`，这一列被丢掉）
+   *     → `LineStopRow` 的 `.lp-stop__time`。
+   *   实测 A1｜往澳门：07:30 / 07:40 / 07:43 / 08:15 / 08:25 / 08:27 / 08:32 —— 逐站不同。
+   *
+   * ⚠️ 是**计划时刻表**，不是实时报站；文案只有 `HH:MM` 本身（不得出现「还有 N 分钟」）。
+   */
+  const plannedTimeOf = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const st of trip?.stops ?? []) {
+      const t = hhmm(st.stop_time);
+      if (t) m.set(st.station_id, t);
+    }
+    return (stop: LineStop) => m.get(Number(stop.code)) ?? null;
+  }, [trip]);
+
   /** 时刻（计划发车；`HH:MM`）—— 顶部行与 aria-label 共用同一份 */
   const dep = hhmm(trip?.departure_time);
   /** 单向判定口径：该标号在 `tqh_trips` 里 `distinct direction === 1`（§8.5，不用"大概一半"这类模糊描述） */
@@ -188,8 +213,20 @@ export default function LineStopsSheet({
   // 空数组稳定引用（避免 `LineStopList` 每次渲染都因新 Map 而重算换乘列）
   const noLines = useMemo(() => new Map<string, string[]>(), []);
   const noopRegister = useCallback(() => {}, []);
-  /** 通琴号无实时报站 ⇒ 恒 `none`（`data-eta="none"` 照常输出；报站列由 CSS 在本层隐藏） */
-  const etaNone = useCallback(() => ({ phase: "none" as const, text: null }), []);
+  /**
+   * 通琴号**无实时报站**（静态班次表）⇒ eta 恒 `idle`：`data-eta="idle"` 照常输出到 DOM
+   * （三态契约不变），但 `LineStopRow` 对 `idle` **渲染空白**（不画「—」、不画骨架）。
+   * 计划时刻**追加**在同一个右对齐格内（`.lp-stop__time`，见 `plannedTimeOf`）——
+   * 通琴号的报站列本来就恒空，这一列正好用来放计划时刻，不额外吃站名宽度。
+   *
+   * ★ 2026-11-08：原为 `{ phase: "none" }` ⇒ 每行都渲染一个「—」，被误读成"时刻缺失"。
+   *   `none` 的语义是「该站确认无车」（报站口径），而通琴号的问题从来没有实时源，
+   *   用 `none` 既误导又制造了整列「—」。与 `RouteStopsSheet.tsx:219` 的 `etaIdle` 同口径。
+   * ⚠️ 旧注释写的「报站列由 CSS 在本层隐藏」是**假的** —— `globals.css` 只隐藏
+   *   `.lp-page[data-kind="lrt"]`（:8866），通琴号 `.lst-sheet` 没有任何隐藏规则。
+   *   故必须靠 `idle` 让这一列留白，而不是指望一条不存在的 CSS。
+   */
+  const etaIdle = useCallback(() => ({ phase: "idle" as const, text: null }), []);
 
   if (!trip) return null;
 
@@ -282,11 +319,14 @@ export default function LineStopsSheet({
       </div>
 
       <div className="lst-sheet__body">
-        {/* ★ 纵条：只留 rail + 节点；站名后「澳 / 琴」标签（§17-R4）。无报站列（静态时刻表）。 */}
+        {/* ★ 纵条：rail + 节点 + 站名 +「澳 / 琴」标签（§17-R4）。
+            报站列恒留白（无实时源，`etaIdle`）；每站**计划时刻**由 `plannedTimeOf`
+            追加进同一个右对齐格（`.lp-stop__time`）⇒ 不新增列、不挤站名宽度。 */}
         <LineStopList
           stops={stops}
           color="var(--tqh-accent)"
-          etaOf={etaNone}
+          etaOf={etaIdle}
+          plannedTimeOf={plannedTimeOf}
           registerEl={noopRegister}
           linesOfStation={noLines}
           lineCode=""

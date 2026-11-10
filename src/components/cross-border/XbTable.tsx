@@ -192,8 +192,6 @@ export default function XbTable<R extends XbTableItem>({
   }, [autoScroll, nowMinutes, items.length]);
 
   const total = items.length;
-  /* 上游哨兵 `status="0"` 的行数（只用于表下那行说明；为 0 则不渲染，不加噪音） */
-  const unrecognizedCount = items.filter((r) => statusCell(r.status).unrecognized).length;
 
   return (
     <>
@@ -238,7 +236,7 @@ export default function XbTable<R extends XbTableItem>({
         const r = node.row;
         const dim = r.isTerminal ? " xb-c--dim" : "";
         const when = displaySched(r.schedDate, r.schedTime, today);
-        /* 状态**原文直出**（唯一例外：我方认不出的字面量 `"0"` ⇒ 「—」+ aria-label，见 `statusCell`） */
+        /* 状态**原文直出**（唯一例外：占位字面量 `"0"` ⇒ 「待定」，见 `statusCell`） */
         const st = statusCell(r.status);
         /* 有状态列吗？只看表头里有没有「状态」——列模板是唯一真相，不在渲染处再判方向 */
         const hasStatus = spec.heads.includes("状态");
@@ -272,13 +270,12 @@ export default function XbTable<R extends XbTableItem>({
 
         if (hasStatus) {
           /* ⑤ 状态：颜色只做冗余通道，文本是真相（取消 --danger 不被置灰吃掉；
-                我方认不出的 "0" ⇒ 「—」+ --meta + aria-label 交代原始值） */
+                `pending`（上游 `0`）非终态 ⇒ 无色不着灰，文字「待定」 */
           cells.push(
             <span
               key="d"
               role="cell"
-              className={`xb-c xb-c--st ${st.unrecognized ? "xb-st--unrecognized" : statusClass(r.statusKind, r.isTerminal)}`}
-              aria-label={st.unrecognized ? "状态未能识别，原始值为 0" : undefined}
+              className={`xb-c xb-c--st ${statusClass(r.statusKind, r.isTerminal)}`}
             >
               {st.text}
             </span>,
@@ -303,14 +300,6 @@ export default function XbTable<R extends XbTableItem>({
         );
       })}
     </div>
-    {/*
-      「未能识别」的说明行（设计稿 v1.2 §04 要求）。
-      只在真有 `status="0"` 的行时出现：没有就不渲染，避免"每张表都挂一句解释"的噪音。
-      这句话的作用是把「—」与"资料缺失/渲染失败"区分开 —— 否则用户与我们自己都会误判。
-    */}
-    {unrecognizedCount > 0 && (
-      <p className="xb-note">{`状态「—」= 未能识别（原始值 0，共 ${unrecognizedCount} 班）。`}</p>
-    )}
     </>
   );
 }

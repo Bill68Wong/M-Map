@@ -10,8 +10,8 @@
  * ── 三个分组，三种点击后果（这张页面唯一的复杂度）──────────────────────
  *   · 通琴號 ⇒ 回首页并直接展开右边栏通琴号板（`router.replace`，**不设返回**：
  *     它不是一个"子页"，是同一件事的另一个入口，进历史栈会制造假返回）；
- *   · 三码头 ⇒ `/cross-border/{PE|TP|PI}`（全屏班次页，需求 5）；
- *   · 机场   ⇒ `/cross-border/airport`。
+ *   · 三码头 ⇒ `/cross-border/{PE|TP|PI}?after=day`（全屏班次页「当日所有」）；
+ *   · 机场   ⇒ `/cross-border/airport?after=day`。
  *
  * ── 卡片右块的四条口径 ─────────────────────────────────────────────────
  *   ① 「下一班」用**接口 times**（`schedTime > serverNow` 且非终态的最小一条），
@@ -80,8 +80,13 @@ export default function CrossBorderPage() {
   const tp = useXbList<XbTableItem>(listUrl("ferry", { dir: "dep", after: "now", pier: "TP", limit: 5 }));
   const byPier = { PI: pi, PE: pe, TP: tp } as const;
 
-  /* 站码即路由段（`airport` / `PI` / `PE` / `TP`），不需要再带 kind 参数 */
-  const open = (station: string) => router.push(`/cross-border/${station}`);
+  /*
+   * 站码即路由段（`airport` / `PI` / `PE` / `TP`），不需要再带 kind 参数。
+   * `?after=day`：从列表点进去要的是「当日所有」（需求 6），不是「最近五班」。
+   * 不带时目标页会重定向到 `?after=day`（`[station]/page.tsx` 的兜底），
+   * 但入口自己写清楚 ⇒ 少一次跳转、URL 与落地屏对得上。
+   */
+  const open = (station: string) => router.push(`/cross-border/${station}?after=day`);
 
   const airInfo = cardInfo(air.state, "离澳航班");
 
