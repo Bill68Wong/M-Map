@@ -10,11 +10,21 @@
  *
  * ★ v3.6.0：排除「终点站长停站」样本。**判据本体在 `src/lib/rebuild/long-stop.ts`（单一源）**，
  *   本脚本只负责：取策略 → 拼 SQL 谓词 → 聚合 → 打印四个并排数字。
- *   判据 = dwell_B ≥ 3 ∧ 终点站 ∈ 全澳总站 ∪点盘 ∧ 未被前置门拦下
- *          （`headway-sync` 计划性待发 / `insufficient` 分桶样本不足）。
+ *   ★ v4.1.1 **双档**：dwell_B ≥ 5 分（排除档）∧ 终点站 ∈ 全澳总站 ∪点盘 ∧ 未被前置门拦下 → 排除；
+ *          dwell_B ∈ [3, 5) 只标记（`long_stop=true`），**仍进 p50/avg**。
+ *          实测：旧单档 3 分排掉 114 条，其中 136/186 候选落在 3~4 分（总站正常上落客）→ 改后约 15 条。
  *   排除后 md 的语义 = **正常情况下的区间期望（含正常停站），不覆盖司机休息**；
  *   乘客若上到一辆要歇的车，ETA 会低估——数据源限制，不是 bug。
  *   `run_sec`（若列存在）是**诊断列**（纯行驶，扣 dwell），**禁止**用于 ETA。
+ *
+ * ── `--dry`（v4.1.1）──────────────────────────────────────────────
+ *   只算不写：照常打印四个并排数字 + 落盘排除明细，但**不 TRUNCATE、不 INSERT**。
+ *   改判据/改阈值时先跑它看数，确认后再正式写。
+ *
+ * ── 写入 = 单事务（v4.1.2）────────────────────────────────────────
+ *   `TRUNCATE` 与 `INSERT` 包在同一个 `BEGIN … COMMIT`（会话模式 5432 的 `pg.Client`）。
+ *   旧实现是两条自动提交语句：INSERT 一失败，表就永久空着，而它是线上 ETA 的 `md` 来源。
+ *   现在失败 ROLLBACK + 非零退出，表回到重写前的状态。
  *
  * ── 旧口径复现（排长停前的 md，随时可查，本表不另存 legacy 列）──────────────
  *   ⚠️ 必须带 `minutes BETWEEN 0.1 AND 20`（旧窗口）与 `from_main <> to_main`，
@@ -27,9 +37,12 @@
  *    WHERE source='track' AND from_main <> to_main AND minutes BETWEEN 0.1 AND 20
  *    GROUP BY route_code, from_main, to_main;
  */
-import { Pool } from "pg";
+import { Client, Pool } from "pg";
+import fs from "node:fs";
+import path from "node:path";
 import {
-  LONG_STOP_MIN,
+  LONG_STOP_EXCLUDE_MIN,
+  LONG_STOP_MARK_MIN,
   MIN_BUCKET_KINDS,
   MIN_DWELL_SAMPLES,
   PEAK_SHARE_MAX,
@@ -47,6 +60,8 @@ try {
 }
 
 const target = process.argv[2] as "local" | "cloud" | undefined;
+/** ★ v4.1.1：`--dry` = 只算不写（TRUNCATE + 全量重写是破坏性操作，改判据时必须能先看数） */
+const dry = process.argv.includes("--dry");
 const connStr =
   target === "cloud"
     ? process.env.DATABASE_URL
@@ -56,6 +71,19 @@ const connStr =
 
 /** 分母口径（与 --from=both 的 segment_stats 同源同窗） */
 const DENOM_WHERE = `source = 'track' AND from_main <> to_main AND minutes BETWEEN 0.1 AND 20`;
+
+/**
+ * 会话模式连接串（v4.1.2）。
+ *
+ * Supabase 的 6543 是 **transaction-mode pooler**：每条事务可能落在不同后端，
+ * 会话级设置（`SET …`）与「同一连接」的语义都不保证。写入事务用 5432（会话模式直连）。
+ * 本地库（5432 / 无端口）不动。
+ */
+function sessionConnStr(url: string): string {
+  const u = new URL(url);
+  if (u.port === "6543") u.port = "5432";
+  return u.toString();
+}
 
 async function main() {
   if (!connStr) {
@@ -105,6 +133,8 @@ async function main() {
             peakCrowdedPairs: 0,
             peakCrowdedStations: 0,
             skippedSamples: 0,
+            markedSamples: 0,
+            markedPairs: 0,
           },
         };
     const terminus = [...policy.terminus];
@@ -122,7 +152,8 @@ async function main() {
     }
 
     // 排除谓词（参数化，不拼字符串）
-    const EXCL = `(COALESCE(dwell_b_min, 0) >= ${LONG_STOP_MIN}
+    // ★ v4.1.1 双档：只有 dwell ≥ **排除档 5 分** 才排除；3~4 分是总站正常上落客，只标记（long_stop）。
+    const EXCL = `(COALESCE(dwell_b_min, 0) >= ${LONG_STOP_EXCLUDE_MIN}
                     AND to_main = ANY($1::text[])
                     AND NOT ((route_code || '|' || to_main) = ANY($2::text[])))`;
     const denomParams = [terminus, skipPairs];
@@ -148,6 +179,20 @@ async function main() {
           denomParams,
         )
       )[0]!;
+      // ★ v4.1.1 双档：标记档（3 ≤ dwell < 5，**仍进** p50/avg，只在 segment_samples.long_stop 上有标记）
+      const marked = (
+        await q<{ n: number; pairs: number }>(
+          `SELECT count(*)::int AS n,
+                  count(DISTINCT route_code || '|' || to_main)::int AS pairs
+             FROM segment_samples
+            WHERE ${DENOM_WHERE}
+              AND COALESCE(dwell_b_min, 0) >= ${LONG_STOP_MARK_MIN}
+              AND COALESCE(dwell_b_min, 0) <  ${LONG_STOP_EXCLUDE_MIN}
+              AND to_main = ANY($1::text[])
+              AND NOT ((route_code || '|' || to_main) = ANY($2::text[]))`,
+          denomParams,
+        )
+      )[0]!;
       const st = policy.stats;
       const pct = (x: number) => `${((x / Math.max(denom, 1)) * 100).toFixed(2)}%`;
       console.log(`\n════ 长停站排除 · 四个并排数字 ════`);
@@ -158,6 +203,10 @@ async function main() {
       console.log(`  ② 受影响站对数    ${excl.pairs}  （其中 ${excl.stations} 个不同站点）`);
       console.log(`  ③ insufficient 站数   ${st.insufficientStations}  （被门拦下 ⇒ **不排除**）`);
       console.log(`  ④ insufficient 站对数 ${st.insufficientPairs}  （被门拦下 ⇒ **不排除**）`);
+      console.log(
+        `  ⑤ 只标记不排除    ${marked.n} 条 / ${marked.pairs} 站对` +
+          `（${LONG_STOP_MARK_MIN} ≤ dwell < ${LONG_STOP_EXCLUDE_MIN} 分，总站正常上落客 ⇒ **仍进 p50/avg**，仅 long_stop=true）`,
+      );
       console.log(
         `  附：peak-crowded 门拦下 ${st.peakCrowdedPairs} 个站对 / ${st.peakCrowdedStations} 个站点（高峰聚集=排队 ⇒ 不排除）`,
       );
@@ -177,7 +226,10 @@ async function main() {
         st.insufficientPairs +
         st.headwaySyncPairs +
         st.peakCrowdedPairs +
-        st.excludedPairs;
+        st.excludedPairs +
+        // ★ v4.1.1：仅标记档（3≤dwell<5）的站对也是「过了门但不排除」的一类，必须计入分区，
+        //   否则加了双档后断言会永远差一个「只标记」的数目。
+        st.markedPairs;
       if (accounted !== st.candidatePairs) {
         console.error(
           `❌ 站对账不平：候选 ${st.candidatePairs} ≠ 已计 ${accounted}（差 ${st.candidatePairs - accounted}）`,
@@ -193,12 +245,52 @@ async function main() {
       console.log(
         `  附：对账 候选 ${st.candidatePairs} = 非总站 ${st.midStopPairs} + insufficient ${st.insufficientPairs}` +
           ` + headway-sync ${st.headwaySyncPairs} + peak-crowded ${st.peakCrowdedPairs} + 排除 ${st.excludedPairs}` +
+          ` + 仅标记 ${st.markedPairs}` +
           ` ⇒ ${accounted} ${accounted === st.candidatePairs ? "✅ 平" : "❌ 不平"}`,
       );
       console.log(
         `  附：门槛 MIN_DWELL_SAMPLES=${MIN_DWELL_SAMPLES} / MIN_BUCKET_KINDS=${MIN_BUCKET_KINDS} / PEAK_SHARE_MAX=${PEAK_SHARE_MAX}` +
           `（经验阈值、非文献值；改它等于改排除面，须重跑 P7 对照）`,
       );
+
+      // ── 被排除样本的**明细落盘**（v4.1.1）─────────────────────────────
+      // 为什么必须落盘：旧版只打印「长停站排除 114 条」一个汇总数字，**没有任何 route / 站对 /
+      // 时刻信息** ⇒ 无法审计「这 114 条到底该不该排」。阈值从 3 改到 5 之后更必须能逐条核对。
+      // 目录 `.verify/`（gitignore）——这是审计证据，不参与运行时。
+      const detail = await q<{
+        route_code: string;
+        from_main: string;
+        to_main: string;
+        dwell: number;
+        observed_at: string;
+        plate: string | null;
+      }>(
+        `SELECT route_code, from_main, to_main, dwell_b_min::float8 AS dwell, observed_at, plate
+           FROM segment_samples
+          WHERE ${DENOM_WHERE} AND ${EXCL}
+          ORDER BY dwell_b_min DESC, route_code, to_main`,
+        denomParams,
+      );
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const outDir = path.resolve(process.cwd(), ".verify");
+      fs.mkdirSync(outDir, { recursive: true });
+      const tsv = path.join(outDir, `long-stop-excluded-${stamp}.tsv`);
+      const head = ["route_code", "from_main", "to_main", "dwell_b_min", "observed_at", "plate", "reason"];
+      const lines = [head.join("\t")];
+      for (const r of detail)
+        lines.push(
+          [
+            r.route_code,
+            r.from_main,
+            r.to_main,
+            Number(r.dwell).toFixed(2),
+            new Date(r.observed_at).toISOString(),
+            r.plate ?? "",
+            `dwell>=${LONG_STOP_EXCLUDE_MIN}分 ∧ 终点∈全澳总站 ∧ 未命中前置门 ⇒ 排除出 p50/avg`,
+          ].join("\t"),
+        );
+      fs.writeFileSync(tsv, lines.join("\n") + "\n", "utf8");
+      console.log(`  📄 排除明细已落盘：${path.relative(process.cwd(), tsv)}（${detail.length} 行）`);
     }
 
     // ── 写入 ──
@@ -218,9 +310,43 @@ async function main() {
           ? `,\n             NULL::double precision AS run_sec`
           : "";
     const cols = `route_code, from_main, to_main, p50_sec, avg_sec, samples${hasRunSec ? ", run_sec" : ""}`;
-    await pool.query(`TRUNCATE route_hop_stats`);
-    const res = await pool.query(
-      `INSERT INTO route_hop_stats (${cols})
+    if (dry) {
+      // ★ v4.1.1：`--dry` = 只算不写。TRUNCATE + 全量重写是破坏性的，验证改动时必须能先看数。
+      const willWrite = (
+        await q<{ n: number }>(
+          `SELECT count(*)::int AS n FROM (
+             SELECT 1 FROM segment_samples
+              WHERE ${DENOM_WHERE} ${hasDwell ? `AND NOT ${EXCL}` : ""}
+              GROUP BY route_code, from_main, to_main) t`,
+          hasDwell ? denomParams : [],
+        )
+      )[0]!.n;
+      console.log(`\n[--dry] 跳过写入：将得到 ${willWrite} 行（当前 ${before.n} 行）——未 TRUNCATE、未写库`);
+    } else {
+      // ── 全量重写：TRUNCATE + INSERT **必须同一个事务**（v4.1.2）───────────────
+      // 旧实现是 `await pool.query(TRUNCATE)` 之后再 `await pool.query(INSERT)`，两条自动提交语句：
+      // 一旦 INSERT 失败（锁超时 / 连接断 / 磁盘满），表就**永久停在空表**状态 ——
+      // 而 route_hop_stats 是线上 ETA 的 md 来源，空表等于全站「剩余时间」一起消失。
+      // ⇒ 现在包在 BEGIN … COMMIT 里：失败 ROLLBACK，表回到重写前的样子。
+      //
+      // ⚠️ 必须用**会话模式**（5432）的 `pg.Client`，不能复用上面的 Pool：
+      //    Supabase 的 6543 是 **transaction-mode pooler**，会话级特性（如
+      //    `SET default_transaction_read_only`）与连接的绑定关系由连接池决定；
+      //    重建这种「一锤子」操作走直连，语义最简单、也便于排查。
+      const t0 = Date.now();
+      const client = new Client({ connectionString: sessionConnStr(connStr!) });
+      await client.connect();
+      try {
+        await client.query("SET default_transaction_read_only = off");
+        await client.query("BEGIN");
+        const pre = (
+          await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM route_hop_stats`)
+        ).rows[0]!.n;
+        console.log(`\n── 重建 route_hop_stats（单事务，会话模式）──`);
+        console.log(`  ① TRUNCATE 前      ${pre} 行`);
+        await client.query(`TRUNCATE route_hop_stats`);
+        const res = await client.query(
+          `INSERT INTO route_hop_stats (${cols})
        SELECT route_code, from_main, to_main,
               percentile_cont(0.5) WITHIN GROUP (ORDER BY minutes * 60) AS p50_sec,
               avg(minutes * 60) AS avg_sec,
@@ -232,9 +358,30 @@ async function main() {
        ON CONFLICT (route_code, from_main, to_main) DO UPDATE
          SET p50_sec = EXCLUDED.p50_sec, avg_sec = EXCLUDED.avg_sec,
              samples = EXCLUDED.samples, updated_at = now()${hasRunSec ? ",\n             run_sec = EXCLUDED.run_sec" : ""}`,
-      hasDwell ? denomParams : [],
-    );
-    console.log(`\n✅ route_hop_stats 写入 ${res.rowCount} 行（此前 ${before.n} 行）`);
+          hasDwell ? denomParams : [],
+        );
+        const inTx = (
+          await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM route_hop_stats`)
+        ).rows[0]!.n;
+        console.log(`  ② INSERT 后（事务内）${res.rowCount} 行写入 · 表内 ${inTx} 行`);
+        await client.query("COMMIT");
+        const post = (
+          await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM route_hop_stats`)
+        ).rows[0]!.n;
+        console.log(`  ③ COMMIT 后       ${post} 行 · 耗时 ${Date.now() - t0} ms`);
+      } catch (e) {
+        // ROLLBACK 失败也不能吞掉原始错误（吞了会让人以为表已恢复）
+        try {
+          await client.query("ROLLBACK");
+          console.log("  ↩ 已 ROLLBACK，route_hop_stats 保持重写前的状态");
+        } catch (re) {
+          console.error("  ❌ ROLLBACK 失败，请立刻用 backups/ 的备份恢复：", (re as Error).message);
+        }
+        throw e;
+      } finally {
+        await client.end();
+      }
+    }
     if (hasDwell)
       console.log("   md 语义：正常情况下的区间期望（含正常停站），**不覆盖司机休息**——乘客若上到要歇的车，ETA 会低估");
     const stat = (

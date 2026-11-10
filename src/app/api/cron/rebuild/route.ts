@@ -2,10 +2,15 @@
  * GET/POST /api/cron/rebuild —— 派生数据定时重算（v0.25.0，v1.0.0 加第三步）
  *
  * 背景：segment_stats（站间时长）、walk_times（步行时长）、transfer_walks（换乘步行）是从原始样本
- * （timer_events / free_ride_events）算出的**派生表**，此前只能手动跑
- * `npm run db:segments` / `db:walktimes` / `db:transferwalks` 才会更新 —— 新样本进来后
- * 派生值会停留在上次运行命令的时刻。本路由把重算自动化，由 Vercel Cron
+ * 算出的**派生表**，此前只能手动跑 `npm run db:segments` / `db:walktimes` / `db:transferwalks`
+ * 才会更新 —— 新样本进来后派生值会停留在上次运行命令的时刻。本路由把重算自动化，由 Vercel Cron
  * 每日触发（见 vercel.json），保证派生数据跟着样本走。
+ *
+ * ⚠️ 「原始样本」**逐表不同**（v4.2.0 起）：
+ *   · `segment_stats` ← **只** `segment_samples.source='track'`（DSAT 报站帧自动采集）；
+ *     **不读** timer_sessions / timer_events / free_rides / free_ride_events 四张旧表。
+ *   · `walk_times` / `transfer_walks` ← **仍读** `timer_events` 等旧表（它们没有 track 版样本）。
+ *   ⇒ 不要一刀切成「本路由不读事件表」—— 只有站间时长这一项换了口径。
  *
  * 实现要点：直接 import src/lib/rebuild/* 的共享函数，**不** execFile 调 .ts 脚本。
  *   原因：① tsx 在 devDependencies，Vercel 生产构建不装；
@@ -17,11 +22,13 @@
  *   （middleware 已把本路径加入白名单，不走口令门，见 src/proxy.ts）
  *
  * 安全：重算本身幂等（清表后全量重算）；仍加内存锁避免重叠执行，
- *   并按顺序串行各步骤（都读 timer_events/segment_samples，串行避免连接竞争）。
+ *   并按顺序串行各步骤（都读 segment_samples / 事件表，串行避免连接竞争）。
  *
- * ★ v1.3.0：segment_stats 改为**新旧合并**口径（`sampleFrom: "both"`）——
- *   事件(timer+free) + segment_samples 的 track 原始样本。**必须用 both**，
- *   否则每日 Cron 会把合采后的结果**静默回退**成事件-only（track 数据白入）✗。
+ * ★ v4.2.0（2026-11-09 负责人裁定）：segment_stats 口径改为 **`sampleFrom: "track"`**
+ *   —— 只吃 `segment_samples.source='track'` 的自动采集样本。旧手工记录（timer / free）
+ *   只留档、不参与计算。**不要再改回 `both`**：`both` 会把四张旧事件表重新混进来
+ *   （历史上它就是"新旧合并"口径，v1.3.0~v4.1.x 的生产值）。
+ *   ⇒ 改口径只需改这一处；生效时点为「下次 18:00 cron」或「手动 CLI 重建」。
  * ★ 2026-09-27：滚动窗口清理**已关闭**（`trimSegmentSampleWindow(pool, 0)` ⇒ 只回报不删除）。
  *   原行为为「只保留最近 30 轮 track」（timer 永不删）；关闭原因 = 用户要求「保留所有轮」。
  *   如需恢复窗口，把下面的 0 改回具体轮数（如 100），并同步 `import-segment-samples.ts` 的默认值。
@@ -113,10 +120,11 @@ async function handle(req: NextRequest) {
         return { deleted: r.deleted, remaining: r.remaining, remainingRuns: r.remainingRuns };
       }),
     );
-    // ① segment_stats：★ sampleFrom="both"（事件 + segment_samples 的 track），勿改回默认
+    // ① segment_stats：★ v4.2.0 口径 `sampleFrom="track"`（只吃自动采集，旧手工表不参与）。
+    //    改回 `both` 会让四张旧事件表重新混进来 —— 见文件头 v4.2.0 段落，勿动。
     results.push(
       await step("segment_stats", async () => {
-        const r = await rebuildSegmentStats(pool, { sampleFrom: "both" });
+        const r = await rebuildSegmentStats(pool, { sampleFrom: "track" });
         return {
           sessions: r.sessions,
           rides: r.rides,

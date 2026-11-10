@@ -73,4 +73,13 @@ export interface LongStopPolicyStats {
   peakCrowdedStations: number;
   /** 门拦下（不排除）的样本数 */
   skippedSamples: number;
+  /**
+   * ★ v4.1.1 双档：dwell ∈ [3, 5) 且过全部门 → **只标记、仍进聚合**的样本数 / 站对数。
+   * `markedPairs` 只数「**没有**排除档样本」的站对（与 `excludedPairs` 互斥），因此站对分区成立：
+   *   `candidatePairs = midStopPairs + insufficientPairs + headwaySyncPairs + peakCrowdedPairs
+   *                     + excludedPairs + markedPairs`  ← `build-hop-stats` 的对账断言用。
+   * 样本层面则 `markedSamples` 与 `excludedSamples` 互斥且互补（同一站对可两种都有）。
+   */
+  markedSamples: number;
+  markedPairs: number;
 }

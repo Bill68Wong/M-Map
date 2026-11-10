@@ -42,6 +42,8 @@ import {
 } from "@/lib/dsat/route-index";
 import { buildLrtPreload, type LrtPreload } from "@/lib/lrt/next-departures";
 import { buildSegmentIndex, type SegmentIndex } from "./segment-lookup";
+// ★ v4.1.0：中途总站判据（单一源，见文件头）；纯函数，复用已缓存的站序/站名
+import { buildMidTerminusKeys } from "@/lib/rebuild/mid-terminus";
 import {
   buildTransferIndex,
   buildWalkIndex,
@@ -102,7 +104,7 @@ type SegRowEncoded = (string | number | null)[];
 /** 列序 = 编码数组下标 = decode 键序。**改列必须三处同步**（SELECT 列表 / 此常量 / 类型）。 */
 const SEG_COLS = [
   "route_code", "from_station", "to_station", "weekday", "time_bucket",
-  "arrive_kind", "avg_minutes", "p50_minutes", "samples",
+  "arrive_kind", "avg_minutes", "p50_minutes", "samples", "p50_run_minutes",
 ] as const;
 
 const encodeSegRows = (rows: SegmentStatRow[]): SegRowEncoded[] =>
@@ -117,6 +119,12 @@ interface StaticRows {
   stations: StationRow[];
   /** ★ v3.6.1：**数组编码**形态（消费前必须 `decodeSegRows`，见 loadStaticsUncached） */
   seg: SegRowEncoded[];
+  /**
+   * ★ v4.1.0：邻接对沿线里程（米）——**只服务 L6/L7 物理护栏**（隐含速度越界 ⇒ 展示留白）。
+   *   由 `route_station_mileage` 的相邻站差推出；表不存在/未跑 db:station-mileage 时为空
+   *   ⇒ 护栏失效（不误判），不会阻塞推荐。
+   */
+  hopDist: { r: string; f: string; t: string; m: number }[];
   walk: WalkTimeRow[];
   transfer: TransferWalkRow[];
   colors: { code: string; color: string }[];
@@ -134,6 +142,7 @@ async function fetchStaticRowsUncached(pool: Pool): Promise<StaticRows> {
   const [
     routeIdxRows,
     segRes,
+    hopDistRes,
     walkRes,
     transferRes,
     colorRes,
@@ -144,10 +153,34 @@ async function fetchStaticRowsUncached(pool: Pool): Promise<StaticRows> {
     lrtLineParamRes,
   ] = await Promise.all([
     queryRouteIndexRows(pool),
-    pool.query(
-      `SELECT route_code, from_station, to_station, weekday, time_bucket, arrive_kind,
-              avg_minutes, p50_minutes, samples FROM segment_stats`,
-    ),
+    // ★ v4.1.0：`p50_run_minutes` 由 db/migrate-v4100-hop-basis.ts 增加；
+    //   迁移未跑时降级为 NULL（不阻塞推荐，行为 = 旧版）。
+    pool
+      .query(
+        `SELECT route_code, from_station, to_station, weekday, time_bucket, arrive_kind,
+                avg_minutes, p50_minutes, samples, p50_run_minutes FROM segment_stats`,
+      )
+      .catch(() =>
+        pool.query(
+          `SELECT route_code, from_station, to_station, weekday, time_bucket, arrive_kind,
+                  avg_minutes, p50_minutes, samples, NULL::numeric AS p50_run_minutes FROM segment_stats`,
+        ),
+      ),
+    // ★ v4.1.0：相邻站对的沿线里程（L6/L7 物理护栏）。表不存在时为空 → 护栏失效但不报错。
+    pool
+      .query(
+        `WITH adj AS (
+           SELECT route_code, dsat_dir, main_code AS f,
+                  lead(main_code) OVER w AS t,
+                  lead(mile_m)   OVER w - mile_m AS d
+             FROM route_station_mileage
+           WINDOW w AS (PARTITION BY route_code, dsat_dir ORDER BY mile_m)
+         )
+         SELECT route_code AS r, f, t, max(d)::float8 AS m
+           FROM adj WHERE t IS NOT NULL AND d > 0
+          GROUP BY 1, 2, 3`,
+      )
+      .catch(() => ({ rows: [] as unknown[] })),
     pool.query(`SELECT place_id, station_code, zone, minutes, samples, distance_m FROM walk_times`),
     // transfer_walks 在 v1.0.0 新建；表尚未建时容错为空（不阻塞推荐）
     pool
@@ -181,6 +214,7 @@ async function fetchStaticRowsUncached(pool: Pool): Promise<StaticRows> {
     routeStops,
     stations,
     seg: encodeSegRows(segRes.rows as unknown as SegmentStatRow[]),
+    hopDist: hopDistRes.rows as StaticRows["hopDist"],
     walk: walkRes.rows as unknown as WalkTimeRow[],
     transfer: transferRes.rows as unknown as TransferWalkRow[],
     colors: colorRes.rows as { code: string; color: string }[],
@@ -202,7 +236,9 @@ const getStaticRows = unstable_cache(
   async () => fetchStaticRowsUncached(getPool()),
   // ★ v3.6.1：v1 → v2 —— seg 从对象编码换数组编码。换 key 而不做 f.encoding 分支的理由：
   //   旧条目 revalidate=60s，一分钟内自然过期，分支代码是永久负担；换 key 零风险。
-  ["rec-static-rows-v2"],
+  // ★ v4.1.0：v2 → v3 —— seg 编码多一列（p50_run_minutes）+ 新增 hopDist。
+  //   不换 key 会让旧条目（9 列）解出 `p50_run_minutes: undefined`，护栏/纯行驶统计静默失效。
+  ["rec-static-rows-v3"],
   { revalidate: 60, tags: ["rec-static"] },
 );
 
@@ -380,10 +416,18 @@ async function loadStaticsUncached(): Promise<RecStatic> {
 
   const routeIdx = buildRouteIndexFromRows(rows.routeStops, rows.stations);
 
+  // ★ v4.1.0：中途总站集合（站名含總站/总站且不在首末位）——纯函数，零额外 DB 往返
+  //   判据本体在 `src/lib/rebuild/mid-terminus.ts`（不要在此另写一套）。
+  const midTerminus = buildMidTerminusKeys(
+    rows.routeStops,
+    new Map(rows.stations.map((s) => [s.code, s.name_tc])),
+  );
+  const hopMeters = new Map(rows.hopDist.map((d) => [`${d.r}|${d.f}|${d.t}`, Number(d.m)]));
+
   return {
     routeIdx,
     // ★ v3.6.1：seg 在缓存里是数组编码 → 消费前解码回对象（仅 cache-miss 路径，~15k 次 map 可忽略）
-    segIdx: buildSegmentIndex(decodeSegRows(rows.seg)),
+    segIdx: buildSegmentIndex(decodeSegRows(rows.seg), { midTerminus, hopMeters }),
     // ★ 2026-11-06：`station_walk_distance` 已删。`walk_times.distance_m` 实测 20 行全为 NULL
     //   ⇒ 距离索引为空，档 1（「全力冲刺能赶上」）退回线性速度比（`tier1EffRatio` 的既有无值分支）。
     //   这是 Spec §6.2 已接受的降级，**不是静默失败**：不传第二参数，索引内 distByKey 恒空。

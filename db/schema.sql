@@ -227,6 +227,10 @@ CREATE TABLE IF NOT EXISTS segment_stats (
     arrive_kind   TEXT NOT NULL DEFAULT 'all',
     avg_minutes   NUMERIC(5,1) NOT NULL,
     p50_minutes   NUMERIC(5,1),
+    -- v4.1.0：纯行驶分钟 p50（= minutes − dwell_B）。仅「中途总站」邻接对（站名含總站
+    --   且不在该线首末位）会被 lookupHop 优先采用；NULL ⇒ 回退 p50_minutes。
+    --   由 db/migrate-v4100-hop-basis.ts 增加（此列只为重建库时对齐，不影响既有库）。
+    p50_run_minutes NUMERIC,
     samples       INT NOT NULL,
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (route_code, from_station, to_station, weekday, time_bucket, arrive_kind)

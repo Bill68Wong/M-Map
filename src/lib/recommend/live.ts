@@ -168,7 +168,20 @@ export function toBusArrival(
           return out;
         })();
 
-  for (const [a, b] of pairs) hopMin.push(lookupHop(segIdx, route, a, b, nowBucket).minutes);
+  /** 本函数的**到达点** = 候车站（最后一个区间的终点）；见下方循环里的口径说明 */
+  const arrivalMain = pairs.length ? mainCodeOf(pairs[pairs.length - 1]![1]) : "";
+
+  for (let i = 0; i < pairs.length; i++) {
+    const [a, b] = pairs[i]!;
+    /**
+     * ★ 2026-11-09 口径（负责人裁定）：**末跳的终点 == 我们关心的到达点 ⇒ 用纯行驶（run）**。
+     *   本函数的到达点 = **用户的候车站**（`pairs` 末位那一跳的终点；乘客在这里等车，
+     *   车到站后的停站发生在他上车过程里，不是他要等的等待）。
+     *   判据用「终点站码 == 到达点站码」而不是数组下标：环线/站序截断时下标不可靠。
+     */
+    const final = mainCodeOf(b) === arrivalMain;
+    hopMin.push(lookupHop(segIdx, route, a, b, nowBucket, { final }).estMinutes);
+  }
   // 逐跳完全缺失（站序对不上）→ 退化为「该线单跳均值 × 站数」
   if (!hopMin.length && e.stopsAway > 0) {
     const per = fallbackHop(segIdx, route);
@@ -216,8 +229,11 @@ export function toBusArrival(
  *   · **不设条数上限**：`eta.ts` 的 `rest` 给出第 3 辆起的全部。
  *   · 池内顺序沿用 `eta.ts` 的升序（按站距）→ nearest/second/more 语义不变。
  */
-/** 从 `stops[fromIdx]` 沿该方向走 `steps` 跳的总时长（分钟）；一步都解不出 ⇒ `null` */
-function hopsDurationBetween(
+/** 从 `stops[fromIdx]` 沿该方向走 `steps` 跳的总时长（分钟）；一步都解不出 ⇒ `null`
+ *  ★ 批 1 · S-14：导出供批 3 `scripts/test-live-backtrack.ts` 做逐跳回退对拍
+ *    （搭批 1 唯一一次独占构建窗口；本批不改函数体、不改调用点）。
+ */
+export function hopsDurationBetween(
   segIdx: SegmentIndex,
   route: string,
   stops: string[],
@@ -227,13 +243,23 @@ function hopsDurationBetween(
 ): number | null {
   const n = stops.length;
   if (!n || steps <= 0) return null;
+  /**
+   * ★ 2026-11-09 口径（负责人裁定）：末跳的终点 == 我们关心的到达点 ⇒ `run`。
+   *   **本函数的到达点 = 车辆当前挂载站**（不是用户的候车站！）。
+   *   方向说明：本函数从**用户站**往**车辆所在站**累加，用来反推「车多久前经过用户站」，
+   *   所以求和末尾的最后一跳是「**抵达车辆当前站**」的那一跳 ⇒ 用纯行驶（扣该站停站），
+   *   与 `toBusArrival` / `remaining` / `strips` 同口径。
+   *   判据用「终点站码 == 到达点站码」：`steps` 可能绕环线一圈，不能按数组末位硬编码。
+   */
+  const arrivalMain = mainCodeOf(stops[(fromIdx + steps) % n] ?? "");
   let sum = 0;
   let any = false;
   for (let k = 0; k < steps; k++) {
     const a = stops[(fromIdx + k) % n];
     const b = stops[(fromIdx + k + 1) % n];
     if (!a || !b) break;
-    sum += lookupHop(segIdx, route, a, b, nowBucket).minutes;
+    const final = mainCodeOf(b) === arrivalMain;
+    sum += lookupHop(segIdx, route, a, b, nowBucket, { final }).estMinutes;
     any = true;
   }
   return any ? sum : null;
