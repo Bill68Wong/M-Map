@@ -3,8 +3,9 @@
 /**
  * 进度纵条（src/components/nav/NavStrip.tsx，2026-09-25 · v2.14 · 06 §2.2 / 07 §4.2）
  *
- * ── 与卡片页旧 `StationStrip` 的边界 ────────────────────────────────────
- *   卡片页继续用 `@/components/card/StationStrip`（保持不动）；**导航侧**改用本组件：
+ * ── 与卡片页旧站条的边界（已作废，仅留档）─────────────────────────────
+ *   卡片页站条 `@/components/card/StationStrip` 已随 v3.6.0 删除（目录都不存在了）；
+ *   纵轴**逐站分钟**已随需求 7（2026-11-09）整块删除。**导航侧**用本组件：
  *   · 导航中**强制展开**（逐站可见，无收起键）；静态（`nav=null`）保留折叠键；
  *   · **四态新口径**（AC-07，不只靠颜色）：
  *       已过 = 灰 + 行末对勾；当前停靠 = 蓝加粗 + 「停靠中」；
@@ -85,6 +86,12 @@ export default function NavStrip({
   const mids = stops.filter((s) => s.role === "mid").length;
   const board = stops[0];
   const alight = stops[stops.length - 1];
+  /**
+   * ⚠️ 2026-11-09（需求 7）：`level` 在**本组件里只剩这一处消费** —— 折叠键「车上约 X 分」
+   *   的 `rc-val--est` 标注（渲染见下方 `est ? "rc-val--est" : undefined`）。
+   *   `stops[].level` 与已删除的逐站「x 分」**同源同一字段**，删完逐站标签后它看起来像孤儿，
+   *   ⇒ **勿随逐站标签一并清理**（删掉不会红任何断言，只会静默丢掉「这是估算值」的标记）。
+   */
   const est = stops.some((s) => s.role === "mid" && s.level >= 3);
   /*
    * ★ 2026-11-06（P0 · 删导航冗余行）：**原 `rideText` / `passedCount` 已随「车上约 N 分 · 已过 n 站」
@@ -136,11 +143,16 @@ export default function NavStrip({
           {k === lastK && isAlight && <span className="navstrip__sub">下车</span>}
           {/* ★ v3.3.0（AC-103）：轻轨方向上车站行右侧（`margin-left:auto` 右对齐，不与站名抢位） */}
           {k === 0 && dirText && <span className="navstrip__dir">{dirText}</span>}
-          {!end && s.minToNext > 0 && !nav && (
-            <span className={`navstrip__hop${s.level >= 3 ? " rc-val--est" : ""}`}>
-              {Math.round(s.minToNext)} 分
-            </span>
-          )}
+          {/*
+           * ★ 2026-11-09（需求 7 · 负责人裁定）：**逐站「x 分」整块已删除**（含「—」兜底占位），
+           *   不论追踪态还是静态一律不显示（理由：高德、谷歌都不显示这种逐站耗时）。
+           *   ── 删的是展示，不是数据（不要连坐删字段）────────────────────────
+           *   `SegmentStrip.stops[].minToNext` / `minToNextEst` / `level` 三个字段仍然下发且仍被消费：
+           *     · 顶部「还有 n 站下车 · 约 x 分」← `NavDetailBody` 用 `minToNextEst` 累加；
+           *     · 折叠键「途经 N 站 · 车上约 X 分」← `strip.rideMin` / `rideSecText`；
+           *     · 折叠键的「估算」标记 ← 本行以上 `est`（读 `stops[].level`）。
+           *   ⚠️ 不要为了「补回信息密度」把它加回来；也不要改成 `display:none` 的假隐藏。
+           */}
         </span>
         {passed && (
           <span className="navstrip__check" aria-hidden="true">

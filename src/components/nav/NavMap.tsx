@@ -64,6 +64,9 @@ import VehicleLayer from "./VehicleLayer";
 import TqhStationLayer from "./TqhStationLayer";
 import TqhPathLayer from "./TqhPathLayer";
 import XborderPinLayer from "@/components/map/XborderPinLayer";
+import type { XbPinKind } from "@/components/map/xborder-pins";
+import PublicToiletLayer from "./PublicToiletLayer";
+import type { PublicToilet } from "@/lib/map/public-toilets";
 import type { TqhSegment, TqhStation } from "./tqh-model";
 import type { VehicleLite } from "./VehicleMarker";
 import type { UserFix } from "./useUserFix";
@@ -348,6 +351,33 @@ export interface NavMapProps {
    * （`xborder-pins.ts#groupXbPins`）。别把它塞进 `stationZoomOk`。
    */
   showXborderPins?: boolean;
+  /**
+   * ★ M4（需求 6）：码头 / 机场**分开**控制。
+   * `null`/缺省 ⇒ 全显示（与改前行为一致）；传集合 ⇒ 只显示其中 `kind`。
+   * 聚合仍在全量 `XB_PINS` 上算（详见 `XborderPinLayer` 的同名 prop 注释）。
+   * ⚠️ 传入的 Set 必须**记忆化**（`useMemo`）：它进 `XborderPinLayer` 的 effect 依赖，
+   *   每次渲染新建会全量重建 marker。
+   */
+  xborderKinds?: ReadonlySet<XbPinKind> | null;
+  /**
+   * ★ M4（需求 3）：公共厕所图层开关。默认 **关**（198 个点全开会糊住地图）。
+   * 与巴士/通琴号站点层**共用同一个** `stationZoomOk`（浏览 15 / 路线·导航 12）——
+   * 单一真相，别在这里另写阈值。
+   */
+  showToilets?: boolean;
+  /** ★ M4：点公厕 pin ⇒ 宿主开弹窗 */
+  onToiletClick?: (toilet: PublicToilet) => void;
+  /**
+   * ★ M4（缺陷修复）：把「站点/公厕图层此刻是否达到缩放阈值」连同当前 zoom 回写给宿主。
+   * 用途：图层面板据此提示「放大到 15 级后才显示图标」——否则用户在 zoom 12.5 拨开公厕，
+   * 屏幕上什么都不会变，只能怀疑开关坏了（实测就是这个症状）。
+   */
+  onStationZoomChange?: (ok: boolean, zoom: number) => void;
+  /**
+   * ★ M4（需求 2）：巴士站点图层开关。默认 `true` ⇒ 行为与改前**逐字节一致**
+   * （关掉时走 `clearAll()`，是数据层不建 marker，不是 `visibility:hidden`）。
+   */
+  showBusStations?: boolean;
   /** ★ 需求 7：点地标 / 聚合点 ⇒ 宿主开小窗（参数 = 该组地标 id，1 个或 2 个） */
   onXborderPinClick?: (ids: string[]) => void;
   /** 附加类名（承载全屏布局） */
@@ -389,9 +419,34 @@ export default function NavMap({
   tqhWhitelist = null,
   onTqhStationClick,
   showXborderPins = false,
+  xborderKinds = null,
+  showToilets = false,
+  onToiletClick,
+  onStationZoomChange,
+  showBusStations = true,
   onXborderPinClick,
 }: NavMapProps) {
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * ★ M4：巴士站点图层开关的 ref 副本 —— `render()` 是被 `zoomend`/`moveend` 节流调用的
+   * 回调，闭包里的 prop 可能滞后一帧；用 ref 让「刚拨开关就重绘」永远读到最新值。
+   */
+  const showBusRef = useRef(showBusStations);
+  showBusRef.current = showBusStations;
+  /** ★ M4：站点图层 `render()` 的句柄（供「拨开关立即重绘」用；见该 effect 里的赋值） */
+  const renderRef = useRef<(() => void) | null>(null);
+  /** ★ M4：缩放阈值回写回调（走 ref，避免进 render() 的闭包依赖导致全量重建） */
+  const zoomCbRef = useRef(onStationZoomChange);
+  useEffect(() => {
+    zoomCbRef.current = onStationZoomChange;
+  }, [onStationZoomChange]);
+
+  /* ★ M4：巴士站点开关拨动 ⇒ 立即重绘（不等下一次 zoomend/moveend） */
+  useEffect(() => {
+    renderRef.current?.();
+  }, [showBusStations]);
+
+
   /** `.nav-map` 根元素（写观测钩子：data-map-follow / data-map-zoom / …） */
   const rootRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
@@ -441,7 +496,13 @@ export default function NavMap({
    */
   const [stationZoomOk, setStationZoomOk] = useState(false);
   /** 阈值判定镜像（只在**跳变**时 setState，避免 zoomend 高频 setState 抖动整棵 NavMap） */
-  const zoomOkRef = useRef(false);
+  /**
+   * ★ M4：初值取 `null`（三态）而不是 `false` —— 若初值是 `false`，而本次算出的 `zoomOk`
+   * 也是 `false`（首页默认 zoom 12.5 就是这种情况）⇒ 「没变化」⇒ **回调永远不触发**，
+   * 宿主拿不到真实缩放状态，面板提示就永远不显示（实测踩过）。
+   * 用 `null` 保证**第一次计算必定算作变化**，宿主一定收到一次真值。
+   */
+  const zoomOkRef = useRef<boolean | null>(null);
   /**
    * ★ 观测钩子（修复批 #6）：通琴号站点图层的**已绘 marker 数**写到 `.nav-map` 根。
    *
@@ -520,6 +581,39 @@ export default function NavMap({
   }, []);
 
   const [phase, setPhase] = useState<"loading" | "ready" | "failed">("loading");
+
+  /**
+   * ★ M4（QA 钩子 · team-lead 已批准）：`window.__qa.setMapZoom(z)` —— 编程设定缩放。
+   *
+   * ── 为什么需要 ──────────────────────────────────────────────────────────
+   *   本地 Playwright 环境里 AMap **不响应滚轮也不响应双击**（实测 6 次滚轮 + 4 次双击后
+   *   `data-map-zoom` 仍是 12.5），而站点/公厕图层的缩放门阈值是 15 ⇒ 真浏览器验收
+   *   无法把地图推到阈值以上，「放大后 pin 出现」这一段就验不了。
+   *   `setZoom` 是**编程接口**，不走手势链路 ⇒ 不受该环境限制。
+   *
+   * ── 纪律（四条，逐字照抄先例 `NavShell.tsx` 的 `forceWalkArrived`，缺一不可）──────
+   *   ① **仅非生产**：`process.env.NODE_ENV` 在 Next 构建期内联 ⇒ 生产包里是死代码；
+   *   ② **不整体覆盖 `window.__qa`**：展开合并，避免踩掉别人挂的键；
+   *   ③ **卸载即摘键**：只删自己那一项，其余原样保留；
+   *   ④ **不改任何产品行为**：唯一效果是把**已有**的 `map.setZoom` 暴露出去，注册/注销零副作用。
+   *
+   * ⚠️ 不要在这里顺手做「设置图层开关」「模拟点击」之类的事 —— 钩子只暴露既有能力。
+   */
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    if (phase !== "ready") return;
+    const map = mapRef.current;
+    if (!map) return;
+    const w = window as unknown as { __qa?: Record<string, unknown> };
+    w.__qa = { ...(w.__qa ?? {}), setMapZoom: (z: number) => map.setZoom(z) };
+    return () => {
+      const cur = w.__qa;
+      if (!cur) return;
+      const next = { ...cur };
+      delete next.setMapZoom;
+      w.__qa = next;
+    };
+  }, [phase]);
   const [note, setNote] = useState<string>("");
   /**
    * ★ P0：**定位失败用布尔状态，不用文案反查**。
@@ -1321,8 +1415,21 @@ export default function NavMap({
           zoomOkRef.current = zoomOk;
           setStationZoomOk(zoomOk);
         }
+        /* ★ M4：每次 render 都回写（不限「变化」）—— 否则提示里的「当前 x 级」会停在首次
+           判定的那一帧（实测显示 12.2，而地图已是 12.5）。
+           父侧用「值相同返回原对象」的 setState，所以这里频繁调用不会引起重渲染。 */
+        zoomCbRef.current?.(zoomOk, zoom);
         if (!zoomOk) {
           clearAll(); // 拉远：清空（产品口径）
+          return;
+        }
+        /**
+         * ★ M4（需求 2）：图层开关关掉巴士站点 ⇒ **不建 marker**（数据层过滤）。
+         * 位置刻意放在 `zoomOk` 回写**之后**：`stationZoomOk` 是通琴号/公厕图层共用的
+         * 缩放真相，不能因为「巴士关了」就把别人的层一起关掉。
+         */
+        if (!showBusRef.current) {
+          clearAll();
           return;
         }
         const data = stationsRef.current;
@@ -1473,6 +1580,12 @@ export default function NavMap({
         );
       }
     };
+
+    /**
+     * ★ M4：暴露给外部 effect —— 图层开关拨动时要**立即**按新状态重绘，
+     * 否则用户要等到下一次 `zoomend` / `moveend` 才看到变化（一次都不动就永远不变）。
+     */
+    renderRef.current = render;
 
     const schedule = () => {
       if (timer) return;
@@ -2063,7 +2176,19 @@ export default function NavMap({
         map={phase === "ready" ? mapRef.current : null}
         amap={phase === "ready" ? amapRef.current : null}
         enabled={phase === "ready" && showXborderPins}
+        visibleKinds={xborderKinds}
         onPick={onXborderPinClick}
+      />
+      {/* ★ M4（需求 3）：公共厕所图层 —— 与站点层**同一个**缩放门（`stationZoomOk`），
+          默认关、开启时才拉数据（`loadPublicToilets` 自带 Promise 缓存）。
+          坐标已是 GCJ-02，图层里不再换算（二次转换会偏 ~600m）。 */}
+      <PublicToiletLayer
+        map={phase === "ready" ? mapRef.current : null}
+        amap={phase === "ready" ? amapRef.current : null}
+        /* 绘制：与站点层同一个缩放门；加载：只看开关（`active`），见该组件的 props 注释 */
+        enabled={phase === "ready" && showToilets && stationZoomOk}
+        active={phase === "ready" && showToilets}
+        onPick={onToiletClick}
       />
       {/* ★ 2026-09-23：在途巴士图标（**原生 AMap.Marker** + DOM content；拖拽期零 JS） */}
       <VehicleLayer

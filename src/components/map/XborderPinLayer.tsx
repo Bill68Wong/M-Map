@@ -24,7 +24,7 @@
  */
 
 import { useEffect, useRef } from "react";
-import { groupXbPins, XB_PIN_SIZE, xbPinById } from "./xborder-pins";
+import { groupXbPins, XB_PIN_SIZE, xbPinById, type XbPinKind } from "./xborder-pins";
 
 interface XborderPinLayerProps {
   /** AMap.Map 实例（`NavMap` 就绪后传入；未就绪传 null） */
@@ -33,6 +33,16 @@ interface XborderPinLayerProps {
   amap: any | null;
   /** 总开关（未就绪 / 不该显示时 false） */
   enabled: boolean;
+  /**
+   * ★ M4（需求 6）：本轮按图层开关**分别**控制码头 / 机场可见性。
+   * `null`/缺省 = 全显示（行为与改前一致）；集合 = 只显示其中 `kind`。
+   *
+   * ⚠️ 刻意**不改聚合算法**：`groupXbPins(zoom)` 仍在**全量 `XB_PINS`** 上算，
+   *    只在渲染前按 `kind` 过滤组内成员 —— 这样「机场+外港码头」这对在低倍的聚合
+   *    仍然成立（关掉机场后自然退化为单独一个码头点，位置取**该码头自己的坐标**，
+   *    不是聚合中点）。若改成「两句各传一半数据进去」，聚合会失效、点的位置也会漂。
+   */
+  visibleKinds?: ReadonlySet<XbPinKind> | null;
   /** 点圆点 / 聚合点 ⇒ 交回宿主开小窗（参数 = 该组包含的地标 id） */
   onPick?: (ids: string[]) => void;
   /** 观测钩子：当前已绘单元数（供验收断言；不做业务逻辑） */
@@ -42,7 +52,7 @@ interface XborderPinLayerProps {
 const esc = (s: string) =>
   String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 
-export default function XborderPinLayer({ map, amap, enabled, onPick, onCount }: XborderPinLayerProps) {
+export default function XborderPinLayer({ map, amap, enabled, visibleKinds = null, onPick, onCount }: XborderPinLayerProps) {
   const markersRef = useRef<any[]>([]);
   /* 回调走 ref：宿主每次渲染都会新建内联函数，直接进 effect 依赖会导致全量重建 marker */
   const pickRef = useRef(onPick);
@@ -77,7 +87,11 @@ export default function XborderPinLayer({ map, amap, enabled, onPick, onCount }:
       const groups = groupXbPins(zoom);
 
       for (const g of groups) {
-        const pins = g.ids.map(xbPinById).filter((p): p is NonNullable<typeof p> => !!p);
+        /* ★ M4：先在**组内**按 `kind` 过滤（聚合本身仍在全量 XB_PINS 上算，见 props 注释） */
+        const pins = g.ids
+          .map(xbPinById)
+          .filter((p): p is NonNullable<typeof p> => !!p)
+          .filter((p) => !visibleKinds || visibleKinds.has(p.kind));
         if (!pins.length) continue;
 
         const isCluster = pins.length > 1;
@@ -94,9 +108,14 @@ export default function XborderPinLayer({ map, amap, enabled, onPick, onCount }:
         const attr = isCluster
           ? ` data-xb-cluster="${esc(g.clusterKey ?? "")}"`
           : ` data-xb-pin="${esc(pins[0].id)}"`;
+        /**
+         * ★ M4：聚合**被过滤退化**成单点时，位置必须回到**该点自己的坐标** ——
+         *   继续用 `g.lng/g.lat`（两点中点）会让「只开码头」时码头点漂到海上。
+         */
+        const pos: [number, number] = isCluster ? [g.lng, g.lat] : [pins[0].lng, pins[0].lat];
 
         const marker = new amap.Marker({
-          position: [g.lng, g.lat],
+          position: pos,
           content: `<div class="${cls}"${attr} role="button" tabindex="-1" aria-label="${esc(label)}" title="${esc(pins.map((p) => p.name).join(" / "))}">${
             isCluster ? `<span class="nav-map__xbpin__count">${pins.length}</span>` : ""
           }</div>`,
@@ -126,7 +145,7 @@ export default function XborderPinLayer({ map, amap, enabled, onPick, onCount }:
       }
       clear();
     };
-  }, [map, amap, enabled]);
+  }, [map, amap, enabled, visibleKinds]);
 
   return null;
 }

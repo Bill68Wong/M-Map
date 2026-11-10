@@ -729,7 +729,8 @@ export default function NavDetailBody({
 
      ★ 现在**唯一口径 = `lib/nav/remaining-view.ts#legRemainMinOf`**（与服务端
         `remaining.ts` 的当前腿剩余逐条同式）：
-        `segRemainSec / 60 + Σ minToNext[基准站 .. 倒数第二站]`，
+        `segRemainSec / 60 + Σ minToNextEst[基准站 .. 倒数第二站]`
+        （累加用**估算列** `minToNextEst`，不是可为 `null` 的展示列 `minToNext` —— 见 `:762`），
         基准站由 `lib/nav/track.ts#remainFromIdxOf(prog)` 给（停靠态 = 所停站，不是 `prog.nextIdx`）。
      ① 为什么**不再**读服务端 `liveStrips[legIdx].rideMin`（U3 收口前它曾是最优来源）：
         那个值只在 `POST /api/nav/remaining` **成功返回**时更新。该请求失败时
@@ -757,7 +758,9 @@ export default function NavDetailBody({
     const min = legRemainMinOf({
       segRemainSec: seg,
       pivotIdx,
-      minToNext: trackStops.map((s) => s.minToNext),
+      // ★ v4.1.0：累加用 `minToNextEst`（护栏前原值）；`minToNext=null` 只表示「不展示数字」，
+      //   若这里用 null 会被 numOr0 归 0 ⇒ 剩余时间系统性偏短（用户赶不上车）。
+      minToNext: trackStops.map((s) => s.minToNextEst),
       legMinutes: legMinutes ?? 0,
     });
     return Number.isFinite(min) && min >= 0 ? min : null;

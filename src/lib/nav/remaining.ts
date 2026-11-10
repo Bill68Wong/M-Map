@@ -62,9 +62,10 @@
  *   ② **轻轨段候车不重估**（`source:"kept"`）：轻轨候车来自 `lrt_timetables`（需 `LrtPreload`），
  *      本模块刻意不接受该依赖 ⇒ 保留卡面原值。这是**刻意的边界**，不是遗漏。
  *   ③ **站条不裁剪**：`patchedCard` 只改 `minutes`/`waitMin`，不改 `stops[]` ⇒
- *      纵条逐站 `minToNext` 仍是**全段**值（`strips.ts:74` 只吃 `lookupHop`）。
- *      用户看不到这一点，因为导航态该块整块不渲染（`NavStrip.tsx:138` 的 `!nav`）。
- *      ⇒ `sum(minToNext) !== rideMin` 在 patchedCard 下是**预期**，已被快照脚本锁为断言。
+ *      纵条逐站 `minToNext` / `minToNextEst` 仍是**全段**值（`strips.ts` 只吃 `lookupHop`）。
+ *      这一点现已**无处可见**：纵轴逐站分钟已随需求 7（2026-11-09）整块删除渲染
+ *      （原 `NavStrip.tsx` 的 `!end && !nav` 分支已不存在），任何导航状态都不再印逐站读数。
+ *      ⇒ `sum(minToNextEst) !== rideMin` 在 patchedCard 下仍是**预期**，已被快照脚本锁为断言。
  *   ④ **末段步行不重估**：`walkIn.minutes` 是静态实测均值，用户实际走得快/慢都按均值算。
  *      重估它需要实时 GPS 距离，超出「只重算时间」的范围。
  *
@@ -104,7 +105,8 @@ export interface RemainingInput {
    * **基准站**下标（客户端 `track.ts#remainFromIdxOf(track.prog)`）。
    * 停靠态 = 所停站 `atIdx`（**不是** `prog.nextIdx`，那个指向所停站的下一站，
    * 从那里起累加会整跳漏掉「所停站 → 下一站」）；行驶态 = `prog.nextIdx`（区间终点）。
-   * 仅用于「从基准站起累加 `minToNext`」；缺省 ⇒ 站序精确回退不可用，回落该段静态分钟。
+   * 仅用于「从基准站起累加 `minToNextEst`（估算列，非可为 `null` 的展示列）」；
+   * 缺省 ⇒ 站序精确回退不可用，回落该段静态分钟。
    */
   nextIdx?: number | null;
   /** 重算基准时刻（缺省 `Date.now()`；测试可注入） */
@@ -135,7 +137,8 @@ const numOr0 = (v: unknown): number => {
 
 /**
  * 该段「从第 `fromIdx` 站起」到下车点的剩余逐跳分钟。
- * 与前端 `NavDetailBody.tsx` 的回退口径逐字对应（`for k = nextIdx; k < stops.length-1; sum += minToNext`）；
+ * 与前端 `NavDetailBody.tsx` 的回退口径逐字对应（`for k = nextIdx; k < stops.length-1; sum += minToNextEst`，
+ * 前端传的是 `minToNextEst` 估算列 —— 见 `NavDetailBody.tsx:762`，**不要**改成可为 `null` 的 `minToNext`）；
  * 站序由 `segmentsOf` 切出「上车站 → 下车站」的切片（与 `buildStrips` 同一个切法，见 `strips.ts:61-68`）。
  * @returns `null` = 站序缺失（调用方回退到 `ride.minutes`）
  */
@@ -151,8 +154,10 @@ function hopMinutesFrom(
   const start = Math.max(0, Math.min(Math.trunc(fromIdx), codes.length - 1));
   let sum = 0;
   for (let k = start; k < codes.length - 1; k++) {
-    const hop = lookupHop(ctx.segIdx, ride.route, codes[k]!, codes[k + 1]!, ctx.nowBucket);
-    sum += Math.max(0, numOr0(hop.minutes));
+    // ★ 2026-11-09 裁定：末跳（B = codes 末位 = 本次下车站）用纯行驶，中间跳含停站。
+    const isFinal = k === codes.length - 2;
+    const hop = lookupHop(ctx.segIdx, ride.route, codes[k]!, codes[k + 1]!, ctx.nowBucket, { final: isFinal });
+    sum += Math.max(0, numOr0(hop.estMinutes));
   }
   return sum;
 }
