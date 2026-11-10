@@ -1111,7 +1111,7 @@ function realIndexCheck(st: RecStatic): void {
 
   // ③ 逐站之和 ≡ rideOfHops（同源实证）
   const origStrip = buildStrips(card, stripCtx)[0]!;
-  const sum = round1(origStrip.stops.slice(0, -1).reduce((a, x) => a + x.minToNext, 0));
+  const sum = round1(origStrip.stops.slice(0, -1).reduce((a, x) => a + x.minToNextEst, 0));
   const levels = origStrip.stops.slice(0, -1).map((s) => s.level);
   ok(near(sum, rideStatic, 0.06), `真实逐站之和 ${sum} ≡ rideOfHops ${rideStatic}（levels=${levels.join("/")}）`);
   console.log(`  实际线路：${route} dir=${dir} ${board} → ${alight}（整线 ${stops.length} 站，${hops.length} 跳）`);

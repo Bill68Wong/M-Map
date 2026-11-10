@@ -234,7 +234,7 @@ const round = (v: number): number => Math.round(v * 10) / 10;
 
 /** 把一段站条压成一行可读摘要（锁住三条语义绑定 + 几何形状） */
 function digestOf(s: SegmentStrip): string {
-  const sum = round(s.stops.slice(0, -1).reduce((a, x) => a + x.minToNext, 0));
+  const sum = round(s.stops.slice(0, -1).reduce((a, x) => a + x.minToNextEst, 0));
   const roles = s.stops.map((x) => x.role[0]).join(""); // b/m/a 三字母串
   return [
     `${s.route}/${s.kind}/${s.board}>${s.alight}`,
@@ -251,7 +251,10 @@ const snapshotOf = (c: RecommendCard): string[] => buildStrips(c, ctx).map(diges
 /**
  * 快照基线（首次由 `--update` 生成，人工核对后粘贴）。
  * ⚠️ 若**有意**改变 `strips.ts` 语义（如 `rideMin` 改为读别的字段），
- *    必须先确认消费方（`NavStrip.tsx:97/171/182`、`StationStrip.tsx:107/152`）同步，
+ *    必须先确认消费方同步再更新基线：`NavStrip` 的**折叠键所在行**与**对钩所在行**、
+ *    `NavDetailBody` 的**顶部剩余分钟所在行**（该行吃 `minToNextEst`）。
+ *    （不写行号：这三处都漂过一次 —— 卡片页旧 `StationStrip` 已随 v3.6.0 删除，
+ *      纵轴逐站分钟已随需求 7 整块删除，行号只会继续漂。）
  *    再更新本基线；**仅因测试变红就改基线**等于把回归网拆掉。
  */
 const GOLDEN: Record<string, string[]> = {
@@ -353,7 +356,7 @@ console.log("\n── 语义绑定（改数据源即变红）──");
   ok(
     strips
       .filter((s) => s.kind === "bus")
-      .every((s) => round(s.stops.slice(0, -1).reduce((a, x) => a + x.minToNext, 0)) === round(s.rideMin)),
+      .every((s) => round(s.stops.slice(0, -1).reduce((a, x) => a + x.minToNextEst, 0)) === round(s.rideMin)),
     "bus 段（原 card）：逐站 minToNext 之和 ≡ rideMin（同一串 hops + 同一个 lookupHop）",
   );
   ok(
@@ -378,23 +381,22 @@ console.log("\n── 已知不对称：patchedCard 下 sum(minToNext) ≠ rideM
     [transfer("A3", 2, 8.7)],
   );
   const s = buildStrips(patched, ctx);
-  const sum0 = round(s[0]!.stops.slice(0, -1).reduce((a, x) => a + x.minToNext, 0));
+  const sum0 = round(s[0]!.stops.slice(0, -1).reduce((a, x) => a + x.minToNextEst, 0));
   ok(s[0]!.rideMin === 2.5, "patchedCard：rideMin 已变为剩余 2.5", `实际 ${s[0]!.rideMin}`);
-  ok(sum0 === 8, "patchedCard：逐站 minToNext 之和仍为全段 8（**不随之变化**）", `实际 ${sum0}`);
+  ok(sum0 === 8, "patchedCard：逐站 minToNextEst 之和仍为全段 8（**不随之变化**）", `实际 ${sum0}`);
   ok(
     sum0 !== s[0]!.rideMin,
-    "⇒ 二者不再相等，这是**预期**：`minToNext` 只来自 `lookupHop(nowBucket)`（strips.ts:74），不吃 card.minutes",
+    "⇒ 二者不再相等，这是**预期**：`minToNextEst` 只来自 `lookupHop(nowBucket)`，不吃 card.minutes",
   );
   /**
-   * 为什么可以接受 —— **机制是"渲染条件恰好挡住"，不是"用户看不见"**（前端独立核实，我采纳）：
-   *   · `NavStrip.tsx:138` 的逐跳「N 分」条件是 `!end && s.minToNext > 0 && !nav`；
-   *   · `NavStrip.tsx:72` `const open = openManual || !!nav` ⇒ riding 当前腿 `nav` **恒非空**；
-   *   · ⇒ **恰恰在 `rideMin` 被补丁的那个场景，逐跳标签不渲染**；其余腿 `nav` 为 null
-   *     （逐跳可见）但它们未被补丁 ⇒ 各自自洽。
-   * ⚠️⚠️ 这是**结构必然**，不是侥幸。所以：**若将来有人放开 `NavStrip` 的 `!nav` 条件**
-   *   （例如想在导航中也显示逐跳分钟），本不对称会**立刻变成用户可见** ⇒
-   *   **必须先重裁站条范围（要不要按已过站裁剪 `stops[]`），再来放开条件。**
-   *   顺序反了就会给用户看到「车上约 2 分，但下面逐站加起来 8 分」。
+   * 为什么可以接受 —— 现在是「**根本没有这个 UI 了**」（2026-11-09 需求 7 之后的口径）：
+   *   · 曾经的理由是「`NavStrip` 的逐跳「N 分」带 `!nav` 条件 ⇒ 补丁场景下恰好不渲染」；
+   *   · 需求 7 已把纵轴**逐站分钟整块删除**（`!end && !nav` 那段 12 行连同「—」占位一起删掉），
+   *     任何导航状态都不再印逐站读数 ⇒ 这个不对称**不再有可见面**。
+   *   · ⇒ 因此**不需要**再讨论「放开 `!nav`」或「按已过站裁剪 `stops[]`」——
+   *     那两条是「想显示逐站分钟」时才要回答的问题，前提已不存在。
+   * ⚠️ 若将来有人要**重新引入**逐站分钟，必须先把上面两条重新裁决一遍，
+   *   否则就会给用户看到「车上约 2 分，但下面逐站加起来 8 分」。
    * 非导航态（详情预览）不会走 patchedCard（只有 `/api/nav/remaining` 产出它）。
    */
   ok(

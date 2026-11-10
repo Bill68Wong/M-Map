@@ -37,6 +37,8 @@ import {
 } from "../src/lib/cross-border/respond";
 import { classify, TERMINAL_KINDS, UNKNOWN_DRIFT_THRESHOLD } from "../src/lib/cross-border/status";
 import type { XbDir } from "../src/lib/cross-border/types";
+// 迁移的枚举清单参与「跨文件同源」断言（只读常量，不连库、不执行 DDL）
+import { FLIGHT_STATUS_KINDS } from "../db/migrate-v3800";
 
 let pass = 0;
 let fail = 0;
@@ -116,10 +118,11 @@ assertEq(
 );
 assertEq(classify("airport", "arr", "已取消").terminal, true, "抵澳也认「已取消」");
 
-// ③ `0` 不是空串：必须 unknown 且**非终态**（行保留、状态原样显示）
-assertEq(classify("airport", "arr", "0").kind, "unknown", "字面量 `0` ⇒ unknown");
+// ③ `0` 不是空串：v4.1 起归 `pending`（已计划、尚未进入流程），**非终态**（行保留）
+assertEq(classify("airport", "arr", "0").kind, "pending", "字面量 `0` ⇒ pending（不是 unknown）");
 assertEq(classify("airport", "arr", "0").terminal, false, "字面量 `0` 非终态（不剔除该行）");
-assertEq(classify("airport", "arr", "").kind, "unknown", "空串 ⇒ unknown");
+assertEq(classify("airport", "dep", "0").kind, "pending", "离澳 `0` 同样是 pending");
+assertEq(classify("airport", "arr", "").kind, "unknown", "空串 ⇒ unknown（空才是真的没有）");
 assertEq(
   classify("airport", "dep", "  停止登機  ").kind,
   "boarding_closed",
@@ -245,11 +248,21 @@ const KNOWN_STATUSES: readonly KnownStatus[] = [
   { source: "airport", dir: "dep", text: "櫃檯 A10-A12 已開放", kind: "checkin_open", terminal: false, from: "实测 4 条" },
   { source: "airport", dir: "dep", text: "航班延誤至 18:40", kind: "delayed", terminal: false, from: "实测 2 条" },
   { source: "airport", dir: "dep", text: "已取消", kind: "cancelled", terminal: true, from: "实测 1 条" },
+  // 机场离澳 · 2026-11-07 语料补齐的 3 类（此前从未识别，合计 12/131）
+  { source: "airport", dir: "dep", text: "現正登機", kind: "checkin_open", terminal: false, from: "实测 1 条（v4.1 新增）" },
+  { source: "airport", dir: "dep", text: "最後召集", kind: "checkin_open", terminal: false, from: "实测 1 条（v4.1 新增）" },
+  { source: "airport", dir: "dep", text: "櫃檯 A10-A12 開放時間為 15:05", kind: "checkin_open", terminal: false, from: "实测 10 条（v4.1 新增）" },
   // 机场抵澳
   { source: "airport", dir: "arr", text: "航班著陸 09:09", kind: "landed", terminal: true, from: "实测 62 条" },
   { source: "airport", dir: "arr", text: "航班取消", kind: "cancelled", terminal: true, from: "实测 1 条" },
   { source: "airport", dir: "arr", text: "已啟航 預計到達 21:12", kind: "departed", terminal: false, from: "实测 4 条（非终态）" },
-  { source: "airport", dir: "arr", text: "0", kind: "unknown", terminal: false, from: "实测 6 条字面量 0 + 凌晨快照 97%" },
+  { source: "airport", dir: "arr", text: "航班延誤", kind: "delayed", terminal: false, from: "实测 1 条（v4.1 补缺：抵澳此前无延误规则）" },
+  { source: "airport", dir: "dep", text: "0", kind: "pending", terminal: false, from: "白天快照 15 条（v4.1：unknown → pending）" },
+  { source: "airport", dir: "arr", text: "0", kind: "pending", terminal: false, from: "白天快照 27 条（v4.1：unknown → pending）" },
+  { source: "airport", dir: "arr", text: "", kind: "unknown", terminal: false, from: "空串（真正的无状态）" },
+  // 机场 · 时刻变更（2026-11-08 00:0x 首次实测，上游当日 70 条里 1 条；负责人裁定单列 kind）
+  { source: "airport", dir: "dep", text: "航班更改時間 13:10", kind: "rescheduled", terminal: false, from: "实测 1 条（v4.1 新增状态）" },
+  { source: "airport", dir: "arr", text: "航班更改時間 13:10", kind: "rescheduled", terminal: false, from: "同一条形态在两向都认（对称）" },
   // 船（真实快照逐字节）
   { source: "ferry", dir: "dep", text: "17:04 啟航", kind: "departed", terminal: true, from: "ferry-dep-PE.html 首行" },
   { source: "ferry", dir: "dep", text: "待航", kind: "pending", terminal: false, from: "ferry-dep-PE.html 末尾 3 行" },
@@ -267,13 +280,13 @@ for (const s of KNOWN_STATUSES) {
     `${s.source}.${s.dir} 「${s.text}」⇒ terminal=${s.terminal}（${s.from}）`,
   );
 }
-// 独立期望：样本表必须覆盖全部 10 个 kind（硬编码，不从 status.ts 导出）
+// 独立期望：样本表必须覆盖全部 11 个 kind（硬编码，不从 status.ts 导出）
 assertEq(
   [...new Set(KNOWN_STATUSES.map((s) => s.kind))].sort().join(","),
-  "arrived,boarding_closed,cancelled,checkin_open,delayed,departed,eta,landed,pending,unknown",
-  "样本表覆盖全部 10 个 kind（独立硬编码期望，删样本会红）",
+  "arrived,boarding_closed,cancelled,checkin_open,delayed,departed,eta,landed,pending,rescheduled,unknown",
+  "样本表覆盖全部 11 个 kind（独立硬编码期望，删样本会红）",
 );
-assertEq(KNOWN_STATUSES.length, 15, "内联样本表 15 条实测状态文本");
+assertEq(KNOWN_STATUSES.length, 23, "内联样本表 23 条实测状态文本");
 
 // ── 船的 fixture 覆盖率：两份**真实快照**里 unknown 必须为 0 ──
 //   （这条断言的价值就从这里体现过：`到港待航` 曾被白名单抄漏，快照一跑就 4/8 未知）
@@ -287,6 +300,152 @@ assertEq(
   0,
   "到港快照 unknown 数 = 0（含 4 条「待航」）",
 );
+
+/* ══════════════════════════════════════════════════════════════════
+ * C2. v4.1 状态修复的回归（pending + 4 类补缺 + 131 行真实快照）
+ * ══════════════════════════════════════════════════════════════════ */
+console.log("\nC2. pending 与词表补缺（v4.1）");
+
+// ① `pending` / `rescheduled` 绝不能进 SQL 终态集合（进了就把要显示的班次全隐藏）
+for (const dir of ["dep", "arr"] as const) {
+  assert(
+    !TERMINAL_KINDS.airport[dir].includes("pending"),
+    `机场/${dir} 终态集合**不含** pending（进了就会把未起飞的班次全剔除）`,
+  );
+  assert(
+    !TERMINAL_KINDS.airport[dir].includes("rescheduled"),
+    `机场/${dir} 终态集合**不含** rescheduled（航班还没飞，改的是时刻不是终态）`,
+  );
+}
+
+// ② 边界：过宽匹配会把上游换格式的漂移掩盖掉
+assertEq(classify("airport", "dep", "00").kind, "unknown", "「00」不是 pending（防宽匹配）");
+assertEq(classify("airport", "dep", "0.0").kind, "unknown", "「0.0」不是 pending");
+assertEq(classify("airport", "dep", "0 0").kind, "unknown", "「0 0」不是 pending");
+assertEq(classify("airport", "dep", "O").kind, "unknown", "字母 O 不是 pending（0/O 不能混）");
+// `"0 "` ⇒ pending：classify() 契约是「内部只 trim()」（见 status.ts 入口注释），
+// 上游带空格时我们应当**仍然认出**它，而不是退化成 unknown。这条断言把该行为钉死。
+assertEq(classify("airport", "dep", " 0 ").kind, "pending", "「 0 」（带空白）⇒ pending（trim 契约）");
+
+// ②b 时刻变更的边界取舍（每一条都是刻意选择，改之前先读注释）
+//   · `航班更改時間 13:10`      ⇒ rescheduled（实测形态）
+//   · `航班更改時間13:10`       ⇒ **也认**（`\s*`）：空格不是语义，少一个不该让整类退化
+//                                  （同船侧 `16:32啟航` 无空格实测 + `0 ` 的 trim 教训）
+//   · `航班更改時間`（无时刻）   ⇒ unknown：锚定时刻是刻意的，否则上游换写法会被吞掉
+//   · `航班更改時間 9:5`        ⇒ unknown：分钟固定两位（语料 156 个取值全是 `HH:MM`）
+//   · `航班更改時間 13:10（原因…）` ⇒ unknown：多出的后缀说明上游改了格式，要能被看见
+for (const dir of ["dep", "arr"] as const) {
+  assertEq(
+    classify("airport", dir, "航班更改時間 13:10").kind,
+    "rescheduled",
+    `${dir}「航班更改時間 13:10」⇒ rescheduled（含实测原文）`,
+  );
+  assertEq(
+    classify("airport", dir, "航班更改時間 13:10").terminal,
+    false,
+    `${dir}「时刻变更」是**非终态**（改点不是走完）`,
+  );
+  assertEq(
+    classify("airport", dir, "航班更改時間13:10").kind,
+    "rescheduled",
+    `${dir} 无空格写法也认（空白用 \\s* 容忍，同船侧 16:32啟航 先例）`,
+  );
+  assertEq(
+    classify("airport", dir, "航班更改時間").kind,
+    "unknown",
+    `${dir} 无时刻 ⇒ unknown（锚定时刻，上游换写法必须被探针看见）`,
+  );
+  assertEq(
+    classify("airport", dir, "航班更改時間 9:5").kind,
+    "unknown",
+    `${dir} 分钟单位数 ⇒ unknown（语料全部是两位 HH:MM，不为未见过格式放宽）`,
+  );
+  assertEq(
+    classify("airport", dir, "航班更改時間 13:10（原因：機型調整）").kind,
+    "unknown",
+    `${dir} 带后缀 ⇒ unknown（格式变了要能被看见，不假装认识）`,
+  );
+}
+// 反向陷阱：延误不能因为新增 rescheduled 被抢走
+assertEq(
+  classify("airport", "dep", "航班延誤至 18:40").kind,
+  "delayed",
+  "「航班延誤至 HH:MM」仍归 delayed（`^航班延誤` 前缀已覆盖，无需单列）",
+);
+assertEq(
+  classify("airport", "arr", "航班延誤至 18:40").kind,
+  "delayed",
+  "抵澳同形态也归 delayed",
+);
+
+// ②c DB CHECK 清单 == 分类器实际产出的 kind 全集（跨文件同源）
+//    这条守的是「分类器加了新 kind、迁移清单忘了加」⇒ INSERT 撞 CHECK ⇒ 采集 503。
+//    方向一：清单里每个 airport kind 都能被 classify 产出（不是死条目）；
+//    方向二：样本表里出现的每个 airport kind 都在清单里（不会漏迁移）。
+{
+  const declared = new Set<string>(FLIGHT_STATUS_KINDS);
+  const producedAirport = new Set(
+    KNOWN_STATUSES.filter((s) => s.source === "airport").map((s) => s.kind),
+  );
+  const deadInDb = [...declared].filter((k) => !producedAirport.has(k));
+  const missingInDb = [...producedAirport].filter((k) => !declared.has(k));
+  assertEq(
+    deadInDb.length,
+    0,
+    `迁移清单里的每个 kind 都有真实来源（死条目：${deadInDb.join(",") || "无"}）`,
+  );
+  assertEq(
+    missingInDb.length,
+    0,
+    `样本表出现的每个 airport kind 都在迁移清单里（漏迁移：${missingInDb.join(",") || "无"}）`,
+  );
+  // 反向陷阱：船侧的 kind 不得混进机场清单（两套枚举不同值）
+  assert(
+    !declared.has("arrived") && !declared.has("eta"),
+    "机场 CHECK 清单不含船侧独占的 arrived / eta",
+  );
+}
+
+// ③ 131 行真实快照回归：改前 unknown = 55（42.0%），改后必须 = 0
+//    夹具由 `xborder_flights` 2026-11-07 白天快照导出（86 个取值 × 出现次数），
+//    逐字原文，**不是**从 status.ts 反推的期望 —— 白名单被改窄会立刻红。
+{
+  const tsv = fs
+    .readFileSync(path.join(FIXTURES, "airport-status-day-131.tsv"), "utf8")
+    .split(/\r?\n/)
+    .filter((l) => l && !l.startsWith("#"));
+  const rows = tsv.map((l) => {
+    const [dir, n, ...rest] = l.split("\t");
+    return { dir: dir as XbDir, n: Number(n), raw: rest.join("\t") };
+  });
+  const total = rows.reduce((s, r) => s + r.n, 0);
+  assertEq(total, 131, "快照夹具合计 131 行");
+  assertEq(
+    rows.filter((r) => r.dir === "dep").reduce((s, r) => s + r.n, 0),
+    65,
+    "快照夹具：离澳 65 行",
+  );
+  assertEq(
+    rows.filter((r) => r.dir === "arr").reduce((s, r) => s + r.n, 0),
+    66,
+    "快照夹具：抵澳 66 行",
+  );
+  const unknownRows = rows
+    .filter((r) => classify("airport", r.dir, r.raw).kind === "unknown")
+    .reduce((s, r) => s + r.n, 0);
+  assertEq(unknownRows, 0, "131 行真实快照的 unknown 数 = 0（改前 55 = 42.0%）");
+  const pendingRows = rows
+    .filter((r) => classify("airport", r.dir, r.raw).kind === "pending")
+    .reduce((s, r) => s + r.n, 0);
+  assertEq(pendingRows, 42, "其中 42 行归 pending（dep 15 + arr 27）");
+  // 反向：unknown 必须仍**可能**发生（否则上面那条是因为断言失效才绿）
+  assertEq(
+    rows.filter((r) => classify("airport", r.dir, r.raw + " ").kind === "unknown").length,
+    0,
+    "（对照）对快照行追加空白不影响分类 —— 证明 classify 确实跑了，不是空转",
+  );
+}
+
 
 /* ══════════════════════════════════════════════════════════════════
  * D. 空态三值互斥 + after=day 的禁忌

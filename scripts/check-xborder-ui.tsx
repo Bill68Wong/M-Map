@@ -104,6 +104,22 @@ assertEq(statusClass("boarding_closed", false), "xb-st--warn", "停止登機（�
 assertEq(statusClass("checkin_open", false), "", "櫃檯已開放 ⇒ 正常前景（不着色）");
 assertEq(statusClass("arrived", true), "xb-st--past", "船 已到達（终态）⇒ 置灰");
 assertEq(statusClass("unknown", false), "", "上游未提供状态 ⇒ 正常前景（不着色）");
+/* ★ 时刻变更（负责人 2026-11-08 新增）：与延误**同档 --warn**，但必须带自己的 class
+     —— 只靠颜色深浅无法与延误区分，而两者对用户的行动指令不同（晚点 vs 换了钟点）。 */
+assertEq(
+  statusClass("rescheduled", false),
+  "xb-st--warn xb-st--rescheduled",
+  "时刻变更 ⇒ --warn（告警语义）+ --rescheduled（虚线，非颜色通道）",
+);
+assert(
+  statusClass("rescheduled", false) !== statusClass("delayed", false),
+  "时刻变更与延误的 class 必须不同（否则屏幕上两者完全一样）",
+);
+assertEq(
+  statusClass("rescheduled", false).includes("xb-st--past"),
+  false,
+  "时刻变更**不得**置灰（航班还没飞，改的是时刻）",
+);
 
 /* ══════════════════════════════════════════════════════════════════════
  * [3] 时刻：澳门固定 +8，不看设备时区
@@ -270,12 +286,13 @@ assertEq(remainingCount(rows), 2, "剩余班数只数非终态");
 assertEq(remainingCount([]), 0, "空表剩余 0");
 
 /* ══════════════════════════════════════════════════════════════════════
- * [5b] 上游哨兵 `status="0"`（机场抵澳实测 6 条）
+ * [5b] 占位字面量 `status="0"` ⇒ 「待定」（v4.1 起，不再是「—」）
  * ══════════════════════════════════════════════════════════════════════ */
-console.log("\n[5b] 认不出的状态与空状态（不能裸渲染 0、也不能留空、更不能替上游归因）");
-assertEq(statusCell("0").text, "—", "认不出的 \"0\" ⇒ 显示「—」");
-assertEq(statusCell("0").unrecognized, true, "认不出的 \"0\" ⇒ 标 unrecognized（TSX 据此加 aria-label 与 --meta）");
-assertEq(statusCell("  0  ").unrecognized, true, "带空白的 \"0\" 同样认不出（上游会带空格）");
+console.log("\n[5b] 占位状态与空状态（不能裸渲染 0、也不能留空、更不能替上游归因）");
+assertEq(statusCell("0").text, "待定", "上游 \"0\" ⇒ 显示「待定」（已计划、尚未进入流程）");
+assertEq(statusCell("  0  ").text, "待定", "带空白的 \"0\" 同样归「待定」（上游会带空格，trim 后等价）");
+assertEq(statusCell("00").text, "00", "\"00\" 不是占位值 ⇒ 原文直出（不宽匹配）");
+assertEq(statusCell("0.0").text, "0.0", "\"0.0\" 不是占位值 ⇒ 原文直出");
 /* ★ 措辞：空状态必须是「状态未识别」（陈述我方认知边界，简体是裁决后的写法），**不得**是「資料未公開」——
    「資料未公開」是在替上游归因（"机场没公开"），而我们并不知道是不是真没公开。
    这条断言守的是口径，改回去会红。★ 下面两条**方向不同、不是重复**：
@@ -286,11 +303,46 @@ assertEq(statusCell("  0  ").unrecognized, true, "带空白的 \"0\" 同样认�
 assertEq(statusCell("").text, "状态未识别", "空状态 ⇒ 「状态未识别」（不是「資料未公開」）");
 assert(!/未公開|未公开/.test(statusCell("").text), "空状态**不得**归因成上游未公开（繁简都拦）");
 assertEq(statusCell("已啟航 預計到達 21:12").text, "已啟航 預計到達 21:12", "真实状态**逐字保留**（不改写/不截断）");
-assertEq(statusCell("航班著陸").unrecognized, false, "普通状态不是「认不出」");
-/* 反向：哨兵行在服务端是 `statusKind=unknown` + `isTerminal=false`
-   ⇒ 它**不是终态**，行必须留着、也不该被置灰。
-   ⚠️ 不能把 `statusCell("0").unrecognized` 当 `isTerminal` 传给 statusClass ——
-      `unrecognized`(我方没读懂) 与 `isTerminal`(已走完) 是两件事，混用正是本文件要防的错。 */
+
+/* ══════════════════════════════════════════════════════════════════════
+ * [5c] 时刻变更 ⇒ 「时刻变更 HH:MM」
+ *
+ * 这是本文件里**唯一**允许改写上游叙述文本的地方（机场侧无"不得修改"条款，
+ * 项目语种是简体；原文仍完整保存在 status_raw 与接口 `status` 字段里）。
+ * 时刻必须保留 —— 只写「时刻变更」等于把用户唯一要的行动信息删掉。
+ * ══════════════════════════════════════════════════════════════════════ */
+console.log("\n[5c] 时刻变更（措辞归一，但新时刻必须保留）");
+assertEq(
+  statusCell("航班更改時間 13:10").text,
+  "时刻变更 13:10",
+  "「航班更改時間 HH:MM」⇒ 「时刻变更 HH:MM」（简体归一 + 时刻保留）",
+);
+assertEq(
+  statusCell("航班更改時間13:10").text,
+  "时刻变更 13:10",
+  "无空格写法也归一（与 status.ts 的 \\s* 判据一致）",
+);
+assertEq(
+  statusCell("航班更改時間").text,
+  "航班更改時間",
+  "无时刻 ⇒ **原文直出**（不猜、也不显示半截文案）",
+);
+assertEq(
+  statusCell("航班更改時間 9:5").text,
+  "航班更改時間 9:5",
+  "非两位分钟 ⇒ 原文直出（不为未见过格式编造文案）",
+);
+assertEq(
+  statusCell("航班更改時間 13:10（原因：機型調整）").text,
+  "航班更改時間 13:10（原因：機型調整）",
+  "带后缀 ⇒ 原文直出（上游改了格式要能被看见，不被我们「美化」掉）",
+);
+assert(!/更改時間/.test(statusCell("航班更改時間 13:10").text), "归一后的文案不再含繁体「更改時間」");
+/* 反向：占位行在服务端是 `statusKind=pending` + `isTerminal=false`
+   ⇒ 它**不是终态**，行必须留着、也不该被置灰/加色。
+   ⚠️ 不能把 `statusKind` 当 `isTerminal` 用 —— `pending`(还没开始) 与 `isTerminal`(已走完)
+      是两件事，混用正是本文件要防的错。 */
+assertEq(statusClass("pending", false), "", "「待定」行不置灰、不着色（非终态，行必须可见）");
 assertEq(statusClass("unknown", false), "", "认不出的行（unknown + 非终态）不置灰、行必须可见");
 
 /* ══════════════════════════════════════════════════════════════════════

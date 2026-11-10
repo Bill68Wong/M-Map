@@ -77,6 +77,19 @@ import {
 
 const API_ROOT = path.resolve("src/app/api");
 
+/**
+ * ★ S-07：分母断言 —— 扫描器空转（0 文件 / 0 方法 / 0 发现）时**必须判红**，
+ *   否则会打印「通过 0 / 失败 0」被误当绿（API_ROOT 指错、路径改坏时最典型）。
+ *   打印「实际比对 N / 预期 >0」让空转在日志里一眼可见。
+ */
+function assertDenom(actual: number, label: string): void {
+  if (actual <= 0) {
+    console.error(`\n❌ 分母断言失败：${label} 实际 ${actual} / 预期 >0（扫描器空转，结果不可信）`);
+    process.exit(1);
+  }
+  console.log(`  分母：${label} 实际 ${actual} / 预期 >0`);
+}
+
 type WriteMethod = (typeof WRITE_METHODS)[number];
 
 /**
@@ -292,7 +305,10 @@ const SELF_CASES: SelfCase[] = [
   },
   {
     name: "注释里冒充防护调用",
-    route: "/api/dsat/grab",
+    // ★ S-01：必须用**不在 `GONE_PREFIXES` / `SAME_ORIGIN_PREFIXES`** 的路径。
+    //   原写 `/api/dsat/grab` 会在 judge() 第 ① 步命中「已下线 410」直接 ok:true，
+    //   于是 expectOk:false 永远对不上目标断言 —— 该 case 从没真正测到「注释冒充」这条规则。
+    route: "/api/self-test/comment-only",
     method: "POST",
     source: `export async function POST() {
   // TODO: 以后加 hasInternalToken(req)
@@ -368,6 +384,7 @@ function scan(): void {
   }
 
   const files = collectRouteFiles(API_ROOT).sort();
+  assertDenom(files.length, "route.ts 文件数");
   const verdicts: Verdict[] = [];
   const skips: { key: string; reason: string }[] = [];
 
@@ -387,6 +404,7 @@ function scan(): void {
     }
   }
 
+  assertDenom(verdicts.length, "写方法数");
   console.log("═══ 写接口防护门禁（AC-50 · check-api-guards）═══");
   console.log(`扫描 ${files.length} 个 route.ts · 写方法 ${verdicts.length} 个\n`);
 
@@ -528,6 +546,8 @@ const ENUM_VALUES = new Set([
 
 function scanErrors(): void {
   const findings = scanErrorLiterals();
+  assertDenom(findings.length, "error 出处数");
+  assertDenom(collectRouteFiles(API_ROOT).length, "扫描文件数");
   const ok = findings.filter((f) => f.status === "ok");
   const gone = findings.filter((f) => f.status === "gone");
   const allowed = findings.filter((f) => f.status === "allow");
@@ -643,6 +663,7 @@ function scanRouteExports(): void {
     }
   }
 
+  assertDenom(total, "顶层 export 数");
   console.log("\n═══ route 文件导出白名单（tsc 抓不到、build 才炸的一类）═══");
   console.log(`扫描 ${collectRouteFiles(API_ROOT).length} 个 route.ts · 顶层 export ${total} 个\n`);
   for (const b of bad) {
