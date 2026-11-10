@@ -7,8 +7,9 @@
  * ⇒ 判据、阈值、SQL 片段全部放这里，两处 import。
  *
  * ── 判据（按优先级；前三道是**前置门**：命中即 skip ⇒ 不排除）────────────────
- *   ① 候选：dwell_B ≥ LONG_STOP_MIN（默认 3 分）—— dwell_B 来自 track-derive 直测
+ *   ① 候选：dwell_B ≥ LONG_STOP_MARK_MIN（默认 3 分）—— dwell_B 来自 track-derive 直测
  *      （到站首帧 → 离站首帧）。离开口径 minutes = run(A→B) + dwell_B，故长 dwell 会让段时长虚高。
+ *      ★ v4.1.1：3 分是**标记档**（`long_stop=true`，只说明「含停站」）；**排除档**是 5 分（见下 ⑤）。
  *   ② **站点是总站**：任一线路某方向的 seq=1 或 seq=max（全澳并集，不是「本线端点」）
  *      ⚠️ 为什么用并集而非 (route, 站) 对级：C654 聯生圓形地是 59 路总站、却是 25/26/26A/50/21A 的**中途站**，
  *         而这正是要修的样例（26 路在此休息）。实测：status=1 且 ≥3 分的 11,182 段里，
@@ -20,7 +21,10 @@
  *   ④ 门 `insufficient`：**每个参与比较的分桶各自 n ≥ MIN_DWELL_SAMPLES（5）**，且至少覆盖
  *      MIN_BUCKET_KINDS（2）个分桶 —— 否则样本不足以判断「是不是计划性待发」→ **不排除**。
  *      ⚠️ 分母是**每个分桶各自**，不是全站合计：合计 40 条但全在高峰，同样判不出非高峰基线。
- *   ⑤ 通过 ①~④ 的样本判为「司机休息 / 长时间上落客」→ 排除（不计入 segment_stats / route_hop_stats）。
+ *   ⑤ 通过 ①~④ 的样本再按 **dwell 分档**（v4.1.1 双档）：
+ *      · dwell ≥ `LONG_STOP_EXCLUDE_MIN`（5 分）→ 「司机休息 / 长时间待发」→ **排除**
+ *      · dwell ∈ [3, 5) → 总站正常上落客 → **只标记，仍进聚合**
+ *      （单档 3 分一刀切的实测代价：186 条候选里 136 条落在 3~4 分被误排 —— 见 `LONG_STOP_MARK_MIN` 注释）
  *
  * ── 「时段」口径（必须用这一套，**禁止手写小时区间**）──────────────────────
  *   用 `./buckets.ts` 的现行分桶 `bucketOfRoute`：
@@ -56,8 +60,24 @@ import type { LongStopPolicyStats, SkipReason } from "./long-stop-types";
 export { ROUTE_SEQ_SQL, TERMINUS_SQL, mainOf, terminusMains } from "./terminus";
 export type { RouteStopSeqRow } from "./terminus";
 
-/** 长停站阈值（分）：dwell_B ≥ 此值 → 含司机休息/长时间停站 */
-export const LONG_STOP_MIN = 3;
+/**
+ * ── 双档阈值（v4.1.1）────────────────────────────────────────────────
+ *   ① **标记档** `LONG_STOP_MARK_MIN = 3`：dwell_B ≥ 3 分 → 该样本 `long_stop = true`，
+ *      **只标记、不排除**出 p50/avg。语义 =「这一跳的时长里含停站，不是纯行驶」。
+ *   ② **排除档** `LONG_STOP_EXCLUDE_MIN = 5`：dwell_B ≥ 5 分才**排除**出聚合。
+ *
+ * 为什么必须双档（实测 57 轮 / 202,790 条样本）：
+ *   186 条终点站长停候选里 **136 条（73%）落在 3~4 分钟** —— 那是**总站上落客**（正常运营），
+ *   只有 15 条（8%）≥5 分才像「司机休息 / 长时间待发」。单档 3 分一刀切把 114 条排除掉，
+ *   等于把总站正常的上下客时间从 p50 里抹掉 → ETA 系统性偏短。⇒ 3 分标记、5 分排除。
+ *   ⚠️ 红线：`EXCLUDE_MIN` **不得 ≤ 3**（那等于不排除）；两个阈值都不许为了「数字好看」下调。
+ */
+export const LONG_STOP_MARK_MIN = 3;
+/** 真正排除出聚合的门槛（分钟）。改动 = 改排除面，须重跑 P7 对照。 */
+export const LONG_STOP_EXCLUDE_MIN = 5;
+/** @deprecated 旧名（单档时代）。**= 标记档 3 分，只可用于「标记」，绝不可用于排除判据**。
+ *  排除请用 `LONG_STOP_EXCLUDE_MIN`。保留此别名只为不破坏既有 import。 */
+export const LONG_STOP_MIN = LONG_STOP_MARK_MIN;
 /** 「计划性待发」豁免区间：长停中位数 / 班距 */
 export const LAYOVER_RATIO_LO = 0.7;
 export const LAYOVER_RATIO_HI = 1.3;
@@ -131,6 +151,8 @@ export async function loadLongStopPolicy(
       peakCrowdedPairs: 0,
       peakCrowdedStations: 0,
       skippedSamples: 0,
+      markedSamples: 0,
+      markedPairs: 0,
     },
   };
   try {
@@ -138,11 +160,13 @@ export async function loadLongStopPolicy(
     const terminus = terminusMains(seqRows);
 
     // 候选长停样本（含观测时刻 —— 时段必须从真实时刻判，不信样本携带的 time_bucket）
+    // ★ v4.1.1：候选集用**标记档**（≥3 分）→ 才能同时数出「只标记」与「真排除」两档；
+    //   排除与否在下面的判据里按 `LONG_STOP_EXCLUDE_MIN` 分流，**不再由 SQL 一刀切**。
     const rows = (await q(
       `SELECT route_code, to_main, dwell_b_min::float8 AS dwell, observed_at
          FROM segment_samples
         WHERE source = 'track' AND COALESCE(dwell_b_min, 0) >= $1`,
-      [LONG_STOP_MIN],
+      [LONG_STOP_MARK_MIN],
     )) as unknown as { route_code: string; to_main: string; dwell: number; observed_at: string }[];
     if (!rows.length) return { ...empty, terminus };
 
@@ -188,6 +212,9 @@ export async function loadLongStopPolicy(
     let excludedSamples = 0;
     let skippedSamples = 0;
     let excludedPairs = 0;
+    /** ★ v4.1.1：dwell ∈ [MARK_MIN, EXCLUDE_MIN) 且过门 → 只标记、仍进聚合 */
+    let markedSamples = 0;
+    let markedPairs = 0;
     const seq = { hw: 0, ins: 0, pk: 0 };
     const st = { hw: new Set<string>(), ins: new Set<string>(), pk: new Set<string>() };
     // ★ 非总站**独立计数**（不做减法推导）：供 build-hop-stats 做对账断言。
@@ -254,8 +281,28 @@ export async function loadLongStopPolicy(
         continue;
       }
 
-      excludedSamples += total;
-      excludedPairs++;
+      // ★ v4.1.1：双档分流 —— 过门的站对里，只有 dwell ≥ EXCLUDE_MIN 的样本被排除；
+      //   [MARK_MIN, EXCLUDE_MIN) 的样本**只标记不排除**（总站正常上落客，排掉会让 ETA 偏短）。
+      //   按**样本**拆，不按站对拆：同一站对可能既有 3.5 分（上落客）也有 6 分（司机休息）。
+      let exclN = 0;
+      let markN = 0;
+      for (const [, c] of cells) {
+        for (const d of c.dwells) {
+          if (d >= LONG_STOP_EXCLUDE_MIN) exclN++;
+          else markN++;
+        }
+      }
+      if (exclN) {
+        excludedSamples += exclN;
+        excludedPairs++;
+      }
+      if (markN) {
+        markedSamples += markN;
+        // ⚠️ 只统计「**没有**排除档样本」的站对 —— 这样站对的分区才是互斥的：
+        //    候选 = 非总站 + 各门 + 排除 + 仅标记（`build-hop-stats` 的对账断言依赖它）。
+        //    既有 3.5 分又有 6 分的站对算「排除」，它的 3.5 分样本只体现在 markedSamples 里。
+        if (!exclN) markedPairs++;
+      }
     }
 
     const pairs = new Set(rows.map((r) => `${r.route_code}|${r.to_main}`));
@@ -277,6 +324,8 @@ export async function loadLongStopPolicy(
         peakCrowdedPairs: seq.pk,
         peakCrowdedStations: st.pk.size,
         skippedSamples,
+        markedSamples,
+        markedPairs,
       },
     };
   } catch {
@@ -284,14 +333,16 @@ export async function loadLongStopPolicy(
   }
 }
 
-/** 长停样本是否应被排除（唯一判据入口，两处聚合都必须调它） */
+/** 长停样本是否应被排除（唯一判据入口，两处聚合都必须调它）
+ *  ★ v4.1.1：门槛用**排除档** 5 分。3~4 分是总站正常上落客 —— 只由 `long_stop` 标记（入库端写），
+ *  不在这里排除。 */
 export function shouldExcludeLongStop(
   route: string,
   toMain: string,
   dwell: number | null,
   policy: Pick<LongStopPolicy, "terminus" | "skipPairs">,
 ): boolean {
-  if (dwell === null || !(dwell >= LONG_STOP_MIN)) return false;
+  if (dwell === null || !(dwell >= LONG_STOP_EXCLUDE_MIN)) return false;
   if (!policy.terminus.has(mainOf(toMain))) return false;
   if (policy.skipPairs.has(`${route}|${toMain}`)) return false;
   return true;
@@ -299,5 +350,6 @@ export function shouldExcludeLongStop(
 
 /** 供脚本打印（保持两处日志一致） */
 export const POLICY_NOTE =
-  `dwell≥${LONG_STOP_MIN}分 ∧ 终点站∈全澳总站 ∪点盘 ∧ 非计划性待发(中位/该时段班距∉[${LAYOVER_RATIO_LO},${LAYOVER_RATIO_HI}])` +
+  `dwell≥${LONG_STOP_EXCLUDE_MIN}分**排除** / ≥${LONG_STOP_MARK_MIN}分仅标记 ∧ 终点站∈全澳总站 ∪点盘` +
+  ` ∧ 非计划性待发(中位/该时段班距∉[${LAYOVER_RATIO_LO},${LAYOVER_RATIO_HI}])` +
   ` ∧ 分桶充分(每桶n≥${MIN_DWELL_SAMPLES}且≥${MIN_BUCKET_KINDS}桶) ∧ 非高峰聚集(高峰占比<${PEAK_SHARE_MAX})`;

@@ -1,15 +1,17 @@
 /**
  * 站间时长统计重建（scripts/rebuild-segment-stats.ts）
- * 用法：npm run db:segments -- [local|cloud] [--dry] [--from=events|samples|both]
+ * 用法：npm run db:segments -- [local|cloud] [--dry] [--from=track|events|samples|both] [--allow-prod]
  *
  * 核心逻辑在 src/lib/rebuild/segment-stats.ts（v0.25.0 抽取，
  * 供 CLI 与 /api/cron/rebuild 共用，避免两套口径漂移）。
  * 本文件仅负责：连库、调共享函数、打印人类可读报告。
  *
- * ★ v1.3.0 新增 `--from`（样本来源，默认 events 保持原行为）：
- *   events（默认）= DB 事件（timer_sessions + free_rides）
- *   samples        = 仅 segment_samples 原始样本（追踪采集）
- *   both           = 事件 + segment_samples（track；timer 行去重不计，见共享层说明）
+ * ★ v4.2.0 口径四态（默认仍是 events = 无参兜底，**生产必须显式传 `--from=track`**）：
+ *   track          = 只吃 `segment_samples.source='track'`（自动采集）★ **生产口径**
+ *   events         = 只读 DB 事件四表（timer_sessions/timer_events/free_rides/free_ride_events）
+ *   samples        = 只读 segment_samples **全表**（诊断/对拍 —— ⚠️ 会读入 243 行 source='timer' 手工留档）
+ *   both           = 事件四表 + segment_samples 中 source<>'timer'（v1.3.0~v4.1.x 的历史生产口径）
+ *   ⚠️ 口径是**白名单**：`track` 只放行 track，将来新增采集源必须显式登记，否则共享层抛错。
  *
  * **可重复运行**（派生表，每次清空后重算）。口径细节见共享模块顶部注释。
  */
@@ -25,23 +27,32 @@ try {
 const dry = process.argv.includes("--dry");
 const target = ((process.argv[2] ?? "cloud") as "local" | "cloud");
 const fromArg = process.argv.find((a) => a.startsWith("--from="))?.split("=").slice(1).join("=");
-const sampleFrom = (fromArg as "events" | "samples" | "both" | undefined) ?? "events";
-if (!["events", "samples", "both"].includes(sampleFrom))
-  throw new Error(`--from 只能是 events|samples|both（收到 ${fromArg}）`);
+const sampleFrom = (fromArg as "events" | "samples" | "both" | "track" | undefined) ?? "events";
+if (!["events", "samples", "both", "track"].includes(sampleFrom))
+  throw new Error(`--from 只能是 track|events|samples|both（收到 ${fromArg}）`);
 // ★ v3.6.0：arrive_kind 分档依据（默认 origin = 起点站，行为不变；dest = 终点站，与离开口径自洽）
 const kindArg = process.argv.find((a) => a.startsWith("--kind="))?.split("=").slice(1).join("=");
 const arriveKindMode = (kindArg as "origin" | "dest" | undefined) ?? "origin";
 if (!["origin", "dest"].includes(arriveKindMode))
   throw new Error(`--kind 只能是 origin|dest（收到 ${kindArg}）`);
 
-// ★ v3.6.0：**默认值与生产口径不一致**的显式告警。
-//   `?? "events"` 只是无参兜底；生产现值（14,951 行 / 94 条线路）是 `--from=both` 跑出来的。
-//   漏传参数会静默把整表换成 478 行 / 14 条线路（写入前先 `DELETE FROM segment_stats`）。
+// ★ v4.2.0：**默认值与生产口径不一致**的显式告警。
+//   `?? "events"` 只是无参兜底；生产口径是 `--from=track`（只吃自动采集的 segment_samples）。
+//   漏传参数会静默把整表换成「只看手工事件」的旧口径（写入前先 `DELETE FROM segment_stats`）。
 //   这条告警出现在**执行那一刻**，比写在注释里更能拦住人。
 if (sampleFrom === "events" && !dry) {
   console.warn("⚠️  sampleFrom=events：只读 timer_sessions / free_rides（实测 478 行 / 14 条线路），");
-  console.warn("    不读 segment_samples。若线上是 both 口径（14,951 行 / 94 条线路），");
-  console.warn("    这次运行会把整表 DELETE 后重写为 478 行 —— 确认这是你要的口径，否则加 --from=both。");
+  console.warn("    既不读 segment_samples，也不读自动采集样本 ⇒ 这是**旧口径**。");
+  console.warn("    生产口径是 --from=track。若确认要做历史对照，请显式接受这次整表替换。");
+}
+if (sampleFrom === "samples" && !dry) {
+  console.warn("⚠️  sampleFrom=samples：读 segment_samples **全表**，");
+  console.warn("    包含 243 行 `source='timer'` 的**人工计时留档**（生产口径已排除它们）⇒");
+  console.warn("    本口径仅用于诊断/对拍，**不要**拿它当线上值。生产请用 --from=track。");
+}
+if (sampleFrom === "both" && !dry) {
+  console.warn("⚠️  sampleFrom=both：四张旧事件表 + segment_samples(≠timer) 的历史合并口径，");
+  console.warn("    仅作对照。生产口径自 v4.2.0 起是 --from=track。");
 }
 console.log(`▶ 口径：sampleFrom=${sampleFrom} · arrive_kind=${arriveKindMode} · dry=${dry}`);
 const dbUrl = target === "cloud" ? process.env.DATABASE_URL : (process.env.DATABASE_URL_LOCAL ?? process.env.DATABASE_URL);

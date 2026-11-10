@@ -380,6 +380,12 @@ export interface SegmentStatRow {
   avg_minutes: number | string;
   p50_minutes: number | string | null;
   samples: number;
+  /**
+   * ★ v4.1.0：**纯行驶**分钟 p50（= `minutes − dwell_B`，扣终点站停站）。
+   *   仅「中途总站」（站名含總站且不在首末位）的邻接对有值；其余为 NULL ⇒ 行为不变。
+   *   语义见 `src/lib/rebuild/mid-terminus.ts`；由 `db/migrate-v4100-hop-basis.ts` 加列。
+   */
+  p50_run_minutes?: number | string | null;
 }
 
 /** walk_times 行（读端最小列集） */
@@ -766,7 +772,8 @@ export interface RecommendCard {
 
 /* ══════════════════════════════════════════════════════════════════════════
    ★ v1.1.8：预测卡片**详情页**的视图类型（用户 2026-09-16 口径）
-   · 站条 = 一趟一条；中间站默认收起；左侧线路主题色轨；中间站之间给模型预测行驶时间
+   · 站条 = 一趟一条；中间站默认收起；左侧线路主题色轨
+     （★ 需求 7：中间站之间的**逐站行驶时间**已从 UI 整块删除，本类型仍保留数据列）
    · 折叠栏 = 该站台**剩余所有可达线路**的报站（每条旁可链接到各自详情页）
    ══════════════════════════════════════════════════════════════════════════ */
 
@@ -775,8 +782,17 @@ export interface StripStop {
   code: string;
   /** 显示名（「C653 金峰南岸/金譽峰」；轻轨不带站号前缀） */
   label: string;
-  /** 到下一站模型预测分钟（末站 = 0）；lrt 为表定逐跳值 */
-  minToNext: number;
+  /** 到下一站模型预测分钟（末站 = 0）；lrt 为表定逐跳值。
+   *  ★ v4.1.0：`null` = 兜底估算不合物理（隐含速度 >80 或 <3 km/h）。
+   *  ★ 需求 7（2026-11-09）：纵轴**逐站分钟已整块删除**，`null` 不再有任何 UI 表现
+   *    （原「—」占位已随该块删除）；本列现在只作数据留痕，累加一律用下面的 `minToNextEst`。 */
+  minToNext: number | null;
+  /**
+   * ★ v4.1.0：**累加用**的逐跳分钟（护栏前原值）。
+   *   `legRemainMinOf` / 服务端 `hopMinutesFrom` 必须用这一列：
+   *   `minToNext = null` 只是「不展示数字」，不代表这一段不要时间。
+   */
+  minToNextEst: number;
   /** 该跳的命中层级 1~6（≥3 = 估算/兜底 → UI 标「估算」）；末站 = 0 */
   level: number;
   /** 是否上车站 / 下车站（UI 默认展开这两端） */

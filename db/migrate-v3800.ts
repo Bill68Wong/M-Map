@@ -37,7 +37,7 @@
  *   · 默认 dry-run：不写库、只打印将执行的 DDL 与"表是否已存在"的探测结果；
  *   · `--drop` 只删本文件的 `TABLES` 常量里那两张，且必须先 `--apply`。
  */
-import { Pool } from "pg";
+import { Client } from "pg";
 
 try {
   process.loadEnvFile();
@@ -67,6 +67,31 @@ const connStr =
 
 /** 本迁移拥有的全部表（`--drop` 与复核据此；顺序 = 删除顺序，无外键故无所谓） */
 export const TABLES = ["xborder_sailings", "xborder_flights"] as const;
+
+/**
+ * 机场航班 `status_kind` 的**唯一真相源**（建表 CHECK、DO 块判据、dry-run 探针三处共用）。
+ *
+ * 必须与 `src/lib/cross-border/types.ts#AirportStatusKind` 同值 —— 两处各写一份必然漂移，
+ * 漂移的症状是"分类器产出新 kind、DB CHECK 不认" ⇒ 整批 INSERT 失败 ⇒ 采集 503。
+ * `scripts/test-xborder-status.ts` 有一条断言把这里的清单与 classify 的实际产出对钉。
+ *
+ * 加值只改这一个数组（历史教训：上一版 DO 块只查 `'pending'` 一个字面量，
+ * 加 `'rescheduled'` 时那条判据会直接通过并跳过，旧 CHECK 就永远留在线上）。
+ */
+export const FLIGHT_STATUS_KINDS = [
+  "departed",
+  "boarding_closed",
+  "checkin_open",
+  "cancelled",
+  "delayed",
+  "landed",
+  "pending",
+  "rescheduled",
+  "unknown",
+] as const;
+
+/** `'a','b','c'` —— 供 CHECK / ARRAY 字面量内联 */
+const FLIGHT_KIND_SQL_LIST = FLIGHT_STATUS_KINDS.map((k) => `'${k}'`).join(",");
 
 export const DDL: { label: string; sql: string }[] = [
   {
@@ -100,9 +125,70 @@ export const DDL: { label: string; sql: string }[] = [
       CONSTRAINT xborder_flights_identity
         UNIQUE (sched_date, direction, flight_no, sched_time),
       CONSTRAINT xborder_flights_dir_chk CHECK (direction IN ('dep', 'arr')),
-      CONSTRAINT xborder_flights_kind_chk CHECK (status_kind IN
-        ('departed','boarding_closed','checkin_open','cancelled','delayed','landed','unknown'))
+      CONSTRAINT xborder_flights_kind_chk CHECK (status_kind IN (${FLIGHT_KIND_SQL_LIST}))
     )`,
+  },
+  {
+    /**
+     * 已存在的表**同步**状态枚举（v4.1：`pending` 与 `rescheduled` 先后加入）。
+     *
+     * 为什么不能只改建表语句：`CREATE TABLE IF NOT EXISTS` 在表已存在时**整段跳过**，
+     * 新 CHECK 永远落不到线上 —— 而写入侧一旦开始产出新 kind，整批 INSERT 会被旧
+     * CHECK 拒掉（`new row violates check constraint`），表现为采集 503。
+     *
+     * 三态（幂等）：表不存在 ⇒ 跳过（建表步骤已用新清单创建）；
+     *              约束已覆盖**全部**期望值 ⇒ 跳过（不重复建、不加锁）；
+     *              约束存在但缺任意一个 ⇒ DROP + ADD。
+     *
+     * ⚠️ 判据是「逐个比对期望清单」，**不是**"是否含某一个值"。
+     *    上一版只查 `'pending'`，本次加 `'rescheduled'` 时那条判据会直接通过并跳过，
+     *    旧 CHECK 留在线上、写入新值时炸 —— 正是这个 DO 块本来要防的事。
+     *    故判据必须与 `FLIGHT_STATUS_KINDS` 同源，加值只改那一个数组。
+     * 只在需重建时持有 ACCESS EXCLUSIVE 锁，且该表当日数据量在百行级。
+     */
+    label: "xborder_flights 状态枚举同步（幂等三态，逐值比对）",
+    sql: `DO $$
+DECLARE
+  expected  CONSTANT text[] := ARRAY[${FLIGHT_KIND_SQL_LIST}];
+  has_table boolean;
+  def       text;
+  missing   text := '';
+  k         text;
+BEGIN
+  SELECT EXISTS (
+    SELECT 1 FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = 'xborder_flights'
+  ) INTO has_table;
+
+  IF NOT has_table THEN
+    RAISE NOTICE '[flight-kind] xborder_flights 不存在 ⇒ 跳过（建表步骤用新清单创建）';
+    RETURN;
+  END IF;
+
+  SELECT pg_get_constraintdef(oid) INTO def
+    FROM pg_constraint
+   WHERE conname = 'xborder_flights_kind_chk'
+     AND conrelid = 'public.xborder_flights'::regclass;
+
+  IF def IS NULL THEN
+    RAISE NOTICE '[flight-kind] 约束不存在 ⇒ 新建';
+  ELSE
+    FOREACH k IN ARRAY expected LOOP
+      IF def NOT LIKE '%''' || k || '''%' THEN
+        missing := missing || ' ' || k;
+      END IF;
+    END LOOP;
+    IF missing = '' THEN
+      RAISE NOTICE '[flight-kind] 已覆盖全部 % 个枚举值 ⇒ 跳过（幂等）', array_length(expected, 1);
+      RETURN;
+    END IF;
+    RAISE NOTICE '[flight-kind] 缺值:% ⇒ DROP + ADD', missing;
+  END IF;
+
+  ALTER TABLE xborder_flights DROP CONSTRAINT IF EXISTS xborder_flights_kind_chk;
+  ALTER TABLE xborder_flights ADD CONSTRAINT xborder_flights_kind_chk CHECK (status_kind IN (${FLIGHT_KIND_SQL_LIST}));
+  RAISE NOTICE '[flight-kind] 已重建约束（% 个枚举值）', array_length(expected, 1);
+END $$`,
   },
   {
     label: "xborder_flights 当日查询索引（部分索引：只索引未失效行）",
@@ -186,20 +272,53 @@ export const DDL: { label: string; sql: string }[] = [
   },
 ];
 
+/**
+ * 连接串 → **会话模式**单连接串。
+ *
+ * 为什么必须改：`.env` 的 `DATABASE_URL` 指向 Supabase pooler 的 **6543（事务模式）**。
+ * 事务模式下每条语句可能落到不同后端 ⇒ `ALTER TABLE ... ADD CONSTRAINT` 与紧接着的
+ * `information_schema` 复核会看到不同快照，报"约束不存在"的**假红**；更糟的是
+ * `DO $$ ... $$` 这种多语句块在事务模式池下语义不可保证。
+ * 同一台 pooler 的 **5432 是会话模式**（整条连接固定一个后端），DDL 必须走它。
+ *
+ * 只在端口确实是 6543 时改写：本地库/直连串原样返回。
+ */
+function sessionUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.port === "6543") u.port = "5432";
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 async function main() {
   if (!connStr) {
     console.error("❌ 未找到连接串：请先在 .env 配置 DATABASE_URL（参照 .env.example）");
     process.exit(1);
     return;
   }
-  console.log(`目标库：${connStr.replace(/:[^:@/]+@/, ":****@")}`);
+  const sUrl = sessionUrl(connStr);
+  console.log(`目标库：${sUrl.replace(/:[^:@/]+@/, ":****@")}`);
+  console.log(`连接模式：${sUrl === connStr ? "原样（非 6543 池）" : "会话模式 5432（原串为事务池 6543）"}`);
   console.log(APPLY ? "模式：APPLY（会写库）" : "模式：DRY-RUN（不写库，只探测）");
   console.log("=".repeat(72));
 
-  const pool = new Pool({
-    connectionString: connStr,
+  const client = new Client({
+    connectionString: sUrl,
     ssl: connStr.includes("supabase") ? { rejectUnauthorized: false } : undefined,
   });
+  /**
+   * 把 `RAISE NOTICE` 打到 stdout。
+   *
+   * 为什么需要：DO 块的分支判定（跳过 / 重建）只通过 NOTICE 说出来，而
+   * node-postgres 默认**丢弃** notice 事件 ⇒ 不加这一行时，dry-run 的输出里
+   * 完全看不出本次到底走了哪条分支，"幂等三态"就成了无法观察的承诺。
+   * 只影响日志，不改变任何执行语义。
+   */
+  client.on("notice", (n) => console.log(`      [notice] ${String(n.message).trim()}`));
+  await client.connect();
   /**
    * ★ 生产库会被平台**间歇性**置为只读（`default_transaction_read_only = on`）。
    *   现象：`--verify-ddl` 时好时坏，报
@@ -207,13 +326,14 @@ async function main() {
    *   与 `db/migrate-vehicle-plates.ts:49` 同处置：会话级显式 off 覆盖。
    *   ⚠️ 这**不影响**本脚本默认的 dry-run —— 那条路径只有 SELECT，
    *      唯一的写动作在 `--apply` 与 `--verify-ddl`（后者整体 ROLLBACK）。
+   *   会话模式下这条 SET 会作用于后续全部语句（事务模式下不保证）—— 也是必须单连接的理由之一。
    */
-  pool.on("connect", (c) => c.query("SET default_transaction_read_only = off"));
+  await client.query("SET default_transaction_read_only = off");
 
   try {
     const exists = async (t: string) =>
       ((
-        await pool.query(
+        await client.query(
           `SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1`,
           [t],
         )
@@ -231,7 +351,7 @@ async function main() {
           console.log(`  [dry-run] ${sql}`);
           continue;
         }
-        await pool.query(sql);
+        await client.query(sql);
         console.log(`  ✅ ${sql}`);
       }
     } else {
@@ -239,14 +359,43 @@ async function main() {
       for (const [i, step] of DDL.entries()) {
         console.log(`  ${String(i + 1).padStart(2)}. ${step.label}`);
         if (!APPLY) console.log(`${step.sql.replace(/^/gm, "      ")}\n`);
-        else await pool.query(step.sql);
+        else await client.query(step.sql);
       }
       if (APPLY) console.log("\n  ✅ 全部 DDL 已执行（IF NOT EXISTS ⇒ 可重复执行）");
     }
 
     console.log("\n" + "=".repeat(72));
     if (!APPLY) {
-      console.log("DRY-RUN 结束：**未写库**。确认无误后加 `--apply --allow-prod` 重跑。");
+      /**
+       * dry-run 的**只读探针**：报告线上 CHECK 的真实定义、以及相对
+       * `FLIGHT_STATUS_KINDS` 还缺哪些值。
+       *
+       * 为什么需要：dry-run 只**打印** SQL 不执行 ⇒ DO 块里的 `RAISE NOTICE`
+       * 一条也不会出现，"执行时会走哪条分支"就变成了无法观察的猜测。
+       * 这条探针纯 SELECT，把"会 DROP+ADD / 会跳过"直接算给你看。
+       */
+      const probe = await client.query(
+        `SELECT pg_get_constraintdef(oid) AS def
+           FROM pg_constraint
+          WHERE conrelid = 'public.xborder_flights'::regclass
+            AND conname = 'xborder_flights_kind_chk'`,
+      );
+      const def = (probe.rows[0] as { def: string } | undefined)?.def;
+      console.log("\n── dry-run 预判（只读，不改库）──\n");
+      if (!(await exists("xborder_flights"))) {
+        console.log("  xborder_flights 不存在 ⇒ 第 1 条 DDL 会用新清单建表，DO 块跳过");
+      } else if (!def) {
+        console.log("  约束 xborder_flights_kind_chk 不存在 ⇒ DO 会 ADD");
+      } else {
+        console.log(`  线上 CHECK：${def}`);
+        const missing = FLIGHT_STATUS_KINDS.filter((k) => !def.includes(`'${k}'`));
+        console.log(
+          missing.length === 0
+            ? "  ⇒ 已覆盖全部枚举值，DO 块会**跳过**（幂等，不加锁）"
+            : `  ⇒ 缺 [${missing.join(", ")}]，DO 块会 DROP + ADD`,
+        );
+      }
+      console.log("\nDRY-RUN 结束：**未写库**。确认无误后加 `--apply --allow-prod` 重跑。");
     } else {
       // 复核：列数 + 约束 + 索引（不靠记忆，靠 information_schema）
       for (const t of TABLES) {
@@ -254,17 +403,17 @@ async function main() {
           console.log(`复核 ${t}：不存在（--drop 后正常）`);
           continue;
         }
-        const cols = await pool.query(
+        const cols = await client.query(
           `SELECT column_name FROM information_schema.columns
             WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position`,
           [t],
         );
-        const cons = await pool.query(
+        const cons = await client.query(
           `SELECT constraint_name FROM information_schema.table_constraints
             WHERE table_schema='public' AND table_name=$1 ORDER BY constraint_name`,
           [t],
         );
-        const idx = await pool.query(
+        const idx = await client.query(
           `SELECT indexname FROM pg_indexes WHERE schemaname='public' AND tablename=$1 ORDER BY indexname`,
           [t],
         );
@@ -273,10 +422,19 @@ async function main() {
             ` · 索引 ${idx.rows.map((r) => (r as { indexname: string }).indexname).join(",")}`,
         );
       }
+      // 复核 CHECK 的**实际定义**（不靠"我刚执行过什么"）
+      const chk = await client.query(
+        `SELECT conname, pg_get_constraintdef(oid) AS def
+           FROM pg_constraint
+          WHERE conrelid = 'public.xborder_flights'::regclass
+            AND conname = 'xborder_flights_kind_chk'`,
+      );
+      for (const r of chk.rows as { conname: string; def: string }[])
+        console.log(`复核 ${r.conname}：${r.def}`);
       console.log("\n✅ APPLY 结束。注意：本迁移**不同步** db/schema.sql（理由见文件头）。");
     }
   } finally {
-    await pool.end();
+    await client.end();
   }
 }
 

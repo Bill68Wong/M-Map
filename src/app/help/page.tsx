@@ -24,7 +24,10 @@
  *   ① 「站间行驶时间…全部来自本人实地打点」→ **错**。实际主数据源是**对 DSAT 报站帧的自动采集**
  *      （`scripts/track-collect.mjs` 每 5 秒轮询挂载站/status → `track-derive.mjs` 按「离开口径」
  *       还原站间时长 → `segment_samples.source='track'` → `build-hop-stats.ts` 聚合）。
- *      实测占比：track **183,086** 条 vs 人工计时（timer）**243** 条 ⇒ 人工样本仅作交叉校验。
+ *      ★ v4.2.0（2026-11-09 裁定）：**计算口径已改为「只吃 source='track'」**（`sampleFrom:"track"`）——
+ *        人工计时样本（timer 243 行 / free 记站）**不再参与**站间时长的任何计算，仅留档备查。
+ *        此前「track 183,086 vs timer 243 ⇒ 人工样本仅作交叉校验」的表述已升级为「完全不参与」。
+ *        依据：`src/lib/rebuild/segment-stats.ts` 顶部「样本来源」段 + `scripts/test-rebuild-scope.ts`。
  *   ② 「位置不会上传到服务器保存，也不会…分享给第三方」→ **错**。`/api/nav` 以坐标为入参
  *      （`fromLng/fromLat/toLng/toLat`），并按 `odKeyOf()`（`amap/transit.ts:396-414`）把
  *      「起点坐标｜终点坐标｜时间」写入 `transit_cache.od_key`；规划本身还会把坐标发给
@@ -188,7 +191,7 @@ export default function HelpPage() {
               <b>站间行驶时间</b>：官方<b>未发布</b>站间用时数据。本服务对 DSAT 公开的实时报站数据做
               <b>自动采集</b>（轮询车辆的「挂载站」与「停靠／已离站」状态），按「离开上一站 → 离开下一站」
               的口径还原每个相邻站对的用时，取同站对中位数后入库。<b>属推算值，不是官方数据</b>；
-              本人少量计时样本仅用于交叉校验，不构成主要数据来源。
+              本服务早期的人工计时样本<b>不参与</b>该项计算（仅留档备查）。
             </>,
             <>
               <b>步行时间</b>：官方同样<b>未发布</b>。推荐页使用本人在若干地点实测的步行样本均值

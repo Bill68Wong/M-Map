@@ -17,6 +17,28 @@ rem ============================================================
 cd /d "%~dp0"
 title M Map - Data Collector
 
+rem ---- U-03: single-instance lock (atomic mkdir; stale lock is WARN only) ----
+rem  The collector names every part file by a second-precision stamp, so two
+rem  instances started in the same second would write the SAME gzip files.
+rem  A stale lock is never deleted automatically: operator decides.
+set "LOCKDIR=data\tracking\.collect.lock"
+if exist "%LOCKDIR%" (
+  echo.
+  echo [WARN] Lock folder already exists: %LOCKDIR%
+  echo        Another collector may be running, or this is a stale lock.
+  echo        Remove the folder manually if no collector is running.
+  echo        This wrapper will NOT delete it automatically.
+  echo.
+  pause
+  exit /b 5
+)
+mkdir "%LOCKDIR%" 2>nul
+if errorlevel 1 (
+  echo [ERROR] Cannot create lock folder. Aborting.
+  pause
+  exit /b 5
+)
+
 rem ---- Locate Node.js ----
 set "NODE_BIN="
 where node >nul 2>nul && set "NODE_BIN=node"
@@ -26,6 +48,7 @@ if not defined NODE_BIN (
   echo.
   echo [ERROR] Node.js not found. Please install it from https://nodejs.org/
   echo.
+  if exist "%LOCKDIR%" rd /s /q "%LOCKDIR%"
   pause
   exit /b 1
 )
@@ -46,6 +69,7 @@ if errorlevel 1 (
   echo         exit code 0, so it looks successful while collecting nothing.
   echo         Install Node 18 or newer and run this file again.
   echo.
+  if exist "%LOCKDIR%" rd /s /q "%LOCKDIR%"
   pause
   exit /b 1
 )
@@ -79,6 +103,9 @@ echo.
 
 "%NODE_BIN%" scripts\track-collect.mjs %ARGS%
 set "RC=%errorlevel%"
+rem ---- U-02/U-01: machine-readable outcome, written at :finish ----
+set "FINAL_RC=0"
+set "DERIVE_RAN=0"
 
 rem ---- Did this run produce anything? ----
 set "META_AFTER="
@@ -106,6 +133,7 @@ echo [DONE] Collection finished the full window. Data saved to data\tracking\
 goto :derive
 
 :warn
+set "FINAL_RC=2"
 if not "%RC%"=="0" echo [WARN] Collector exit code = %RC% - network issue or stopped early.
 if defined ABORTED (
   echo [WARN] The round STOPPED EARLY - it did not run the full window.
@@ -123,15 +151,18 @@ if defined ABORTED (
 ) else (
   echo        See data\tracking\%STAMP%-run.log for details.
 )
+rem ---- U-01: an aborted or failed round MUST NOT produce an importable derived.json ----
+echo [WARN] Derive skipped: this round is not usable. No derived.json written.
+goto :finish
 
 :derive
 rem ---- Sample statistics for THIS round only ----
 rem  track-derive filters by --label=<stamp>, so it reads only this round's parts,
 rem  not the whole data/tracking history.
-rem  Plain node on purpose - this is NOT a shortcut around db-guard:
-rem    * track-derive returns at its :276 when --truth=none (the default), and only
-rem      after that would :280 run await import("pg") - so on this code path the
-rem      deriver cannot open a database connection at all.
+rem  U-04: use the SAME %NODE_BIN% as the collector. It is still a plain node call,
+rem  NOT a shortcut around db-guard:
+rem    * loadTruth returns early when --truth=none (the default), so the pg import
+rem      line is never reached on this path and no DB connection can be opened.
 rem    * npm run track:derive would route into scripts/db-guard.ts, which demands
 rem      --allow-prod for any non-local DATABASE_URL. Adding that flag here would
 rem      mean "I am writing to prod", which is false for this step.
@@ -139,8 +170,10 @@ rem  For the DB truth comparison, run it manually:
 rem      npm run track:derive -- --label=<stamp> --truth=cloud --allow-prod
 echo.
 echo [INFO] Deriving sample statistics - local files only, no network, no database...
-call node scripts\track-derive.mjs --label=%STAMP%
+set "DERIVE_RAN=1"
+call "%NODE_BIN%" scripts\track-derive.mjs --label=%STAMP%
 if errorlevel 1 (
+  set "FINAL_RC=4"
   echo [WARN] Derive step failed. Run it manually:
   echo        node scripts\track-derive.mjs --label=%STAMP%
 ) else (
@@ -149,6 +182,7 @@ if errorlevel 1 (
 goto :finish
 
 :no_output
+set "FINAL_RC=3"
 echo [WARN] This run produced NO new data\tracking\*-meta.json.
 echo        The collector did not start, or it died before writing its metadata.
 echo        There is NO log for this run - do not read an older -run.log as if it
@@ -156,5 +190,11 @@ echo        described this one.
 if not "%RC%"=="0" echo        Collector exit code = %RC%
 
 :finish
+rem ---- U-02/U-01: machine-readable status for downstream gates ----
+set "STATUS_FILE=data\tracking\%STAMP%-collect-status.json"
+if not defined STAMP set "STATUS_FILE=data\tracking\collect-status-nometa.json"
+echo {"label":"%STAMP%","rc":%RC%,"finalRc":%FINAL_RC%,"deriveRan":%DERIVE_RAN%,"aborted":"%ABORTED%"}> "%STATUS_FILE%"
+if exist "%LOCKDIR%" rd /s /q "%LOCKDIR%"
 echo.
 pause
+exit /b %FINAL_RC%

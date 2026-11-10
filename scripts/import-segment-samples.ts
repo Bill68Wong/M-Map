@@ -80,6 +80,15 @@ async function main() {
   console.log("");
   console.log("── 合计 ──");
   console.log(`  读入 ${r.totals.read} · 入库 ${r.totals.inserted} · 跳过（重复）${r.totals.skipped}`);
+  if (r.skippedRuns.length) {
+    // ★ v4.1.1 轮级质量闸：整轮跳过的不能只活在日志里，这里再列一次（明细已落盘 .verify/）
+    console.log(`  轮级质量闸跳过 ${r.skippedRuns.length} 轮：`);
+    for (const s of r.skippedRuns) console.log(`     ${s.runLabel.padEnd(22)} ${String(s.samples).padStart(6)} 条 · ${s.reason}`);
+    // ★ U-01：明确「是过滤、不是删库」，避免操作员误以为需要清理既有行
+    if (r.skippedRuns.some((s) => s.reason.startsWith("aborted:"))) {
+      console.log(`  [U-01] 中止轮样本未入库（只过滤导入，不删除任何既有行、不重建派生表）`);
+    }
+  }
   console.log(`  滚动窗口：保留最近 ${r.keepRuns} 轮 track；本次${dry ? "预计" : "实际"}删除 ${r.windowDeleted} 行（timer 永不删）`);
 
   console.log("");
