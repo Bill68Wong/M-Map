@@ -42,6 +42,7 @@ import NavAlarmOverlay from "./NavAlarmOverlay";
 import NavTrackBar from "./NavTrackBar";
 import RouteDetailPane from "./RouteDetailPane";
 import RouteResultPane from "./RouteResultPane";
+import WalkOnlyPane from "@/components/walk/WalkOnlyPane";
 import { useRecommend, type PrefMode } from "./useRecommend";
 import { COOLDOWN_RECOMMEND_SEC, useCooldown } from "./useCooldown";
 import { useSnapSheet } from "./useSnapSheet";
@@ -109,7 +110,14 @@ export interface RouteSheetDetail {
 
 export interface RouteSheetProps {
   open: boolean;
-  pane: "recommend" | "detail";
+  /**
+   * ★ 2026-11-12（P1-b）：新增 `"walk"` —— `too_close` 时的**独立步行导航**视图。
+   *
+   * 为什么复用 pane 机制而不是另开浮层：recommend / detail 两个 pane 都是**常驻不卸载**
+   * （保滚动位置、免重复请求），步行视图放进同一容器 ⇒ 层级、拖拽、关闭语义全部沿用现成的，
+   * 不需要新建 z-index 体系，也不会因卸载 RouteSheet 把推荐列表的状态（prefs/滚动）丢掉。
+   */
+  pane: "recommend" | "detail" | "walk";
   detent: Detent;
   /** 各档顶边像素（升序，与 DETENTS 对齐） */
   topsPx: number[];
@@ -136,6 +144,26 @@ export interface RouteSheetProps {
   } | null;
   /** ★ 2026-09-25：全屏化（导航中隐藏底导、收敛间距） */
   immersive?: boolean;
+  /**
+   * ★ 2026-11-12（P1-b）：独立步行导航的数据（`pane === "walk"` 时消费）。
+   * 与上面的 `walk`（**方案内**步行段预览）是两件事：这里没有公交方案，整条路线就是步行。
+   */
+  walkOnly?: {
+    destLabel: string;
+    phase: "idle" | "loading" | "ready" | "failed";
+    steps: import("@/lib/walk/walk-shared").WalkStep[];
+    totalDistM: number;
+    totalDurationS: number;
+    err: string;
+    onRetry: () => void;
+  } | null;
+  /** 关闭独立步行视图（回推荐列表空态） */
+  onWalkClose?: () => void;
+  /**
+   * 把「步行导航」按钮的下沉回调转给 `RouteResultPane`。
+   * 放这里而不是让 pane 自己去取上下文：结果面板是纯展示组件，不持有导航状态。
+   */
+  onWalkNav?: () => void;
 }
 
 export default function RouteSheet({
@@ -153,6 +181,9 @@ export default function RouteSheet({
   onOpenDetail,
   walk = null,
   immersive = false,
+  walkOnly = null,
+  onWalkClose,
+  onWalkNav,
 }: RouteSheetProps) {
   // 推荐列表数据（列表 pane 常驻；同一 query + prefs 只自动拉一次）
   /** ★ 本批（需求⑧ / AC-52/53）：三档偏好（默认综合） */
@@ -598,6 +629,29 @@ export default function RouteSheet({
               <Icon name="caretUp" size={20} className="sheet-peek__chev" />
             </div>
           </div>
+        ) : pane === "walk" && walkOnly ? (
+          /* ★ 2026-11-12（P1-b）：步行视图的 peek 摘要。
+             不补这一段的话，用户把面板往下拉会看到推荐 pane 的「暂无可用路线」——
+             与「正在步行导航」的事实直接矛盾（而此时 cards 确实是 0，不是数据丢了）。 */
+          <div className="sheet-peek-summary" data-variant="walk">
+            <p className="sheet-peek__od">步行前往 {walkOnly.destLabel}</p>
+            <div className="sheet-peek__metric">
+              {walkOnly.phase === "ready" && walkOnly.steps.length > 0 ? (
+                <>
+                  <span className="sheet-peek__big">
+                    {Math.max(1, Math.round(walkOnly.totalDurationS / 60))}
+                    <span className="sheet-peek__unit">分</span>
+                  </span>
+                  <span className="sheet-peek__meta">约 {Math.round(walkOnly.totalDistM)} 米</span>
+                </>
+              ) : (
+                <span className="sheet-peek__meta">
+                  {walkOnly.phase === "failed" ? "步行路线暂时取不到" : "正在获取步行路线…"}
+                </span>
+              )}
+              <Icon name="caretUp" size={20} className="sheet-peek__chev" />
+            </div>
+          </div>
         ) : (
           <div className="sheet-peek-summary" data-variant="recommend">
             <p className="sheet-peek__od">{odLabel}</p>
@@ -639,6 +693,7 @@ export default function RouteSheet({
             err={rec.err}
             onRetry={rec.reload}
             onCardOpen={onOpenDetail}
+            onWalkNav={onWalkNav}
           />
           <ComplianceBar />
         </div>
@@ -686,6 +741,26 @@ export default function RouteSheet({
               liveRemainFail={detail.liveRemainFail ?? null}
             />
           )}
+        </div>
+      </div>
+
+      {/* ★ 2026-11-12（P1-b）：独立步行导航 pane —— `too_close` 空态的「步行导航」进入。
+          此时**没有任何公交方案**，所以与上面的 detail pane（方案内步行段）互斥：
+          两者不会同时有内容，也不会互相盖住。 */}
+      <div className="route-sheet__pane" data-pane="walk" aria-hidden={pane !== "walk"}>
+        <div className="route-sheet__scroll">
+          {walkOnly ? (
+            <WalkOnlyPane
+              destLabel={walkOnly.destLabel}
+              phase={walkOnly.phase}
+              steps={walkOnly.steps}
+              totalDistM={walkOnly.totalDistM}
+              totalDurationS={walkOnly.totalDurationS}
+              err={walkOnly.err}
+              onRetry={walkOnly.onRetry}
+              onClose={() => onWalkClose?.()}
+            />
+          ) : null}
         </div>
       </div>
     </BottomSheet>
