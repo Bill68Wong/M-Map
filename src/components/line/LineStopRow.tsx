@@ -223,9 +223,21 @@ export default function LineStopRow({
       <span className="lp-stop__rail" data-edge={isFirst ? "start" : isLast ? "end" : undefined} aria-hidden="true" />
       <span className="lp-stop__dot" data-end={isEnd ? "1" : undefined} aria-hidden="true" />
       <span className="lp-stop__body">
-        {/* ★ R6：站名与属地标签同一行；站名优先占位（`flex:1 min-width:0`），标签 `flex:none` 不参与省略 */}
-        <span className="lp-stop__namerow">
-          <span className="lp-stop__name">{stop.name}</span>
+        {/*
+          ★ 2026-11-10（负责人）：
+            ① 属地标签由**站名右侧**移到**站名之前**（紧贴节点右侧）⇒ 站名右端不再被标签
+               吃掉一格，长站名不必靠省略号收尾；
+            ② 标签存在时站名**不省略、不折行**：字号由 CSS
+               `min(--text-md, (100cqw − 标签) / 字符数)` 折算，字符数经 `--lp-name-chars`
+               内联写入。⇒ 必须把字符数交出去，否则「不省略」只能靠溢出实现。
+               ⚠️ 勘误（2026-11-11）：「只有通琴号会传 `side`」不成立 ——
+                  `LineStopsSheet.tsx:333` 与 `RouteStopsSheet.tsx:755` **都**传 `sideOf`
+                  （`LineStopList.tsx:89` 据此给每行赋 `side`）⇒ RouteStopsSheet 不能静态排除。
+            ③ 仍然属实：`data-side-row` 只在有 `side` 时输出，**不传 side 的消费方** DOM
+               与改前**逐字节一致**（验收关 `renderToStaticMarkup` 实测 `BYTE_IDENTICAL: true`）。
+          站名仍是繁体原文，**不做简繁转换、不截断**。
+        */}
+        <span className="lp-stop__namerow" data-side-row={side ? "1" : undefined}>
           {side && (
             <span
               className="lp-stop__side"
@@ -235,6 +247,12 @@ export default function LineStopRow({
               {side === "横琴" ? "琴" : "澳"}
             </span>
           )}
+          <span
+            className="lp-stop__name"
+            style={side ? ({ ["--lp-name-chars" as string]: String([...stop.name].length) } as CSSProperties) : undefined}
+          >
+            {stop.name}
+          </span>
         </span>
         {xfer.length > 0 && (
           <span className="lp-stop__xfer">换乘 {xfer.join("、")}</span>

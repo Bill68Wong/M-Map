@@ -28,6 +28,7 @@
  */
 import Icon from "@/components/ui/Icon";
 import SetPointActions from "./SetPointActions";
+import type { CSSProperties } from "react";
 import {
   hhmm,
   mergedTitleOf,
@@ -169,15 +170,36 @@ export default function TqhStationCard({
   onSetFrom,
   onSetTo,
 }: TqhStationCardProps) {
-  const count = entries.reduce((n, e) => n + e.groups.reduce((m, g) => m + g.trips.length, 0), 0);
-  const title = mergedTitleOf(stations);
+  /**
+   * ★ 2026-11-10（负责人）：标题必须自带 `通琴号-` 前缀。
+   *   本卡只服务**未与澳门巴士站关联**的通琴号专用站 —— 没有前缀就会被当成普通巴士站。
+   *   ⚠️ 勘误（2026-11-11）：与 `StationCard` **只是前缀一致**，站名来源不同、两处各写一套模板：
+   *      · `StationCard.tsx:461` = `通琴号-${e.station.name}`（原始站名，**不去圈码**）；
+   *      · 本卡 = `通琴号-${mergedTitleOf(stations)}`（`tqh-model.ts:281`：多站时
+   *        `stripCircled` 去圈码后取共同名，单站原样返回）。
+   *      ⇒ 单站且站名不带圈码时两者恰好相等；多站或带圈码时**不相等**，
+   *        旧注释「完全一致、两处不可各写一套」不成立。「抽共享常量」列为**后续待办**（本批不做）。
+   *   同批删掉副行的「通琴号 · n 个班次」：来源与数量信息由标题前缀 + 下方按方向分组的
+   *   「N 班」承担，副行纯属重复。
+   */
+  const title = `通琴号-${mergedTitleOf(stations)}`;
+  /**
+   * 标题单行所需的字符预算 = 标题码点数 + 2。
+   * `+2` 是把左侧「澳/琴」小标签折成等宽字符的估算（chip 实测约 19px ≈ 1.3 全角，
+   * 加其后的空格间隔 ≈ 1.5~2 全角）。CSS 用 `--tqh-title-chars` 折算字号，
+   * 保证「通琴号- + 最长 18 字站名」在 15px 下也不折行（详见 `globals.css` 同名注释）。
+   */
+  const titleChars = [...title].length + 2;
   const side = sideOf(stations);
   const merged = stations.length > 1;
 
   return (
-    <div className="nav-station-card nav-station-card--tqh" role="dialog" aria-label={`通琴号站点 ${title}`}>
+    <div className="nav-station-card nav-station-card--tqh" role="dialog" aria-label={title}>
       <div className="nav-station-card__head">
-        <span className="nav-station-card__name">
+        <span
+          className="nav-station-card__name"
+          style={{ "--tqh-title-chars": String(titleChars) } as CSSProperties}
+        >
           <span className={`nav-side-tag nav-side-tag--${side === "横琴" ? "hq" : "mo"}`} aria-label={`${side}侧`}>
             {side === "横琴" ? "琴" : "澳"}
           </span>{" "}
@@ -187,10 +209,6 @@ export default function TqhStationCard({
           <Icon name="close" size={20} />
         </button>
       </div>
-
-      {phase === "ready" && count > 0 && (
-        <p className="nav-station-card__meta">通琴号 · {count} 个班次</p>
-      )}
 
       <div className="nav-station-card__list">
         {/*

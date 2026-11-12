@@ -3,7 +3,11 @@
 /**
  * 地图品牌栏（src/components/nav/NavBrandBar.tsx，2026-09-25 从 NavShell 拆出 · 07 §5.3）
  *
- * 三栏网格：左=空 · 中=换向键 + 线路标签 · 右=竖排按钮组（刷新 / 公共交通路线 / M Map）。
+ * 单列（右栏竖排按钮组：图层 / 刷新 / 公共交通路线 / 定位 / M Map）。
+ * ★ 2026-11-11（负责人裁定）：**原中栏整块已删除** —— 换向键 + 线路标签（含
+ *   「查看全部站点」「退出路线查看」两个小键）与左栏空占位一并移除；理由是与
+ *   `RouteStopsSheet` 弹窗纵条功能重复，只保留弹窗。`grid-template-columns` 仍是
+ *   `1fr auto 1fr`（`globals.css` 声明值不动），右栏仍由 `grid-column: 3` 靠右。
  * 纯展示：数据与回调由 `NavShell` 下发。
  *
  * ★ v3.2.0（需求 9/10/11 / AC-84）：
@@ -20,13 +24,11 @@ import { COOLDOWN_VEHICLE_SEC } from "./useCooldown";
 export interface NavBrandBarProps {
   /**
    * 当前查看的线路（null = 未进入路线查看模式）。
-   * ★ v3.6.1：加 `code` —— 线路标签旁新增「全部站点」入口需要它拼 `/line/[code]` 深链。
+   * ⚠️ 品牌栏内**只**用 `kind` 决定右栏刷新键是否显示（下方 `picked?.kind === "bus"` 分支）；
+   * `label` / `color` / `code` 供宿主与后续扩展保留，中栏删除后本组件不再渲染线路标签。
    */
   picked: { label: string; color: string; kind: "bus" | "lrt"; code?: string } | null;
-  canReverse: boolean;
   cooldownSec: number;
-  onReverse: () => void;
-  onExitLine: () => void;
   onRefresh: () => void;
   onOpenLines: () => void;
   /** ★ v3.3.0（AC-100）：首页定位按钮（品牌栏右列原位）；导航态由页面级 `.nav-locate-fab` 承担 */
@@ -34,78 +36,27 @@ export interface NavBrandBarProps {
   /** ★ v3.2.0（需求 10 / AC-84）：导航语境 ⇒ 隐藏「查看路线」与「M Map logo」 */
   navMode?: boolean;
   /**
-   * ★ v3.6.1：「查看全部站点」入口（跳 `/line/[code]` 深链页）。
-   *   为什么需要：搜索结果改成"首页地图内打开线路"后，`/line/[code]` 只剩外部分享链接可达，
-   *   成了孤儿页；这里给一个显式入口，深链页与 `SS_RETURN` 一并保留。
-   *   不传 ⇒ 不渲染（收藏页等无地图上下文的调用方不受影响）。
-   */
-  onOpenAllStops?: (code: string) => void;
-  /**
    * ★ M4（需求 5）：图层面板入口（右栏最上）。
    *   不传 ⇒ 不渲染（无地图上下文的调用方不受影响）；导航态一律隐藏（AC-84 同口径）。
    */
   onOpenLayers?: () => void;
+  /* ★ 2026-11-11：原 v3.6.1「查看全部站点」入口（`/line/[code]` 深链）已按负责人裁定移除 ——
+     弹窗纵条 `RouteStopsSheet` 已覆盖同等功能；深链页面文件本身保留，仅 App 内不再有入口。
+     中栏配套的四个 props（换向 / 退出线路 / 深链回调等）同步移除：
+     换向与退出改由弹窗自己的 `onFlipDirection` / `onClose` 承担（见 NavShell.tsx:2807/2809）。 */
 }
 
 export default function NavBrandBar({
   picked,
-  canReverse,
   cooldownSec,
-  onReverse,
-  onExitLine,
   onRefresh,
   onOpenLines,
   onLocate,
   navMode = false,
-  onOpenAllStops,
   onOpenLayers,
 }: NavBrandBarProps) {
   return (
     <div className="nav-brandbar">
-      <span className="nav-brandbar__left" aria-hidden="true" />
-
-      <div className="nav-brandbar__mid">
-        {picked && canReverse && (
-          <button
-            type="button"
-            className="nav-rev"
-            aria-label="切换行驶方向"
-            title="切换行驶方向"
-            onClick={onReverse}
-          >
-            <Icon name="exchange" size={20} />
-          </button>
-        )}
-        {picked && (
-          <span className="nav-linechip" style={{ background: picked.color }}>
-            <span className="nav-linechip__text">{picked.label}</span>
-            {/* ★ v3.6.1「全部站点」：复用 chip 内小键的视觉规格（不新造样式）。
-                导航态不提供 —— 那会中途跳出整条导航；退出线路视图后入口仍在。 */}
-            {picked.code && onOpenAllStops && !navMode && (
-              <button
-                type="button"
-                className="nav-linechip__x"
-                data-open-all-stops="on"
-                aria-label={`查看 ${picked.label} 全部站点`}
-                title="查看全部站点"
-                onClick={() => onOpenAllStops(picked.code as string)}
-              >
-                <Icon name="list" size={16} />
-              </button>
-            )}
-            <button
-              type="button"
-              className="nav-linechip__x"
-              aria-label={`退出路线查看（${picked.label}）`}
-              title="退出路线查看"
-              onClick={onExitLine}
-            >
-              <Icon name="close" size={16} />
-            </button>
-          </span>
-        )}
-      </div>
-
       {/* 右栏：竖排按钮组（图层 → 刷新 → 公共交通路线 → M Map）※「定位」已移至页面级 `.nav-locate-fab` */}
       <div className="nav-brandbar__acts">
         {/* ★ M4（需求 5）：图层面板入口 —— **右栏最上**（负责人指定），搜索框正上方。

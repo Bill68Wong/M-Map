@@ -37,7 +37,6 @@
  *   · ★ 取景**全部自算**（`fit-box`），**禁用** `setBounds`/`setFitView`（会撑到珠海）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import Icon from "@/components/ui/Icon";
 import NavMap from "./NavMap";
 import NavBrandBar from "./NavBrandBar";
@@ -171,7 +170,7 @@ import XborderCard from "@/components/map/XborderCard";
 import { xbPinById } from "@/components/map/xborder-pins";
 /* ★ M4（需求 2/3/5/6）：图层偏好 + 图层面板 + 公厕弹窗 */
 import { useLayerPrefs } from "@/lib/map/useLayerPrefs";
-import type { PublicToilet } from "@/lib/map/public-toilets";
+import { toiletDisplayName, type PublicToilet } from "@/lib/map/public-toilets";
 import type { XbPinKind } from "@/components/map/xborder-pins";
 import LayerSheet from "./LayerSheet";
 import PublicToiletCard from "./PublicToiletCard";
@@ -1782,24 +1781,6 @@ export default function NavShell({
     setStage("panel");
   }
 
-  const router = useRouter();
-  /**
-   * ★ v3.6.1：「查看全部站点」→ `/line/[code]` 深链页（品牌栏线路标签旁的小键）。
-   *
-   * · 只在「从搜索进入线路视图」时打 `SS_RETURN` 一次性标记：返回首页时 `stage` 的初始化
-   *   函数会重开搜索层，搜索词与结果一起回来（该标记读到即删，刷新/新开 tab 不受影响）；
-   * · 从「公共交通路线」弹窗选的线路**不打标**（返回时不该莫名弹出搜索层）；
-   * · 用 SPA 跳转（`router.push`，与 `SearchSheet` 深链兜底同一写法），不 hard reload。
-   */
-  function openAllStops(code: string) {
-    try {
-      if (stage === "search") window.sessionStorage.setItem(SS_SEARCH_RETURN, "1");
-    } catch {
-      /* 隐私模式 ⇒ 只是不自动重开搜索层，不影响跳转 */
-    }
-    router.push(`/line/${encodeURIComponent(code)}`);
-  }
-
   /** ★ 出发 → 打开推荐面板（full 档；不整页跳转） */
   function go() {
     if (!fromPoint || !to) return;
@@ -2222,6 +2203,10 @@ export default function NavShell({
    *   ⇒ 弹窗画在哪，取景槽就避到哪。本文件因此**不出现任何档位像素常量**。
    */
   const stopsSheetOn = !!rv.picked && !navActive && !lineSheet;
+  /** 路线查看模式 = 已选中巴士/轻轨线路，或正在看通琴号班次。
+   *  与 navPhase 正交：这两态都可在 rsOpen === false（相位 off）下存在。
+   *  ⚠️ 选线弹窗 `lineSheet` **不算**路线查看模式（负责人 2026-11-11 裁定）。 */
+  const routeViewOn = !!rv.picked || !!tqhTrip;
   const stopsSheetTopsPx = useMemo(
     () => tqhDetentTopsPx(winH || 844, safeTop, safeBottom),
     [winH, safeTop, safeBottom],
@@ -2417,9 +2402,13 @@ export default function NavShell({
            *   `NavShell.tsx:2448` 同一判据），**不用 `navActive`**：后者是
            *   `rsOpen && pane === "detail"`，推荐层下仍为 false ⇒ 得到「推荐面板开着、
            *   公厕照样显示」，违反需求。
+           *   ★ 2026-11-11（负责人追加需求）：`!routeViewOn` = 路线查看模式
+           *   （`rv.picked` / `tqhTrip`）不画。此门与相位门**正交**，只补
+           *   「路线查看但相位仍为 off」这个漏网态；**勿改写 `navPhase` 定义** ——
+           *   它还有 `body[data-nav-phase]`（`:1658`）与 `NavBrandBar.navMode`（`:2457`）两处下游。
            *   ⚠️ 改名提醒：本 prop 不是「用户偏好」，是「此刻该不该画」。
            */
-          showToilets={layers.prefs.toilet && navPhase === "off"}
+          showToilets={layers.prefs.toilet && navPhase === "off" && !routeViewOn}
           /* ★ 用「值相同则返回原对象」的写法：`NavMap` 的 render 会在 zoomend/moveend 反复跑，
              每次都 new 一个对象会让父组件无限重渲染（React 只按引用比较）。 */
           onStationZoomChange={(ok, zoom) => setMapZoom((p) => (p.ok === ok && p.zoom === zoom ? p : { ok, zoom }))}
@@ -2526,25 +2515,20 @@ export default function NavShell({
           onTqhStationClick={onTqhStationClick}
         />
 
-        {/* 品牌栏（三栏网格）：左=空 · 中=换向键+线路标签 · 右=竖排按钮组（导航态右列隐藏，AC-84） */}
+        {/* 品牌栏（中栏已按 2026-11-11 裁定整块删除；右栏竖排按钮组保持不变，导航态右列隐藏 AC-84） */}
         <NavBrandBar
           picked={
             rv.picked
               ? { label: rv.picked.label, color: rv.picked.color, kind: rv.picked.kind, code: rv.picked.code }
               : null
           }
-          canReverse={rv.canReverse}
           cooldownSec={rv.cooldownSec}
-          onReverse={rv.reverse}
-          onExitLine={rv.exitLine}
           onRefresh={rv.refresh}
           onOpenLines={() => setLineSheet(true)}
           /* ★ v3.3.0（AC-100）：首页定位按钮（右列原位）；导航态整列隐藏 ⇒ 由浮动 FAB 承担 */
           onLocate={() => setLocateTick((t) => t + 1)}
           /* ★ v3.2.0（需求 10 / AC-84）：导航语境（data-nav-phase ≠ off）⇒ 隐藏「查看路线」与「M Map logo」 */
           navMode={navPhase !== "off"}
-          /* ★ v3.6.1：「查看全部站点」⇒ `/line/[code]` 深链页（保留为可达入口，不是孤儿页） */
-          onOpenAllStops={openAllStops}
           /* ★ M4（需求 5）：图层面板入口（右栏最上；导航态由 NavBrandBar 内部隐藏） */
           onOpenLayers={() => setLayerSheet(true)}
         />
@@ -3103,8 +3087,9 @@ function stationToNavPoint(s: StationCardStation): NavPoint {
 /**
  * ★ M4：公厕 → 导航端点。
  * `kind: "place"` + **GCJ-02** 坐标（`PublicToilet.lat/lng` 已是换算后的展示坐标，
- * 再调 `wgs84ToGcj02()` 会偏 ~600m）。标签用「公共厕所-繁體名」，与弹窗标题同口径。
+ * 再调 `wgs84ToGcj02()` 会偏 ~600m）。标签用「公共厕所-<剥掉设施编号的繁體名>」：
+ * 两处都走 `toiletDisplayName()`（这里 + `PublicToiletLayer` 的 pin），JSON 原文仍保留编号供追溯。
  */
 function toiletToNavPoint(t: PublicToilet): NavPoint {
-  return { kind: "place", label: `公共厕所-${t.nameTc}`, lng: t.lng as number, lat: t.lat as number };
+  return { kind: "place", label: `公共厕所-${toiletDisplayName(t.nameTc)}`, lng: t.lng as number, lat: t.lat as number };
 }

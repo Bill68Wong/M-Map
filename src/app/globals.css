@@ -682,9 +682,10 @@ button[data-pressed="true"]:not(:disabled),
   transform: none;
 }
 
-/* ★ U11 迁移记录（改前 12 条反馈类 :active 已全部删除，此处只作考古留档）：
+/* ★ U11 迁移记录（改前 12 条反馈类 :active 已全部删除，此处只作考古留档；
+     其中一条随 2026-11-11 品牌栏中栏整块删除一并移除，不再列出）：
      迁移前分散在 chip / chip--on / btn--undo / ssheet__item / rpanel__row /
-     rv-card / nav-linechip__x / fav-flat__main / lp-head__back|rev / line-result /
+     rv-card / fav-flat__main / lp-head__back|rev / line-result /
      nav-sbox__row / rc 上的「换底色 / filter:brightness / opacity:.9」现已全部删除：
      按压只由**唯一状态层**表达（`--press-op-pressed`），避免出现第二个 pressed 不透明度。
    ⚠️ 观感差异**已实测**（不靠估）：
@@ -1048,8 +1049,10 @@ button[aria-disabled="true"] {
 
 /* ★ 2026-11-06（M15 / 死代码门禁）：原 v0.7.0 的 `.route-chip` 徽章（12px/600、`letter-spacing:.3px`、
    胶囊→6px 圆角的过渡形态）**已删除** —— 全仓 JSX 零引用，只被这段 CSS 与注释自己提到。
-   现行唯一出口：`.route-stack__seg`（组内分段）/ `.rl-chip`（选线网格）/ `.nav-linechip`（品牌栏）/
-   `.nav-vehicle-card__line`（车辆卡）/ `.linechip`（搜索行与线页头）。别再从旧稿抄回来。 */
+   现行出口：`.route-stack__seg`（组内分段）/ `.rl-chip`（选线网格）/
+   `.nav-vehicle-card__line`（车辆卡）/ `.linechip`（搜索行与线页头）。
+   ★ 2026-11-11：品牌栏中栏（含线路标签）已按负责人裁定整块删除，弹窗纵条覆盖同等功能；
+     别再从旧稿把那块抄回来。 */
 
 /* 乘车界面顶部行程进度条（v0.12.2 需求 6：按项目等分 + 载具主题色渐变，替代 phase-band） */
 .jp {
@@ -2937,10 +2940,12 @@ button[aria-disabled="true"] {
   border-radius: 0;
 }
 
-/* ── 首页品牌栏（★ v2.10.0 重构为**三栏网格**）──
-   左：空（产品口径「左下角不放任何东西」）
-   中：换向按钮 + 路线查看模式的主题色标签
-   右：**竖排按钮组** 刷新 → 路线 → 定位 → M Map（自上而下）
+/* ── 首页品牌栏（★ v2.10.0 三栏网格；★ 2026-11-11 中栏整块删除）──
+   中栏（换向按钮 + 路线查看模式的主题色标签）已按负责人裁定移除：功能与
+   `RouteStopsSheet` 弹窗纵条重复，只保留弹窗。左栏空占位同步移除。
+   ⚠️ `grid-template-columns: 1fr auto 1fr` **声明值不改**：现在只剩右栏一个子元素，
+      仍由 `.nav-brandbar__acts { grid-column: 3 }` 靠右；中间 auto 列自然收成 0。
+   右：**竖排按钮组** 图层 → 刷新 → 路线 → 定位 → M Map（自上而下）
    位置 = 地图区域下缘、底部导航之上（沿用 v2.4.1 拇指区口径）。
    ⚠️ `pointer-events: none` 是**必须**的：本栏是一条**通栏**，若吃事件会挡住地图的
       拖动 / 双指缩放；只让内部控件可点（`pointer-events` 可继承 ⇒ 子元素自动恢复可点）。 */
@@ -2959,17 +2964,6 @@ button[aria-disabled="true"] {
 }
 .nav-brandbar > * {
   pointer-events: auto;
-}
-/* 左栏占位（不渲染任何可见内容） */
-.nav-brandbar__left {
-  grid-column: 1;
-}
-/* 中栏：换向按钮 + 线路标签（水平居中） */
-.nav-brandbar__mid {
-  grid-column: 2;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
 }
 /* M Map 字标（★ v2.10.0：由左侧移入右侧竖排组，改为**按钮外观**；
    沿用既有视觉：白底 + 2px 青花蓝描边 + 圆角 chip） */
@@ -5417,52 +5411,6 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
    两者的容器/芯片形态已由 `.rl-board--bus` + `.rl-chip--board` 取代，全仓 JSX 零引用。
    ⚠️ 别再按旧稿写 `grid-template-columns: repeat(7,…)` 容器：现行网格定义在 `.rl-board--bus`。 */
 
-/* ── 底部「路线查看中」标签（M Map 与定位按钮那一行中间）──
-   ★ 2026-09-26（AC-38 / 07 §j.2）：由「999px 胶囊」收敛到既有 v2.4.1 规范 ——
-      圆角 `--radius-chip`(6px)、高 32→30px、padding `0 6px 0 10px`、
-      `box-shadow` 改用 `--hairline-inset`（与 RouteStack 同款细描边，辨识一致）。
-   ★★ R6（2026-11-06）：补偿统一为 **700 + 双层 text-shadow**（原 600 + 无阴影）。
-   ⚠️ 这里没有 `text-shadow` 时，浅底线路（氹仔线 1.79:1）白字会与底色糊成一片。 */
-.nav-linechip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 30px;
-  padding: 0 6px 0 10px;
-  border-radius: var(--radius-chip);
-  color: #fff;
-  font-size: 14px;
-  font-weight: var(--fw-announce);
-  text-shadow:
-    0 1px 1px rgba(0, 0, 0, 0.28),
-    0 0 1.5px rgba(0, 0, 0, 0.32);
-  box-shadow: var(--hairline-inset);
-  white-space: nowrap;
-}
-.nav-linechip__text {
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.nav-linechip__x {
-  flex: none;
-  width: 20px;
-  height: 20px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  /* ★ 与外壳圆角对称（20px 盒用 6px 圆角，非圆形） */
-  border-radius: var(--radius-chip);
-  background: rgba(255, 255, 255, 0.22);
-  color: #fff;
-  cursor: pointer;
-}
-/* ★ U11：T2 图标键（20×20，短边 ≤56）—— scale(0.94) + 状态层。
-   改前的 `background: rgba(255,255,255,0.36)` 换底已删（白底叠白底在线路色块上看不出层级）。 */
-.nav-linechip__x[data-pressed="true"] {
-  transform: scale(0.94);
-}
-
 /* 右侧竖排按钮组（★ v2.10.0）：自上而下 = 刷新 → 公共交通路线 → 定位 → M Map */
 .nav-brandbar__acts {
   grid-column: 3;
@@ -5787,32 +5735,6 @@ html[data-sheet-dragging="on"] .nav-locate-fab {
   .nav-refresh__ring {
     transition: none;
   }
-}
-
-/* ── 换向键：底部线路标签**左侧**，仅双向线路显示（44×44，命中区合规） ── */
-.nav-rev {
-  flex: none;
-  width: 44px;
-  height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--surface);
-  color: var(--accent);
-  border: 1.5px solid var(--accent);
-  border-radius: var(--radius-full);
-  box-shadow: var(--shadow-hard);
-  cursor: pointer;
-}
-.nav-rev:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-.nav-rev[aria-disabled="true"] {
-  color: var(--muted);
-  border-color: var(--border-2);
-  box-shadow: none;
-  cursor: default;
 }
 
 /* ── 车辆图标（车头正视图 · 画布 32×32 · 命中区 44×44 · data-state 驱动，全部 display 切换）──
@@ -8679,9 +8601,10 @@ body[data-nav-phase="walk"] .bottom-nav { display: none; }
 
 /* ── 线路徽章（.linechip）──
    ★★ R6 裁决（2026-11-06）：**线路标签字色一律白字 + 官方线路色底（底色不加深）**。
-   ⇒ 本族原本按 `chipInkOf()` **自适应墨色**（浅底转深字 / 死带加深底色），与其余 4 族
-   （`.route-stack__seg` / `.rl-chip` / `.nav-linechip` / `.nav-vehicle-card__line`）
+   ⇒ 本族原本按 `chipInkOf()` **自适应墨色**（浅底转深字 / 死带加深底色），与其余 3 族
+   （`.route-stack__seg` / `.rl-chip` / `.nav-vehicle-card__line`）
    的固定 `#fff` 不一致 —— R6 已明确否决自适应方案用于线路标签，故此处改为 `color:#fff`。
+   （品牌栏中栏的线路标签已于 2026-11-11 整块删除，不再计入族数。）
 
    ⚠️ **已知偏差（登记在案，不得以「可读性」为由改回深字）**：
       全库 95 条线路色按白字算 **59 条低于 AA 4.5:1**，最坏氹仔线 `#93d50a` 仅 1.79:1、
@@ -10066,6 +9989,21 @@ button.lp-stop__veh {
   max-height: calc(100dvh - var(--lst-head-h, 66px));
   transition: none;
 }
+/* ── 通琴号纵条的报站列收窄：96px → 40px（2026-11-10，为站名让宽）──────────────
+   为什么可以收：通琴号的 `data-eta` **恒为 `idle`**（静态时刻表，无实时源），这一列只承载
+   `plannedTime`（`.lp-stop__time`，11px 等宽数字 ⇒ `HH:MM` 约 33px）。原 96px 是给
+   「还有 N 分钟」那类文案留的，对通琴号属纯空转。
+   收益：站名多出约 **56px** —— 390px 屏可用 ~193px → ~249px，最长 18 字可单行不省略。
+   ⚠️ 命中范围勘误（2026-11-11）：`.lst-sheet` **不是通琴号独占** ——
+      `LineStopsSheet.tsx:238` 与 `RouteStopsSheet.tsx:615` 的根节点都是
+      `className="lst-sheet"` ⇒ 本规则**同时命中 RouteStopsSheet**，不是「只影响通琴号」。
+      真正不受影响的是 `/line/[code]`：那边的 LineClient 根节点没有 `lst-sheet`。
+      对 RouteStopsSheet 的实测影响中性偏正向：`etaOf={etaIdle}`（`:751`）⇒ 报站列恒
+      `data-eta="idle"`、本来就是空的，40px 只让站名变宽，不会截断任何文案。
+   ⚠️ 将来通琴号若接入实时报站，本值必须还原，否则报站文案会被挤成省略号。 */
+.lst-sheet .lp-stop__eta {
+  min-width: 40px;
+}
 /* ── 原因提示条（`aria-disabled` 键 / 取车失败，3s 自动消失）─────────────────────
    ⚠️⚠️ `bottom` 里的 **`+ var(--lst-top)` 不能删**（2026-11-07 修复，此前 toast
         从来没被用户看见过 —— 功能等于不存在）。
@@ -10112,9 +10050,23 @@ button.lp-stop__veh {
   pointer-events: none;
 }
 
-/* ── 纵条 · 站名行 + 属地标签（§17-R4）──
+/* ── 纵条 · 站名行 + 属地标签（§17-R4；2026-11-10 负责人改版）──
    标签：高 16 / 左右内距 4 / 11px / 圆角 6 / 底 `--surface-2` / 字 `--meta`（5.04:1 达标）。
-   **不用主题色**：主题色只属通琴号线本身，属地是中性元数据。`flex:none` 不参与省略。 */
+   **不用主题色**：主题色只属通琴号线本身，属地是中性元数据。`flex:none` 不参与省略。
+
+   ★ 2026-11-10 两处改动（负责人）：
+     ① 属地标签由站名**右侧**移到**站名之前**（紧贴节点右侧）⇒ 站名右端不再被标签占位；
+     ② 标签存在时站名**不省略、不折行**：字号 = `min(--text-md, (容器宽 − 标签) ÷ 字符数)`，
+        字符数由 `LineStopRow` 内联写入 `--lp-name-chars`。
+        · 138 个通琴号站名最长 18 字（`新濠锋正门（澳城大/澳理大/澳旅大）`）；
+          390px 屏站名可用约 249px ⇒ 长名自动降到约 15px 仍单行，短名保持 15px。
+        · 码点数按全角计，实际含半角括号/斜杠时更窄 ⇒ 估算偏保守（只会更松，不溢出）。
+   ⚠️ 命中范围勘误（2026-11-11）：`[data-side-row="1"]` 确实**只在传 `side` 时输出**，
+      但 `side` 有**两个**传值点 —— `LineStopsSheet.tsx:333` 与 `RouteStopsSheet.tsx:755`
+      都传了 `sideOf`（`LineStopList.tsx:89` 据此给每行赋 `side`）⇒ **不能静态排除
+      RouteStopsSheet**，旧注释的「即只有通琴号纵条」不成立。
+      仍然属实的是「无 `side` 时 DOM 逐字节不变」：验收关 `renderToStaticMarkup` 实测
+      `BYTE_IDENTICAL: true` ⇒ 零回归结论只对**不传 side 的消费方**成立。 */
 .lp-stop__namerow {
   display: flex;
   align-items: center;
@@ -10124,6 +10076,16 @@ button.lp-stop__veh {
 .lp-stop__namerow .lp-stop__name {
   flex: 1 1 auto;
   min-width: 0;
+}
+.lp-stop__namerow[data-side-row="1"] {
+  container-type: inline-size;
+}
+.lp-stop__namerow[data-side-row="1"] .lp-stop__name {
+  /* 27px = 标签宽（11px 单字 + 左右内距 4×2 ≈ 19）+ gap 4 + 4 缓冲 */
+  font-size: min(var(--text-md), calc((100cqw - 27px) / var(--lp-name-chars, 12)));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
 }
 .lp-stop__side,
 .nav-side-tag {
@@ -10146,6 +10108,23 @@ button.lp-stop__veh {
 .nav-side-tag--hq {
   background: var(--surface-2);
   color: var(--meta);
+}
+
+/* ── 通琴号**专用站卡**标题：加 `通琴号-` 前缀后仍须单行（2026-11-10）──────────
+   背景：标题由 `<站名>` 改为 `通琴号-<站名>`；138 个站名最长 18 字
+   （`新濠锋正门（澳城大/澳理大/澳旅大）`）⇒ 15px 下「通琴号- + 18 字」约 330px，
+   超过卡片标题可用宽（390 屏约 312-28-8 = 276px 级）必折行。
+   做法与公厕卡同源：字号 = `min(--text-md, (100cqw − 关闭键与间隙) ÷ 字符预算)`，
+   字符预算由 `TqhStationCard` 内联写入 `--tqh-title-chars`（标题码点 + 2，2 = 侧标 chip 折算）。
+   ⚠️ 只挂 `--tqh` 变体 ⇒ 巴士站卡 / 公厕卡 / 跨境卡的标题不受影响。
+   ⚠️ 不引用 `.nav-station-card__name` 的公共规则改写 —— 那条被 4 类卡共用。 */
+.nav-station-card--tqh {
+  container-type: inline-size;
+}
+.nav-station-card--tqh .nav-station-card__name {
+  /* 40px = 关闭键 28 + 头部 gap 8 + 4 缓冲 */
+  font-size: min(var(--text-md), calc((100cqw - 40px) / var(--tqh-title-chars, 14)));
+  white-space: nowrap;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -11714,16 +11693,29 @@ button.lp-stop__veh {
   }
 }
 
-/* ── 公厕卡标题字号（M4 · 2026-11-10）─────────────────────────────────────
-   ⚠️ 为什么必须显式设：`.nav-station-card` / `__name` 都**没设 font-size**，
-   标题继承 `body` 的 `--text-md`（**15px**）。按 15px 算，带前缀「公共厕所-」的
-   198 条里有 **26 条**超容量（宽屏 295px）/ **59 条**（320px 窄屏），会大面积折行。
-   降到 11px（= 卡片正文 `--text-2xs`）后：**宽屏只剩 1 条**（`PT-22B57F7843D0`，
-   28.5 全角 > 26.8 容量）、窄屏 14 条 ⇒ 这 15 个场合允许折行（**仍不省略**）。
-   ⇒ 不引入 `nowrap`（必溢出）、不引入 `ellipsis`（负责人禁止截断）。 */
+/* ── 公厕卡标题字号（M4 · 2026-11-10；同日二次修正）───────────────────────
+   负责人要求：字号比正文**大一点**，但**必须单行、不省略**。
+   做法：卡片设为 inline-size 查询容器，字号 = `min(上限, 可用宽 ÷ 字符数)`：
+     · 字符数由 `PublicToiletCard` 内联写入 `--toilet-title-chars`（标题码点数）；
+     · 可用宽 = 容器内容宽 − 关闭按钮 28 − 头部 gap 8 − 4 缓冲 = `100cqw - 40px`；
+     · 短名取上限 **15px**（= body 的 `--text-md`，比改前的 11px 明显更大），
+       长名自动降到刚好放得下：198 条里**完整标题含前缀**最长 27 字
+       （`公共厕所-沙梨頭活動中心(沙梨頭街市市政綜合大樓九樓)`；其中去编号后的设施名是 22 字）。
+       `--toilet-title-chars` 取的就是含前缀的 27（`PublicToiletCard.tsx` 的 `[...title].length`），
+       ⇒ **算式与取值一致，旧注释「去编号后最长 27 字」只是措辞错，算式不要动**。
+       390px 视口约 11.4px、320px 窄屏约 8.8px。
+     · 码点数按**全角**计 ⇒ 实际含半角字符时更宽裕，结论偏保守（只会更松，不溢出）。
+   ⇒ 不用 `text-overflow: ellipsis`（负责人禁止截断）、不用 `white-space: normal`
+      （负责人禁止折行）。`nowrap` 是唯一能保证不折行的写法，配合字号折算才不会溢出。
+   ⚠️ 改算式/单位前先读 `PublicToiletCard.tsx` 的「标题排版」注释块与
+      `toiletDisplayName()`（标题已剥掉源数据的设施编号）。 */
+.toilet-card {
+  container-type: inline-size;
+}
 .toilet-card .nav-station-card__name {
-  font-size: var(--text-2xs);
+  font-size: min(15px, calc((100cqw - 40px) / var(--toilet-title-chars, 14)));
   line-height: var(--leading-title);
+  white-space: nowrap;
 }
 
 /* ── M4（需求 4）：跨境卡的「逐条设施」容器（链接行 + 它自己的设点按钮）────────
