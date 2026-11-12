@@ -148,7 +148,82 @@ export interface PoiPendingMatch {
 }
 
 /** 下拉区灰字提示的**语义键**（UI 据此渲染；文案常量见 `poi-search.ts`） */
-export type PoiHint = "no_local_then_enter" | "amap_empty" | "amap_circuit";
+export type PoiHint = "no_local_then_enter" | "amap_empty" | "amap_circuit" | "macau_only";
+
+/**
+ * 地区过滤的**单条剔除记录**（★ 2026-11-12，产品裁决「本应用只服务澳门」）。
+ *
+ * 存在的意义：严格过滤最怕「静默吞结果」。每条被剔除的条目都留一份可核对的凭据，
+ * 一旦某条真澳门结果被误杀，在这里立刻可见，不必靠猜。
+ */
+export interface PoiFilterItem {
+  name: string;
+  /**
+   * foreign = 明确非澳门（其他城市/地区）；unknown = 归属不明（无任何地理标识）；
+   * suspect = **已保留**但名称与属地冲突（按 adcode 在澳门、名字却像外地），待人工确认。
+   */
+  verdict: "foreign" | "unknown" | "suspect";
+  /** 判定依据（稳定码，门禁据此断言，不要随意改名） */
+  reason: MacauReason;
+  adcode?: string;
+  district?: string;
+}
+
+/**
+ * 地区过滤的**汇总报告**（`/api/poi/suggest` 的 `filtered` 字段）。
+ * ⚠️ 纯**追加**字段：不改变 `results` / `pending` 的结构与顺序，旧调用方零影响。
+ */
+export interface PoiFilterReport {
+  /** 参与判定的原始条目数（高德 place/text 与 inputtips 合计） */
+  total: number;
+  /** 判定为澳门、已保留 */
+  kept: number;
+  /** 明确非澳门，已剔除 */
+  foreign: number;
+  /** 归属不明（无 adcode、无行政区文字、名称也不带外地前缀）⇒ 已隐藏，待人工确认 */
+  unknown: number;
+  /** 无坐标被剔除（**与地区无关**，单列以免和「非澳门」混淆） */
+  noCoord: number;
+  /** 剔除样本（最多 {@link POI_FILTER_SAMPLE_MAX} 条，按原序） */
+  samples: PoiFilterItem[];
+  /**
+   * **名称与属地冲突**的**已保留**条目（最多 {@link POI_FILTER_SAMPLE_MAX} 条）。
+   *
+   * 与 `samples` 的区别：`samples` 里的是**被剔除**的，这里是**留在结果里**的。
+   * 为什么单独一张表：这类条目按 adcode 属澳门（不该删，删了就是丢真数据），
+   * 但名称像外地（如「珠海海洋王国度假酒店」实测坐标在澳门半岛花王堂区）。
+   * 产品若认为「名字带外市字样的都不该出现在澳门应用里」，据此表逐条拍板即可。
+   */
+  suspects: PoiFilterItem[];
+}
+
+/**
+ * 澳门归属判定依据（稳定码）。四态收敛为三值：
+ *   · `adcode_macau`   有 adcode 且 8200xx ⇒ 澳门
+ *   · `text_macau`     无 adcode，但 district/cityname 含「澳」 ⇒ 澳门
+ *   · `name_foreign`   名称以其他城市/运营主体开头 ⇒ 非澳门（高德 adcode 误标时唯一有效判据）
+ *   · `adcode_foreign` 有 adcode 但非 8200xx ⇒ 非澳门
+ *   · `text_foreign`   无 adcode，district/cityname 明确是外地 ⇒ 非澳门
+ *   · `no_signal`      三者皆无 ⇒ **归属不明**
+ */
+export type MacauReason =
+  | "adcode_macau"
+  | "text_macau"
+  | "name_foreign"
+  | "adcode_foreign"
+  | "text_foreign"
+  | "no_signal"
+  | "name_conflict";
+
+/** 澳门归属判定的三分类结果（见 `amap/poi.ts#classifyMacau`） */
+export interface MacauVerdict {
+  /** macau = 保留 / foreign = 明确非澳门 / unknown = 归属不明（隐藏但记账） */
+  verdict: "macau" | "foreign" | "unknown";
+  reason: MacauReason;
+}
+
+/** 剔除样本上限（报告只用于核对，不用于重放；有界避免长响应） */
+export const POI_FILTER_SAMPLE_MAX = 12;
 
 /** `/api/poi/suggest` 响应（★ 两段式搜索：打字纯本地 / 回车可调高德） */
 export interface PoiSuggestResponse {
@@ -180,6 +255,14 @@ export interface PoiSuggestResponse {
    *   · `mode=type`（打字）与 `mode=enter`（回车）**都给**（AC-40 要求打字阶段可见）。
    */
   routes?: RouteSuggestion[];
+  /**
+   * ★ 2026-11-12：地区过滤报告（**仅当本次真的剔除了条目时下发**，否则不给这个键）。
+   *
+   * 产品要求「说明已过滤掉的非澳门信息数量或范围」⇒ 把剔除数量与样本随响应带回，
+   * 让「过滤了什么」可被核对，而不是静默吞掉。`unknown`（归属不明）单列，
+   * 便于人工确认是否存在被误杀的澳门地点。
+   */
+  filtered?: PoiFilterReport;
 }
 
 // ─────────────────────────── 站码映射 ───────────────────────────
