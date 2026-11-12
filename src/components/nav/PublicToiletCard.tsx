@@ -4,9 +4,22 @@
  * 公共厕所弹窗（M4 · 需求 3）—— 挂在 `.nav-card-overlay`（z90）里的那张卡。
  *
  * ── 标题（负责人逐字指定）──────────────────────────────────────────────
- *   `公共厕所-<設施名原文>`：前缀**简体**（本项目 UI 文案一律简体，见 `NavStrip` 的
+ *   `公共厕所-<設施名>`：前缀**简体**（本项目 UI 文案一律简体，见 `NavStrip` 的
  *   「下一站 / 停靠中 / 到站 / 下车」），连字符后直接接数据里的**繁體原名**——
  *   **不得转换、不得截断**（数据是官方繁体，转简体等于改政府原文）。
+ *   ★ 2026-11-10 修正（2026-11-11 勘误举例）：源数据名串首带**设施编号**
+ *   （`MM04 雀仔園街市地下`、`AM01 …`；198 条里 189 条是「编号+空格+名」、9 条是
+ *   「编号直接接名」）。旧注释写的 `T8 雀仔園街市地下` 在数据中**不存在**：
+ *   `T8` 真实对应 `T8 氹仔排角路公廁`，雀仔園那条是 `MM04`。⇒ 渲染时用
+ *   `toiletDisplayName()` 剥掉编号，卡片只显示 `公共厕所-雀仔園街市地下`。
+ *   **只在渲染层剥**，JSON 原文逐字保留（编号是官方数据取值，改文件等于改政府原文）。
+ *
+ * ── 标题排版（负责人 2026-11-10）────────────────────────────────────────
+ *   要求「字号可以大一点，但**必须单行、不省略**」。⇒ 不用 `ellipsis`、不用折行；
+ *   改为「短名固定 15px，长名按容器宽度自动降字号」：字符数由组件内联写入
+ *   `--toilet-title-chars`，CSS 用 `min(15px, (100cqw - 按钮与间隙) / 字符数)` 折算。
+ *   字符数按**码点**算且不区分全/半角 ⇒ 半角字符实际更窄，结论偏保守（只会更松，不会溢出）。
+ *   实测容量依据见 `globals.css` 的 `.toilet-card` 段。
  *
  * ── 排版（负责人裁定 + 后端实测容量）──────────────────────────────────
  *   字段名与值**同一行**，**不省略号截断**；折行时新行**从值开始**（悬挂缩进）。
@@ -23,10 +36,10 @@
  * ── 免责/来源 ─────────────────────────────────────────────────────────
  *   卡片内**不放**任何来源/免责文案（署名统一放 `/about`，见 `toilet-attribution.ts`）。
  */
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import Icon from "@/components/ui/Icon";
 import SetPointActions from "./SetPointActions";
-import type { PublicToilet } from "@/lib/map/public-toilets";
+import { toiletDisplayName, type PublicToilet } from "@/lib/map/public-toilets";
 
 export interface PublicToiletCardProps {
   toilet: PublicToilet;
@@ -53,12 +66,19 @@ function Row({ label, children, variant = "plain" }: { label: string; children: 
 
 export default function PublicToiletCard({ toilet, navActive, onClose, onSetFrom, onSetTo }: PublicToiletCardProps) {
   const [imgFailed, setImgFailed] = useState(false);
-  const title = `公共厕所-${toilet.nameTc}`;
+  /** 标题只留设施名（源数据的 `T8` / `AM01` 之类设施编号在渲染层剥掉，JSON 原文不动） */
+  const title = `公共厕所-${toiletDisplayName(toilet.nameTc)}`;
+  /** 标题字符数（码点）⇒ 交给 CSS 按容器宽度折算字号，保证**单行且不省略** */
+  const titleChars = [...title].length;
 
   return (
     <div className="nav-station-card toilet-card" role="dialog" aria-label={title} data-toilet-card="on">
       <div className="nav-station-card__head">
-        <span className="nav-station-card__name" data-toilet-title="on">
+        <span
+          className="nav-station-card__name"
+          data-toilet-title="on"
+          style={{ "--toilet-title-chars": String(titleChars) } as CSSProperties}
+        >
           {title}
         </span>
         <button className="nav-station-card__close" type="button" aria-label="关闭" onClick={onClose}>

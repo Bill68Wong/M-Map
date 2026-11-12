@@ -66,8 +66,13 @@
  *     `scrollIntoView({ block: "center" })` ⇒ 不被底部卡片压住。
  *
  * ── 本轮仍**不做**（第二阶段）──────────────────────────────────────────
- *   · 实时报站：`etaOf` 恒 `idle`（DOM 输出 `data-eta="idle"`，不渲染「—」、零请求）；
- *   · 换向的真实逻辑（只渲染按钮；`onFlipDirection` 为 null ⇒ `aria-disabled` + toast）。
+ *   · 实时报站：`etaOf` 恒 `idle`（DOM 输出 `data-eta="idle"`，不渲染「—」、零请求）。
+ *
+ * ── ★ 2026-11-11 勘误：「换向真实逻辑」已落地，不再属「不做」────────────
+ *   `NavShell.tsx` 传给本组件的 `onFlipDirection` 是
+ *   `rv.canReverse ? () => rv.reverse() : null`：有对向 ⇒ 点击执行 `rv.reverse()`；
+ *   无对向（或轻轨）⇒ 传 null，本组件按 `:568-573 / :704-705` 给
+ *   `aria-disabled` + 点击 toast，按钮**永不隐藏**。旧稿已作废。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";

@@ -11,9 +11,19 @@
  *   `public/data/public-toilets.raw.json` 现算 sha256 再比对，才能证明派生文件
  *   确实源自那份原始字节。
  *
+ * ── ★ 2026-11-11：为什么要补「逐值锁」（qa 变异验收击穿后的必修项）──────
+ *   原 4b 的 4 条断言只守「输出**有没有变**」，不守「变得**对不对**」：
+ *     · mutant1 `toiletDisplayName` 恒返回原串 ⇒ 2 条红（能挡）；
+ *     · mutant2 `toiletDisplayName` 恒返回 `"厕所"` ⇒ **33 条全绿、EXIT=0（击穿）**
+ *       —— 198 个名字全变成同一个词，恰好满足「非空 / 不以编号开头 / 与原串不同 / 原文仍带编号」。
+ *   ⇒ 4c 新增：① **独立参考实现**逐条算出 expected，再逐值比对（分母 = items.length）；
+ *     ② 若干**写死的锚点值**（实读 JSON，防「两个实现一起被改坏」）；
+ *     ③ 护栏反例（站台码不得误剥）。三者都不调用被测函数自己验自己。
+ *
  * ── 反向自证（不写进断言，交付时手工做）────────────────────────────────
  *   临时把 JSON 的 `recordCount` 改成 197 再跑，`recordCount === 198` 必须变红；
- *   复原后必须复绿。这是「门禁真的会红」的证据（见交付报告）。
+ *   复原后必须复绿。2026-11-11 另做两次函数级变异：恒返回原串（mutant1）与
+ *   恒返回 `"厕所"`（mutant2）都必须变红；红行原文与 `diff -q` 还原自证见交付报告。
  *
  * 运行：npx tsx scripts/test-toilets-data.ts（或加进 package.json 后 npm run test:toilets-data）
  */
@@ -21,6 +31,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { toiletDisplayName } from "../src/lib/map/public-toilets";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const JSON_PATH = path.join(ROOT, "public", "data", "public-toilets.json");
@@ -151,6 +162,94 @@ const emptyName = data.items.filter((x) => !x.nameTc || !x.nameTc.trim());
 assertEq<number>(emptyName.length, 0, "nameTc 全部非空");
 const names = new Set(data.items.map((x) => x.nameTc));
 assertEq<number>(names.size, 198, "nameTc 全不重复（去重后 198）");
+
+// ── 4b. 卡片标题剥离设施编号（`toiletDisplayName`，2026-11-10 负责人要求）──
+//   规则：卡片标题 = `公共厕所-<剥掉串首编号的名字>`（如 `MM04 雀仔園街市地下` → `雀仔園街市地下`）。
+//   剥离**只在渲染层**做：编号是官方数据取值，改数据文件等于改政府原文。
+//   这里守双向：① 剥离后不再带编号且非空；② JSON 原文**仍带**编号（证明没反向污染数据）。
+const CODE_PREFIX = /^[A-Z]{1,3}\d{1,3}[ \u3000]*\S/;
+const displayed = data.items.map((x) => toiletDisplayName(x.nameTc));
+assertEq<number>(displayed.filter((n) => n.length > 0).length, 198, "剥离编号后标题全部非空");
+assertEq<number>(displayed.filter((n) => CODE_PREFIX.test(n)).length, 0, "剥离后不再以设施编号开头");
+assertEq<number>(
+  displayed.filter((n, i) => n !== data.items[i].nameTc).length,
+  198,
+  "198 条全部被剥掉编号（期望值写死 198；分母不是 items.length）",
+);
+assertEq<number>(
+  data.items.filter((x) => /^[A-Z]{1,3}\d{1,3}/.test(x.nameTc)).length,
+  198,
+  "JSON 原文仍保留设施编号（数据文件未被改写）",
+);
+
+// ── 4c. 逐值锁（2026-11-11 补；堵 mutant2「恒返回同一个词」的全绿击穿）──
+/**
+ * ★ **独立参考实现** —— 全文**不调用** `toiletDisplayName`，三处写法都刻意不同：
+ *   ① 用 `exec` 取「串首编号 + 空白」的整段 head（被测函数是单条正则 + 捕获组）；
+ *   ② 用 `slice(head.length)` 从原串上切掉（被测函数返回捕获组 m[1]）；
+ *   ③ 防误伤用**显式字符表 Set + charAt** 判（被测函数用正则负向前瞻）。
+ *   ⇒ 它不是「被测函数的镜像」，而是同一份规格的第二份实现；若有人把两份一起改坏，
+ *     下面写死的锚点值会红。参考实现与被测函数**互不 import**，也没有共享常量。
+ */
+const REFERENCE_PUNCT = new Set([
+  "/", "／", ",", "，", "、", ".", "．", ":", "：", ";", "；",
+  "(", ")", "（", "）", "[", "]", "【", "】", "-", "–", "—", "_",
+]);
+const referenceDisplayName = (nameTc: string): string => {
+  const head = /^[A-Z]{1,3}\d{1,3}[ \u3000]*/u.exec(nameTc)?.[0];
+  if (!head) return nameTc;
+  const rest = nameTc.slice(head.length);
+  const first = rest.charAt(0);
+  // 空串 / 标点开头 / 空白开头 ⇒ 不是「编号 + 名字」，回落原文
+  if (!rest || REFERENCE_PUNCT.has(first) || /\s/u.test(first)) return nameTc;
+  return rest;
+};
+
+/** ① 198 条逐值对拍：分母用 `data.items.length`，打印实测一致条数 */
+const expected = data.items.map((x) => referenceDisplayName(x.nameTc));
+const valueMismatches = data.items
+  .map((x, i) => ({ i, raw: x.nameTc, got: displayed[i], want: expected[i] }))
+  .filter((o) => o.got !== o.want);
+assertEq<number>(
+  data.items.filter((_, i) => displayed[i] === expected[i]).length,
+  data.items.length,
+  `逐值锁：displayed[i] === 独立参考 expected[i]（分母 = items.length = ${data.items.length}）`,
+);
+if (valueMismatches.length) {
+  console.error("    不一致示例（最多 3 条）：" + JSON.stringify(valueMismatches.slice(0, 3)));
+}
+
+/** ② 锚点逐值锁：值全部实读 `public/data/public-toilets.json` 后写死，两条实现都必须命中 */
+const ANCHOR_VALUES = [
+  { raw: "MM04 雀仔園街市地下", want: "雀仔園街市地下", why: "编号+空格（189 条型）" },
+  { raw: "C18路環黑沙兵房路臨時公廁", want: "路環黑沙兵房路臨時公廁", why: "编号直连（9 条型）" },
+  { raw: "GC02九澳活動中心(九澳村路觀音廟前地)", want: "九澳活動中心(九澳村路觀音廟前地)", why: "直连且名字含括号" },
+  { raw: "LT01氹仔沙崗市政墳場公廁", want: "氹仔沙崗市政墳場公廁", why: "LT 系列（qa 清单里的 LT01/02/03 是三条独立记录）" },
+];
+for (const a of ANCHOR_VALUES) {
+  const exists = data.items.some((x) => x.nameTc === a.raw);
+  assert(
+    exists && referenceDisplayName(a.raw) === a.want && toiletDisplayName(a.raw) === a.want,
+    `锚点逐值锁 [${a.why}] ${a.raw} → ${a.want}（JSON 有此原文 + 两份实现都等于写死值）`,
+  );
+}
+
+/**
+ * ③ 护栏反例：编号后紧跟标点 ⇒ 是站台码/复合码，不是设施编号，**原样返回不剥**。
+ *   ⚠️ 只锁这一类。`A1 大堂` / `M2 澳門站` / `AP1 碼頭` 与真实 189 条构造上完全相同，
+ *      不可能只挡它们而不误伤真实数据，故不设「不剥」断言（见被测函数注释的边界说明）。
+ */
+const NO_STRIP = [
+  { raw: "M2/1 關閘總站", why: "站台码：编号后紧跟 /" },
+  { raw: "M1/2 關閘", why: "站台码：编号后紧跟 /" },
+  { raw: "AP1, 碼頭", why: "编号后紧跟逗号" },
+];
+for (const s of NO_STRIP) {
+  assert(
+    toiletDisplayName(s.raw) === s.raw && referenceDisplayName(s.raw) === s.raw,
+    `防误伤 [${s.why}] ${s.raw} 两份实现都原样返回（实测 toiletDisplayName → ${JSON.stringify(toiletDisplayName(s.raw))}）`,
+  );
+}
 
 // ── 5. 完整性 + publicId ──
 assertEq<number>(data.items.length, 198, "items 条数校验（重复确认）");

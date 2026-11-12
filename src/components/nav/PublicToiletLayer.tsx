@@ -32,7 +32,7 @@
  *   导航态由宿主不传 `enabled`（与通琴号「导航态隐藏全部站点图标」同一口径）。
  */
 import { useEffect, useRef, useState } from "react";
-import { loadPublicToilets, type PublicToilet } from "@/lib/map/public-toilets";
+import { loadPublicToilets, toiletDisplayName, type PublicToilet } from "@/lib/map/public-toilets";
 
 /**
  * 方形 pin 边长（px）。负责人裁定：**方形 + 白色「WC」**，边长按「WC 看得清」定。
@@ -174,7 +174,7 @@ export default function PublicToiletLayer({ map, amap, enabled, active = enabled
       for (const t of items) {
         // location 为 null 的记录没有坐标 ⇒ 不画（数据层已置 null，不要当 0 处理）
         if (t.lat == null || t.lng == null) continue;
-        const label = `公共厕所-${t.nameTc}`;
+        const label = `公共厕所-${toiletDisplayName(t.nameTc)}`;
         const { dx, dy } = offsetByPublicId.get(t.publicId) ?? { dx: 0, dy: 0 };
         const marker = new amap.Marker({
           position: [t.lng, t.lat],
