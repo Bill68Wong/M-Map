@@ -35,7 +35,15 @@
  *     ⚠️ **代价必须说清**：本脚本在 `verify` 链内（`test:remaining-all` 的成员之一），
  *        所以无库环境下**整条 verify 会红**。这是刻意的 —— 宁可红，也不给「0 条即通过」留口子。
  */
-process.loadEnvFile("D:/Projects/University/Studio/musttoukou/.env");
+// ★ 2026-11-12 修：原为作者机绝对路径 `D:/Projects/University/Studio/musttoukou/.env` ⇒ 队友 checkout 后
+//   本脚本在读 .env 时即 ENOENT，整条 verify 必红（判据：npm run verify 停在 test:remaining-route）。
+//   改为无参 loadEnvFile()（读 cwd/.env），与 db/* 既有无参体例一致。
+//   注意：这里用 try/catch **不削弱 fail-closed** —— .env 缺失 ⇒ DATABASE_URL 缺失 ⇒ 下方连库失败照样 exit 1。
+try {
+  process.loadEnvFile();
+} catch {
+  /* .env 不存在：交给下方连库失败路径判红 */
+}
 
 import { NextRequest } from "next/server";
 import { POST } from "../src/app/api/nav/remaining/route";

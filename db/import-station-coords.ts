@@ -29,7 +29,9 @@ import path from "node:path";
 import { Pool } from "pg";
 
 const APPLY = process.argv.includes("--apply");
-const ROOT = "D:/Projects/University/Studio/musttoukou";
+// ★ 2026-11-12 修：原硬编码作者机绝对路径 ⇒ 队友 checkout 后必 ENOENT（判据：verify/脚本直接崩）。
+//   仓库内全部脚本均以「项目根为 cwd」运行（npm run 从根启动），故取 cwd。
+const ROOT = process.cwd();
 process.loadEnvFile(path.join(ROOT, ".env"));
 
 const u = new URL(process.env.DATABASE_URL!);

@@ -39,7 +39,8 @@ import {
 import { getPool } from "../src/lib/db";
 
 try {
-  process.loadEnvFile("D:/Projects/University/Studio/musttoukou/.env");
+  // ★ 2026-11-12 修：原硬编码作者机路径 ⇒ 读 cwd/.env。
+  process.loadEnvFile();
 } catch {
   /* 没有 .env：连接串缺失会在建池时报可读错误 */
 }
@@ -50,7 +51,7 @@ const STATS_ONLY = process.argv.includes("--stats");
 const EXPECTED_PAIRS = 302;
 /** 单次高德请求的往返耗时假设（3 QPS 下取 400ms 更保守，用于 dry-run 估时） */
 const ASSUMED_RTT_MS = 400;
-const OUT = "D:/Projects/University/Studio/musttoukou/.verify/build-tqh-segment-paths.out.txt";
+const OUT = ".verify/build-tqh-segment-paths.out.txt";
 
 const out: string[] = [];
 const say = (s = ""): void => {
@@ -244,7 +245,7 @@ void (async () => {
     process.exitCode = 1;
   } finally {
     try {
-      fs.mkdirSync("D:/Projects/University/Studio/musttoukou/.verify", { recursive: true });
+      fs.mkdirSync(".verify", { recursive: true });
       fs.writeFileSync(OUT, out.join("\n") + "\n", "utf8");
     } catch {
       /* 日志写失败不影响结果 */

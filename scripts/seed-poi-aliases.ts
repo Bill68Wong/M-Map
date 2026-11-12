@@ -28,13 +28,14 @@ import { PLACE_COORDS, PLACE_NAME_BY_SLUG, PLACE_SLUG_BY_ID } from "../src/lib/r
 import { normalizeName, normalizeQuery } from "../src/lib/shared/normalize";
 
 try {
-  process.loadEnvFile("D:/Projects/University/Studio/musttoukou/.env");
+  // ★ 2026-11-12 修：原硬编码作者机路径 ⇒ 读 cwd/.env。
+  process.loadEnvFile();
 } catch {
   /* .env 不存在 */
 }
 
 const APPLY = process.argv.includes("--apply");
-const OUT_DIR = "D:/Projects/University/Studio/musttoukou/.verify";
+const OUT_DIR = ".verify";
 
 const u = new URL(process.env.DATABASE_URL!);
 const pool = new Pool({

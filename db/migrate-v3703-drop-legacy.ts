@@ -40,7 +40,8 @@ import { spawnSync } from "node:child_process";
 
 const APPLY = process.argv.includes("--apply");
 const DROP = process.argv.includes("--drop");
-const ROOT = "D:/Projects/University/Studio/musttoukou";
+// ★ 2026-11-12 修：原硬编码作者机绝对路径（ROOT 下游全是仓库内相对路径 data/ backup/ .verify/）。
+const ROOT = process.cwd();
 process.loadEnvFile(path.join(ROOT, ".env"));
 const CONN = process.env.DATABASE_URL!;
 const u = new URL(CONN);

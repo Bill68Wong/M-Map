@@ -43,7 +43,8 @@ import { Pool } from "pg";
 
 const APPLY = process.argv.includes("--apply");
 const DROP = process.argv.includes("--drop");
-process.loadEnvFile("D:/Projects/University/Studio/musttoukou/.env");
+// ★ 2026-11-12 修：原硬编码作者机路径 ⇒ 读 cwd/.env（与 db/* 既有无参体例一致）。
+process.loadEnvFile();
 const u = new URL(process.env.DATABASE_URL!);
 const pool = new Pool({
   host: u.hostname, port: Number(u.port || 5432), database: u.pathname.slice(1),
@@ -52,7 +53,7 @@ const pool = new Pool({
 const q = async (s: string, a?: unknown[]) => (await pool.query(s, a)).rows;
 const out: string[] = [];
 const say = (s: string) => { out.push(s); console.log(s); };
-const OUT = "D:/Projects/University/Studio/musttoukou/.verify/migrate-v1200.out.txt";
+const OUT = ".verify/migrate-v1200.out.txt";
 
 say(`模式：${DROP ? "★ DROP（撤销）" : APPLY ? "★ APPLY（写生产库）" : "DRY-RUN（只读）"}`);
 say(`目标库：${u.hostname} / ${u.pathname.slice(1)}`);

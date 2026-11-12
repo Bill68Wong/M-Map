@@ -21,7 +21,8 @@ import path from "node:path";
 import { Pool } from "pg";
 
 try {
-  process.loadEnvFile("D:/Projects/University/Studio/musttoukou/.env");
+  // ★ 2026-11-12 修：原硬编码作者机路径 ⇒ 读 cwd/.env。
+  process.loadEnvFile();
 } catch {
   /* .env 不存在 */
 }
@@ -33,8 +34,8 @@ const INCLUDE_FLAGGED = argv.includes("--include-flagged");
 const fileArg = argv.find((a) => a.startsWith("--file="));
 const CSV = fileArg
   ? fileArg.slice("--file=".length)
-  : "D:/Projects/University/Studio/musttoukou/.verify/station-amap-map.csv";
-const OUT_DIR = "D:/Projects/University/Studio/musttoukou/.verify";
+  : ".verify/station-amap-map.csv";
+const OUT_DIR = ".verify";
 
 const u = new URL(process.env.DATABASE_URL!);
 const pool = new Pool({

@@ -36,7 +36,8 @@ import { acquireWithWait, RATE_BUCKET } from "../src/lib/amap/rate-limit";
 import { normalizeName } from "../src/lib/shared/normalize";
 
 try {
-  process.loadEnvFile("D:/Projects/University/Studio/musttoukou/.env");
+  // ★ 2026-11-12 修：原硬编码作者机路径 ⇒ 读 cwd/.env。
+  process.loadEnvFile();
 } catch {
   /* .env 不存在 */
 }
@@ -50,7 +51,7 @@ const val = (name: string): string | undefined => {
 };
 const APPLY = has("--apply");
 const IN_FILE = val("in");
-const OUT_DIR = val("out") ?? "D:/Projects/University/Studio/musttoukou/.verify";
+const OUT_DIR = val("out") ?? ".verify";
 const MAX_CALLS = Number(val("max-calls") ?? "0") || 0;
 const RADIUS_M = Number(val("radius") ?? "2500") || 2500;
 const SEED_ARG = val("seed"); // "lng,lat"
