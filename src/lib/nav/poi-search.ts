@@ -23,6 +23,18 @@
  *   高德 `city` 参数只是「倾向」不是硬限定（实测输 `gongbei` 会返回珠海）⇒ 必须**本地按
  *   adcode（澳门=820000）过滤**；`inputtips` **无 `dist` 字段** ⇒ 排序由我们本地算
  *   haversine 距离（复用 `poi.ts` 的转换器，已内建过滤 + 近者优先）。
+ *   ★ 2026-11-12（产品裁决「本应用只服务澳门」）：`citylimit=true` **实测拦不住邻市**
+ *     （搜「珠海长隆」仍回 adcode=440402 的珠海条目，见 `poi.ts#classifyMacau` 注释），
+ *     且高德会把个别珠海 POI 的 adcode 误标成澳门 ⇒ 准入判据统一收敛到 `classifyMacau`
+ *     一处（名称前缀 / adcode / 行政区文字 / 无证据 **三分类**），两道闸（`toResults` + `filterMacau`）
+ *     共用，任何一环都不允许再写「无 adcode 就放行」的兜底。
+ *
+ * ── 过滤记账（★ 2026-11-12「剔除要可核对」）─────────────────────────────
+ *   严格过滤最大的风险是**静默吞结果**：某条真澳门地点被误判，用户只看到「搜不到」。
+ *   故 `searchAmap` 恒返回 `PoiFilterReport`（`total/kept/foreign/unknown/noCoord` + 剔除样本），
+ *   `suggest()` 在**有剔除时**把它挂到响应 `filtered` 键上（无剔除不下发，原有形状不变）。
+ *   三个用途：① 生产日志一眼看出「搜不到」是没给还是被拦；② `unknown`（归属不明）留给人工确认；
+ *   ③ 产品侧可量化「这个应用到底挡掉了多少非澳门结果」。
  *
  * ── 缓存 ──────────────────────────────────────────────────────────────
  *   回车命中**进程内 TTL 缓存**（10 分钟）→ 热门地名重复回车**零配额**。
@@ -33,8 +45,12 @@
  */
 import {
   ADCODE_MACAU,
+  classifyMacau,
+  hasFilterReport,
+  hasFilteredItems,
   inputtips,
-  isMacauAdcode,
+  mergePoiFilterStats,
+  newPoiFilterStats,
   placeText,
   poisToResults,
   tipsToResults,
@@ -42,6 +58,7 @@ import {
 } from "@/lib/amap/poi";
 import type { LatLng } from "@/lib/amap/coord";
 import type {
+  PoiFilterReport,
   PoiPendingMatch,
   PoiSearchResult,
   PoiSuggestResponse,
@@ -58,8 +75,14 @@ import { circuitState, recordSearchCall } from "./quota";
  * ★ 【7②】v2.0.1：主入口已从「回车」改为**输入框右侧的搜索按钮** ⇒ 提示同步改为「点『搜索』」。
  */
 export const HINT_NO_LOCAL_ENTER = "没有本地结果 · 点「搜索」查找网上的新地点";
-/** 高德也无结果时的行内提示（简体；同产品总原则） */
+/**
+ * 高德也无结果时的行内提示（简体；同产品总原则）
+ * ★ 2026-11-12：所有结果都因**非澳门**被剔时，不说「换个说法」——要说清**为什么**没有结果，
+ *   否则用户只会反复换词试。本应用只服务澳门，这是产品边界，不是搜索故障。
+ */
 export const HINT_AMAP_EMPTY = "找不到这个地点，试试换个说法";
+/** 结果全部落在澳门以外（或无法证明在澳门）时的行内提示 */
+export const HINT_MACAU_ONLY = "该地点不在澳门范围内 · 本应用只提供澳门地点";
 /**
  * ★ 搜索优化（2026-09-21）：**搜索配额熔断中**（高德兜底已停）的行内提示。
  * 为什么必须有它：熔断时点「搜索」拿不到任何网上结果，若不告知，用户只会觉得「搜索坏了」。
@@ -88,19 +111,42 @@ export interface LocalSuggest {
 // ─────────────────────────── 进程内 TTL 缓存 ───────────────────────────
 
 const CACHE_TTL_MS = 10 * 60_000;
+/**
+ * ★ 2026-11-12（P3）：**上游明确答复 0 条**时的短 TTL。
+ *
+ * 旧逻辑 `if (results.length) cacheSet(...)` 让空结果进不了缓存 ⇒ 同一个搜不到的词，
+ * 每按一次回车都要重新消耗 `place/text` + `inputtips` 两次配额（实测 `quotaConsumed` 恒为 2）。
+ * 但空结果也不能按 10 分钟缓存：新开的店 / 刚录入的 POI 会被一个空结果钉住太久。
+ * ⇒ 取 60s：足够吸收「连打几次同一个词」的重复开销，又不至于让新数据等太久。
+ *
+ * ⚠️ 只有**上游成功且确实是 0 条**才写。失败 / 超时 / 熔断一律不写 ——
+ * 否则一次网络抖动就会把「假空」缓存住，用户会真的以为这个地点不存在。
+ */
+const CACHE_TTL_EMPTY_MS = 60_000;
 const CACHE_MAX = 300;
-const amapCache = new Map<string, { at: number; results: PoiSearchResult[] }>();
+/** ★ 2026-11-12：缓存里一并存**过滤报告** —— 否则「命中缓存」时 `filtered` 会凭空消失，
+ *  同一查询两次回车给出两种报告，产品要求的「过滤数量可核对」就不可信了。
+ *  `ttl` 逐条目存放：正常结果 10 分钟，空结果只有 60s，两者共用同一张表与淘汰策略。 */
+const amapCache = new Map<
+  string,
+  { at: number; ttl: number; results: PoiSearchResult[]; report: PoiFilterReport }
+>();
 
-function cacheGet(key: string): PoiSearchResult[] | null {
+function cacheGet(key: string): { results: PoiSearchResult[]; report: PoiFilterReport } | null {
   const e = amapCache.get(key);
   if (!e) return null;
-  if (Date.now() - e.at > CACHE_TTL_MS) {
+  if (Date.now() - e.at > e.ttl) {
     amapCache.delete(key);
     return null;
   }
-  return e.results;
+  return { results: e.results, report: e.report };
 }
-function cacheSet(key: string, results: PoiSearchResult[]): void {
+function cacheSet(
+  key: string,
+  results: PoiSearchResult[],
+  report: PoiFilterReport,
+  ttl = CACHE_TTL_MS,
+): void {
   if (amapCache.size >= CACHE_MAX) {
     let oldestKey: string | null = null;
     let oldestAt = Infinity;
@@ -112,7 +158,7 @@ function cacheSet(key: string, results: PoiSearchResult[]): void {
     }
     if (oldestKey) amapCache.delete(oldestKey);
   }
-  amapCache.set(key, { at: Date.now(), results });
+  amapCache.set(key, { at: Date.now(), ttl, results, report });
 }
 
 // ─────────────────────────── 第一段：本地（0 配额） ───────────────────────────
@@ -206,18 +252,22 @@ export async function suggestLocal(query: string, opts: SuggestOptions = {}): Pr
 // ─────────────────────────── 第二段：高德（消耗配额） ───────────────────────────
 
 /**
- * 严格的澳门过滤。★ **不能只判 adcode === '820000'**：澳门下辖 8 区用 **820001~820008**，
- * 高德 POI 多返回**区级码** ⇒ 只认 820000 会把澳门本地结果**误杀**（实测教训）。
- * 规则：有 adcode → 必须 `8200xx`（`isMacauAdcode`，邻市珠海=440402 会被剔）；无 adcode →
- * 用行政区名兜底（含「澳」）；连行政信息都没有 → 保留（避免误杀）。
+ * 严格的澳门过滤 —— **第二道闸**（合并前再兜一次）。
+ *
+ * 判据已收敛到 `classifyMacau` 一处（`amap/poi.ts`），与 `toResults` 同源，避免「两处各写一遍」
+ * 再次漂移。三分类：`macau` 保留 / `foreign` 明确非澳门 / `unknown` 归属不明 ⇒ 后两者一律剔除。
+ * ★ 2026-11-12 把 `unknown` 由「保留」翻转为「剔除」，实测依据见 `classifyMacau` 注释
+ *   （288 条澳门本地结果 100% 带 adcode，而无 adcode 的样本恰是 `珠机城轨` 这类非澳门裸条目）。
+ *
+ * ⚠️ 本函数是**幂等**的：`toResults` 已按同一判据筛过一遍，这里只会再剔 0 条。
+ *   因此**计数只在 `toResults` 的 `stats` 出口做**，此处不记账 —— 否则同一批条目会被数两遍，
+ *   报告里的「过滤掉多少条」会翻倍失真。
+ *
+ * ⚠️ 只用于**高德结果**。本地库（`suggestLocal`）是 DSAT / 轻轨自有站点，本就不带 adcode，
+ * **绝不能**过这道闸，否则全被误杀。
  */
 export function filterMacau(list: PoiSearchResult[]): PoiSearchResult[] {
-  return list.filter((r) => {
-    if (r.adcode) return isMacauAdcode(r.adcode);
-    const d = r.district ?? "";
-    if (d) return /澳|macau/i.test(d);
-    return true; // 完全无信息 → 保留（避免误杀澳门本地结果）
-  });
+  return list.filter((r) => classifyMacau(r).verdict === "macau");
 }
 
 export interface AmapSuggest {
@@ -226,6 +276,11 @@ export interface AmapSuggest {
   circuitOpen: boolean;
   /** 本次实际发起的搜索调用数（0 = 命中缓存 / 熔断） */
   quotaConsumed: number;
+  /**
+   * ★ 2026-11-12：本次地区过滤的记账（`total/kept/foreign/unknown/noCoord` + 剔除样本）。
+   * 恒定存在（无剔除时各项为 0），便于调用方判断「是搜不到，还是被过滤掉了」。
+   */
+  filtered: PoiFilterReport;
 }
 
 /**
@@ -237,10 +292,10 @@ export interface AmapSuggest {
 export async function searchAmap(query: string, opts: SuggestOptions = {}): Promise<AmapSuggest> {
   const key = normalizeQuery(query);
   const cached = cacheGet(key);
-  if (cached) return { results: cached, circuitOpen: false, quotaConsumed: 0 };
+  if (cached) return { results: cached.results, circuitOpen: false, quotaConsumed: 0, filtered: cached.report };
 
   const st = await circuitState();
-  if (st.open) return { results: [], circuitOpen: true, quotaConsumed: 0 };
+  if (st.open) return { results: [], circuitOpen: true, quotaConsumed: 0, filtered: newPoiFilterStats() };
 
   let quota = 0;
   const onCall: PoiCallHook = (api, ok, infocode, latencyMs) => {
@@ -253,6 +308,12 @@ export async function searchAmap(query: string, opts: SuggestOptions = {}): Prom
   //   异常冒到 API 层后，用户看到的是**误导性**的「找不到这个地点」。
   //   此处兜住所有底层异常 ⇒ 至少不会伪装成「搜不到」。
   let results: PoiSearchResult[] = [];
+  // ★ 2026-11-12（P3）：上游是否**明确答复过**（`ok:true`，哪怕 0 条）。
+  //   只有它为 true 才允许把空结果写进缓存 —— 用来区分「真的没有这个地点」与「这次没问出来」。
+  let upstreamOk = false;
+  // ★ 2026-11-12：地区过滤记账（两路合并到同一个报告 —— 用户关心的是「这次搜索一共剔了几条」，
+  //   不是「place/text 剔了几条、inputtips 又剔了几条」）。
+  const report = newPoiFilterStats();
   try {
     // ① 正式搜索
     const text = await placeText(query, {
@@ -261,8 +322,15 @@ export async function searchAmap(query: string, opts: SuggestOptions = {}): Prom
       offset: 20,
       onCall,
     });
+    upstreamOk = text.ok;
     results = text.ok
-      ? poisToResults(text.items, { source: "amap-text", userPos: opts.userPos, macauOnly: true, query })
+      ? poisToResults(text.items, {
+          source: "amap-text",
+          userPos: opts.userPos,
+          macauOnly: true,
+          query,
+          stats: report,
+        })
       : [];
 
     // ② 无结果时用 inputtips 补一次（设计：「必要时 inputtips」）
@@ -276,18 +344,43 @@ export async function searchAmap(query: string, opts: SuggestOptions = {}): Prom
           onCall,
         });
         if (tips.ok) {
-          results = tipsToResults(tips.items, { source: "amap-inputtips", userPos: opts.userPos, macauOnly: true, query });
+          // 只要有一条路成功，就算「问过了」；空结果可以缓存，失败的结果不行
+          upstreamOk = true;
+          const tipStats = newPoiFilterStats();
+          results = tipsToResults(tips.items, {
+            source: "amap-inputtips",
+            userPos: opts.userPos,
+            macauOnly: true,
+            query,
+            stats: tipStats,
+          });
+          mergePoiFilterStats(report, tipStats);
         }
       }
     }
   } catch (e) {
     console.warn("[poi-search] searchAmap 底层异常（已收敛为空结果）：", (e as Error).message);
     results = [];
+    // 异常 ⇒ 这次是「没问出来」，不是「确实没有」，绝不允许缓存
+    upstreamOk = false;
   }
 
   results = filterMacau(results).sort((a, b) => b.score - a.score);
-  if (results.length) cacheSet(key, results);
-  return { results, circuitOpen: false, quotaConsumed: quota };
+  // ★ 可观测：把「本次搜索剔掉了哪些非澳门条目」打进日志 —— 生产上排查「某地名搜不到」
+  //   时，一眼能看出是「高德没给」还是「被地区闸拦了」，不必靠复现猜。
+  if (hasFilterReport(report)) {
+    const names = report.samples.map((s) => `${s.name}(${s.reason})`).join("、");
+    const sus = report.suspects.map((s) => s.name).join("、");
+    console.log(
+      `[poi-search] 地区过滤 q="${query}" 非澳门 ${report.foreign} 条 / 归属不明 ${report.unknown} 条` +
+        `（原始 ${report.total} 条，保留 ${report.kept} 条）${names ? `：${names}` : ""}` +
+        `${sus ? ` ｜名称待确认：${sus}` : ""}`,
+    );
+  }
+  // ★ 2026-11-12（P3）：空结果也入缓存，但只用短 TTL；上游没答复成功（失败/超时/熔断）则不入。
+  if (results.length) cacheSet(key, results, report);
+  else if (upstreamOk) cacheSet(key, [], report, CACHE_TTL_EMPTY_MS);
+  return { results, circuitOpen: false, quotaConsumed: quota, filtered: report };
 }
 
 // ─────────────────────────── 编排（UI 只调这一个） ───────────────────────────
@@ -349,14 +442,28 @@ export async function suggest(
     // 同名 pending 行已由高德给出坐标 → 移出 pending，避免下拉里再出现一行「点搜索确认」
     resp.pending = local.pending.filter((p) => !amap.results.some((r) => r.name === p.name));
   } else if (!local.results.length) {
-    // 高德**空**、且本地也空 ⇒ 才报「找不到」；本地有命中时静默保留本地结果
-    resp.hint = amap.circuitOpen ? "amap_circuit" : "amap_empty";
-    resp.hintText = amap.circuitOpen ? HINT_AMAP_CIRCUIT : HINT_AMAP_EMPTY;
+    // ★ 2026-11-12：高德**空**时要分清三种原因 —— 别再把「被地区闸拦住」说成「搜不到」，
+    //   前者换多少种说法都搜不到（产品边界），后者才是用户输入的问题。
+    if (amap.circuitOpen) {
+      resp.hint = "amap_circuit";
+      resp.hintText = HINT_AMAP_CIRCUIT;
+    } else if (hasFilteredItems(amap.filtered)) {
+      resp.hint = "macau_only";
+      resp.hintText = HINT_MACAU_ONLY;
+    } else {
+      // 高德真的什么都没给（且本地也空）⇒ 才报「找不到」；本地有命中时静默保留本地结果
+      resp.hint = "amap_empty";
+      resp.hintText = HINT_AMAP_EMPTY;
+    }
   } else if (amap.circuitOpen) {
     // 本地有结果、但高德被熔断 ⇒ 明说「在线搜索暂不可用」，避免用户以为搜索坏了
     resp.hint = "amap_circuit";
     resp.hintText = HINT_AMAP_CIRCUIT;
   }
+  // ★ 2026-11-12：过滤报告**仅在有剔除时**下发（无剔除就不给这个键，原有响应形状不变）。
+  //   产品要求「说明已过滤掉的非澳门信息数量或范围」⇒ 让剔除可核对；`unknown`（归属不明）
+  //   与 `foreign`（明确非澳门）分开呈现，前者是留给人工确认的观察点。
+  if (hasFilterReport(amap.filtered)) resp.filtered = amap.filtered;
   return resp;
 }
 
