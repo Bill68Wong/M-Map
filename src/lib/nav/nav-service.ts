@@ -53,6 +53,16 @@ import { holidayFallbackOf, type ScheduleHideReason } from "@/lib/recommend/sche
 import { mainCodeOf } from "@/lib/recommend/segment-lookup";
 import type { AltBusView, OptionSeed, RecommendCard, SchoolZone } from "@/lib/recommend/types";
 import { candidatesToSeeds, chainToCandidates, pathsToCandidates, LOCAL_SUMMARY } from "./enumerate-nav";
+
+/**
+ * ★ 2026-11-12（P1）：「起终点过近 ⇒ 建议直接步行」的直线距离阈值（米）。
+ *
+ * 原实现把 `400` 写死在收尾处 `if (cards.length === 0)` 内层 —— 而本地补充策略会先把卡片凑满，
+ * 该分支对新请求**永不进入**，等于死代码（实测 `from == to` 仍返回 6 张「绕一圈回到原点」的卡）。
+ * 现在同一常量被**两处**引用：① 候选枚举之前的早退闸门；② 收尾兜底（chain 模式与边界情形）。
+ * 提到一处是为了防止两个字面量各自漂移（改一个忘一个 ⇒ 早退与归因口径不一致）。
+ */
+const NAV_TOO_CLOSE_M = 400;
 import { anchorMainFor } from "./anchor";
 import { siblingSeedsOf } from "./parallel-alts";
 import { applyWalkSeg, tierSpeedOverrideOf, type ChainStep, type TierOverride, type WalkOverride } from "./combo-params";
@@ -434,6 +444,64 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
   const anchorFromMain = anchorMainFor({ label: origin.label, lng: origin.lng, lat: origin.lat }, geo, st.routeIdx)?.main;
   const anchorToMain = anchorMainFor({ label: dest.label, lng: dest.lng, lat: dest.lat }, geo, st.routeIdx)?.main;
 
+  // ★ 2026-11-12（P1）：**起终点过近 ⇒ 候选枚举之前早退**（"走路比坐车快"，§11.4）。
+  //
+  //   为什么必须提前：原判据写在收尾处 `if (cards.length === 0)` 里，但本地补充策略
+  //   （请求期现场枚举）会先生成候选 ⇒ 卡片数永不为 0 ⇒ 该判据对新请求**永不进入**。
+  //   实测 `from == to`（直线 0 米）返回 6 张卡，卡 1 = 步行 113m → 關閘總站 → AP1 转 3A
+  //   → 回 M1 → 步行 113m，全程 41 分钟「绕一圈回到原点」——这是错误推荐，不是降级。
+  //
+  //   触发场景：GPS 抖动后点「到这里」、或直接选了身边的站（直线 < 阈值）。
+  //   收益：除纠正结论外，本轮还省掉高德调用 + 建模 + 排名（早退发生在 ② 本地 / ③ 高德 之前）。
+  //
+  //   `chain` 模式**不受约束**：自定义站链是用户的显式意图（300m 也可能是他要的走法），
+  //   与收尾处 `if (chainMode)` 分支保持同一取舍。
+  //
+  //   ⚠️ `degraded` 必须显式 `false`：下面收尾路径写的是 `!transitOk && !chainMode`，
+  //   而早退时 `transitOk` 尚未置位（恒 false）——若照抄该表达式会把「没调高德」
+  //   误标成「高德不可用、本地推算」，前端会挂上「本地推算」标签。
+  const straightM = haversineM(fromWgs, toWgs);
+  if (!chainMode && straightM < NAV_TOO_CLOSE_M) {
+    // 纯步行建议：直线 → 短距修正（无高德几何）→ ÷84（常速基准分钟），与收尾处同一口径
+    const corrected = fixWalkDistance(straightM, null).correctedM;
+    return {
+      fromSlug,
+      toSlug,
+      cards: [],
+      // colors 取已装载的 `st.routeColors`（空卡片时 UI 用不到，但契约要求非空映射）
+      colors: st.routeColors,
+      degraded: false,
+      emptyReason: "too_close",
+      nearbyWalkMin: Math.max(1, Math.round(walkMinutes(corrected))),
+      provenance: {},
+      excluded: [],
+      missed: [],
+      skipped_by_schedule: [],
+      // 未读 headway ⇒ 不存在「假期表不可用」，恒 false（不是"未知"）
+      holiday_fallback: false,
+      stats: {
+        staticMs,
+        transitMs: 0,
+        multiStrategyMs: 0,
+        transitOk: false,
+        transitFromCache: false,
+        transitCacheFallback: false,
+        amapPlans: 0,
+        bridged: 0,
+        dropped: [],
+        localCandidates: 0,
+        localKept: 0,
+        localSource: "none",
+        strategiesUsed: [],
+        chainMode,
+        liveMs: 0,
+        modelMs: 0,
+        ms: Date.now() - tAll,
+      },
+      generatedAt: nowMs,
+    };
+  }
+
   // ③ 高德（默认 strategy=0）
   const tTransit = Date.now();
   let transitOk = false;
@@ -726,11 +794,12 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
   let emptyReason: NavEmptyReason | undefined;
   let nearbyWalkMin: number | undefined;
   if (cards.length === 0) {
-    const straightM = haversineM(fromWgs, toWgs);
+    // ★ 2026-11-12（P1）：`straightM` 已在函数前部算过一次（早退闸门共用），此处直接复用，
+    //   不重复 haversine、也不引入 shadow（同函数内同名 const 易被 lint 拦）。
     if (chainMode) {
       // 自定义站链：不算「太近」；无候选 = 该链当前无实时/无解
       emptyReason = batch.live.size === 0 ? "no_live" : "no_candidate";
-    } else if (straightM < 400) {
+    } else if (straightM < NAV_TOO_CLOSE_M) {
       emptyReason = "too_close";
       // ★ 纯步行建议：直线 → 短距修正（无高德几何时）→ ÷84（常速基准分钟）
       const corrected = fixWalkDistance(straightM, null).correctedM;
