@@ -30,7 +30,8 @@ import { fixWalkDistance, walkCacheKey } from "../src/lib/amap/walk-fix";
 import { PLACE_COORDS, PLACE_SLUG_BY_ID } from "../src/lib/recommend/place-ids";
 
 try {
-  process.loadEnvFile("D:/Projects/University/Studio/musttoukou/.env");
+  // ★ 2026-11-12 修：原硬编码作者机路径 ⇒ 读 cwd/.env。
+  process.loadEnvFile();
 } catch {
   /* .env 不存在 */
 }
@@ -46,7 +47,7 @@ const LIMIT = Number(val("limit") ?? "0") || 0; // 0 = 不限
 const KIND = (val("kind") ?? "all") as "all" | "walk" | "transfer";
 const WALK_RADIUS_M = Number(val("radius") ?? "700") || 700;
 const TRANSFER_RADIUS_M = Number(val("transfer-radius") ?? "300") || 300;
-const OUT_DIR = "D:/Projects/University/Studio/musttoukou/.verify";
+const OUT_DIR = ".verify";
 
 const u = new URL(process.env.DATABASE_URL!);
 const pool = new Pool({

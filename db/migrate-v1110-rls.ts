@@ -28,7 +28,8 @@ import fs from "node:fs";
 import { Pool } from "pg";
 
 const APPLY = process.argv.includes("--apply");
-process.loadEnvFile("D:/Projects/University/Studio/musttoukou/.env");
+// ★ 2026-11-12 修：原硬编码作者机路径 ⇒ 读 cwd/.env（与 db/* 既有无参体例一致）。
+process.loadEnvFile();
 const u = new URL(process.env.DATABASE_URL!);
 const pool = new Pool({
   host: u.hostname, port: Number(u.port || 5432), database: u.pathname.slice(1),
@@ -49,7 +50,7 @@ async function main() {
   say(`   应用身份 = ${pgRole.rolname} · super=${pgRole.rolsuper} · bypassrls=${pgRole.rolbypassrls}`);
   if (!pgRole.rolbypassrls && !pgRole.rolsuper) {
     say("   🔴 该角色既不 bypassrls 也不是超级用户 → **开启 RLS 会让应用读不到数据**，禁止继续！");
-    fs.writeFileSync("D:/Projects/University/Studio/musttoukou/.verify/rls-migrate.out.txt", out.join("\n") + "\n", "utf8");
+    fs.writeFileSync(".verify/rls-migrate.out.txt", out.join("\n") + "\n", "utf8");
     await pool.end();
     process.exit(1);
   }
@@ -144,7 +145,7 @@ async function main() {
   for (const d of d2) say(`     ${d.grantor} · ${d.nspname ?? "(全局)"} · ${d.objtype} → ${d.acl}`);
 
   await pool.end();
-  fs.writeFileSync("D:/Projects/University/Studio/musttoukou/.verify/rls-migrate.out.txt", out.join("\n") + "\n", "utf8");
+  fs.writeFileSync(".verify/rls-migrate.out.txt", out.join("\n") + "\n", "utf8");
   process.exit(0);
 
 }

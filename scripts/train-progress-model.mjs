@@ -13,7 +13,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const ROOT = "D:/Projects/University/Studio/musttoukou";
+// ★ 2026-11-12 修：原硬编码作者机绝对路径（DIR/OUT 均指向仓库内 data/ 与 src/）。
+const ROOT = process.cwd();
 const DIR = path.join(ROOT, "data/tracking/analysis-20260927/progress");
 const OUT = path.join(ROOT, "src/lib/nav/progress-params.ts");
 

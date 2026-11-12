@@ -56,7 +56,8 @@ const ROTATE = process.argv.includes("--rotate");
 const REVOKE = process.argv.includes("--revoke");
 const ROLE = "dev_partner";
 
-process.loadEnvFile("D:/Projects/University/Studio/musttoukou/.env");
+// ★ 2026-11-12 修：原硬编码作者机路径 ⇒ 读 cwd/.env（与 db/* 既有无参体例一致）。
+process.loadEnvFile();
 const u = new URL(process.env.DATABASE_URL!);
 const PROJ_REF = u.username.includes(".") ? u.username.split(".")[1] : "";
 const POOLER_HOST = u.hostname;
@@ -133,7 +134,7 @@ async function main() {
     say("");
     say("（加 --apply 生效；加 --rotate 同时轮换密码）");
     await c.release(); await pool.end();
-    fs.writeFileSync("D:/Projects/University/Studio/musttoukou/.verify/rls-partner.out.txt", out.join("\n") + "\n", "utf8");
+    fs.writeFileSync(".verify/rls-partner.out.txt", out.join("\n") + "\n", "utf8");
     return;
   }
 
@@ -211,7 +212,7 @@ async function main() {
     await run("ROLLBACK");
     say(`   🔴 出错已回滚：${(e as Error).message}`);
     await c.release(); await pool.end();
-    fs.writeFileSync("D:/Projects/University/Studio/musttoukou/.verify/rls-partner.out.txt", out.join("\n") + "\n", "utf8");
+    fs.writeFileSync(".verify/rls-partner.out.txt", out.join("\n") + "\n", "utf8");
     return;
   }
 
@@ -245,7 +246,7 @@ async function main() {
   await c.release(); await pool.end();
 
   // ⚠️ 输出文件里**打码**，不落明文（pw 为 null 时无可打码，原样写出）
-  fs.writeFileSync("D:/Projects/University/Studio/musttoukou/.verify/rls-partner.out.txt",
+  fs.writeFileSync(".verify/rls-partner.out.txt",
     (pw ? out.map((l) => l.replace(pw, "****（已打码）")) : out).join("\n") + "\n", "utf8");
   console.log(pw ? "\n（写盘的日志里密码已打码）" : "\n（本次未生成密码）");
 }

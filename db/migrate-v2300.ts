@@ -27,7 +27,8 @@
 import fs from "node:fs";
 import { Pool } from "pg";
 
-const ROOT = "D:/Projects/University/Studio/musttoukou";
+// ★ 2026-11-12 修：原硬编码作者机绝对路径（BACKUP/OUT 均落在仓库根 .verify/）。
+const ROOT = process.cwd();
 const APPLY = process.argv.includes("--apply");
 const REVERT = process.argv.includes("--revert");
 const BACKUP = `${ROOT}/.verify/distance-corrections-backup-v2300-lrt-spw.json`;
