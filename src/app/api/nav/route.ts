@@ -120,6 +120,10 @@ export async function GET(req: NextRequest) {
         toSlug: r.toSlug,
         degraded: r.degraded,
         emptyReason: r.emptyReason ?? null,
+        // ★ 2026-11-12（P1）：补透传。`handleRecommend` 一直在读这个字段
+        //   （`useRecommend.ts:178` → `RouteResultPane.tsx:153` 的「步行约 X 分钟」），
+        //   但服务端从未下发 ⇒ 那句文案自上线起恒不显示（恒 null 的死代码）。
+        nearbyWalkMin: r.nearbyWalkMin ?? null,
         generatedAt: new Date(r.generatedAt).toISOString(),
         count: r.cards.length,
         cards: r.cards,
