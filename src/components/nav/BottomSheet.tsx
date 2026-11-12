@@ -34,7 +34,12 @@ export interface BottomSheetProps {
    */
   sectionRef?: RefObject<HTMLElement | null>;
   open: boolean;
-  pane: "recommend" | "detail";
+  /**
+   * 当前 pane。★ 2026-11-12（P1-b）：新增 `"walk"`（独立步行导航）。
+   * 本组件只把它写到 `data-sheet-state` 供观测，样式表**没有**按此值分支的选择器
+   * （已全仓核对 `data-sheet-state` 零命中）⇒ 新增取值不会改变任何既有外观。
+   */
+  pane: "recommend" | "detail" | "walk";
   detent: Detent;
   /** 当前 pane 的数据阶段（观测钩子 `data-phase`） */
   phase: "loading" | "ready" | "empty" | "failed";

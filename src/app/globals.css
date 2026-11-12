@@ -8390,6 +8390,16 @@ body[data-nav-phase]:not([data-nav-phase="off"]) .nav-brandbar__acts { display: 
 
 /* ── 跟随面板 ── */
 .walkpane { display: flex; flex-direction: column; gap: var(--space-1); }
+/* ★ 2026-11-12（P1-b）：独立步行导航（`too_close` ⇒ WalkOnlyPane）的头部。
+   只做「左右两端对齐 + 标题可截断」，不新建颜色/字号 Token —— 复用既有 h-title / t-label。 */
+.walkonly { display: flex; flex-direction: column; gap: var(--space-1); }
+.walkonly__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-bottom: var(--space-1);
+}
 .walkpane.is-fading { opacity: 0.35; transition: opacity var(--dur-instant) var(--ease-standard); }
 .walkpane__off {
   margin: 0 0 var(--space-1);

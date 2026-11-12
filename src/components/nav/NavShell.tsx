@@ -54,6 +54,12 @@ import { remainFromIdxOf, segRemainSecOf } from "@/lib/nav/track";
 
 /** 稳定的空 steps 引用（避免每次渲染新建数组 ⇒ 触发 hook 内部 effect 重跑） */
 const EMPTY_WALK_STEPS: WalkStep[] = [];
+/**
+ * ★ 2026-11-12（P1-b）：稳定的空「已走轨迹」引用 —— 独立步行导航不吃 GPS 跟随，
+ *   `donePath` 恒空。用常量而不是字面量 `[]`：字面量每次渲染都是新数组，
+ *   会让地图把步行折线判成"变了"而重画（视觉上闪烁，且白跑一段绘制）。
+ */
+const EMPTY_DONE_PATH: [number, number][] = [];
 /** 顶部跟随横幅高度（px）—— 与 `--walkturn-h` 同值，取景中带计算用（改多行须同步上调） */
 const WALKTURN_H = 64;
 
@@ -334,7 +340,23 @@ export default function NavShell({
 
   /* ── ★ 2026-09-23：单一 RouteSheet 宿主状态 ── */
   const [rsOpen, setRsOpen] = useState(false);
-  const [pane, setPane] = useState<"recommend" | "detail">("recommend");
+  /**
+   * ★ 2026-11-12（P1-b）：`"walk"` = 独立步行导航（`too_close` 进入）。
+   * 与 `"detail"` 的区别：detail 是**某个公交方案内**的步行段，walk 是**整条路线就是步行**。
+   */
+  const [pane, setPane] = useState<"recommend" | "detail" | "walk">("recommend");
+  /**
+   * ★ 2026-11-12（P1-b）：独立步行导航的 OD（`null` = 不在步行导航态）。
+   *
+   * 为什么不复用 `walkSeg`：那条链路绑在 ride 状态机上（boarding/riding/自动推进），
+   * 置 `"out"` 会连带触发上车判定与 track 渲染；此处**没有任何公交方案**，硬塞进去必然打架。
+   * 独立状态 + 独立的 `useWalkRoute` 实例，只共享取数与几何渲染。
+   */
+  const [walkOnly, setWalkOnly] = useState<{
+    from: { lng: number; lat: number };
+    to: { lng: number; lat: number };
+    destLabel: string;
+  } | null>(null);
   const [snap, setSnap] = useState<Detent>("full");
   /** ★ 2026-09-25：导航阶段镜像（决定 GPS 节流 15s/30s 与全屏化） */
   const [ridePhase, setRidePhase] = useState<RidePhase>("off");
@@ -967,6 +989,53 @@ export default function NavShell({
 
   /** 预取首/末两段（AC-08a：预取只有这 2 次；重算另有 2 次预算，见文件头） */
   const walkRoute = useWalkRoute(walkOds);
+  /**
+   * ★ 2026-11-12（P1-b）：独立步行导航的取数实例 —— 与上面的「方案内步行段」互不干扰。
+   *
+   * · OD 非空 ⇒ hook 自动预取（内部 effect 依赖 key），不需要显式 `ensure`；
+   * · 缓存是**模块级按坐标 key 共享**的 ⇒ 同一对起终点若在方案内也走过，这里直接命中，
+   *   不会二次消耗 `/api/nav/walk` 的配额（AC-08a 的 4 次预算不受影响，因为这是另一条链路）。
+   */
+  const walkOnlyOds = useMemo(
+    () => ({ out: walkOnly ? { from: walkOnly.from, to: walkOnly.to } : null, in: null }),
+    [walkOnly],
+  );
+  const walkOnlyRoute = useWalkRoute(walkOnlyOds);
+
+  /**
+   * ★ 2026-11-12（P1-b）：从 `too_close` 空态的「步行导航」进入独立步行。
+   * 起点与方案内步行**同源**（`fromPoint ?? walkStart`）：用户显式起点 > 锚站 > 我的位置，
+   * 避免出现「推荐说 100 米、步行导航按另一个起点算 300 米」的两套口径。
+   */
+  const startWalkOnly = useCallback(() => {
+    const a = fromPoint ?? walkStart;
+    if (!a || !to) return;
+    setWalkOnly({
+      from: { lng: a.lng, lat: a.lat },
+      to: { lng: to.lng, lat: to.lat },
+      destLabel: to.label,
+    });
+    setPane("walk");
+    setRsOpen(true);
+    setSnap("full");
+  }, [fromPoint, walkStart, to]);
+
+  const closeWalkOnly = useCallback(() => {
+    /* 只清 OD + 回推荐列表：`pane` 回 `recommend` ⇒ 用户仍在同一个面板上，
+       可以直接点「重试」或换个目的地，不必重新打开面板。 */
+    setWalkOnly(null);
+    setPane("recommend");
+  }, []);
+
+  /**
+   * ★ 2026-11-12（P1-b）：面板整体关闭 ⇒ 必须清掉独立步行 OD。
+   *   否则地图上的步行折线会留在地图上一路跟着用户（`walk` prop 不看 `rsOpen`），
+   *   下次打开面板时还会闪一下旧路线。这里补的是「点 X 关面板」这条路径
+   *   （pane 仍是 recommend 时 `contextClose` 走 else 分支，不经过 `closeWalkOnly`）。
+   */
+  useEffect(() => {
+    if (!rsOpen && walkOnly) setWalkOnly(null);
+  }, [rsOpen, walkOnly]);
   const hasWalkOut = !!walkOds.out;
   const hasWalkIn = !!walkOds.in;
   const activeWalk = walkSeg === "out" ? walkRoute.out : walkSeg === "in" ? walkRoute.in : null;
@@ -1762,8 +1831,18 @@ export default function NavShell({
     setSnap("half");
   }
 
-  /** ★ contextual 关闭：推荐→关面板（回可出发态）；详情→回推荐列表 */
+  /** ★ contextual 关闭：推荐→关面板（回可出发态）；详情→回推荐列表；独立步行→回推荐列表 */
   function contextClose() {
+    if (pane === "walk") {
+      /**
+       * ★ 2026-11-12（P1-b）：独立步行是**面板内的一个视图**，不是导航会话
+       *   ⇒ 关掉只回推荐列表（用户可能想换个目的地或重试），
+       *   **不能**走下面的 `releaseOrigin()`：那个分支会退回「可出发态」把起点也放掉，
+       *   而用户此时起点终点都在，只是不想走路了。
+       */
+      closeWalkOnly();
+      return;
+    }
     if (pane === "detail") {
       /**
        * ★ T1/T5：**离开详情 = 结束本次导航会话**，步行必须一起收干净。
@@ -2377,14 +2456,23 @@ export default function NavShell({
           overview={detailActive ? ov.legs : null}
           /* ★ v3.6.0 S5：步行三线（done/now/ahead）—— `walkSeg` 为空 ⇒ 传 null ⇒ 地图 0ms 移除 */
           walk={
-            walkActive && activeWalk?.phase === "ready"
+            /* ★ 2026-11-12（P1-b）：独立步行导航优先 —— 此时没有公交方案，
+               `walkSeg` 恒为空；两者不会同时为真（进入 walk pane 时 cards 为 0）。 */
+            walkOnly && walkOnlyRoute.out.phase === "ready"
               ? {
-                  steps: activeWalk.steps,
-                  currentIdx: Math.max(0, walkFollow.currentIdx),
-                  ratio: walkFollow.progress.ratio,
-                  donePath: donePathRef.current,
+                  steps: walkOnlyRoute.out.steps,
+                  currentIdx: 0,
+                  ratio: 0,
+                  donePath: EMPTY_DONE_PATH,
                 }
-              : null
+              : walkActive && activeWalk?.phase === "ready"
+                ? {
+                    steps: activeWalk.steps,
+                    currentIdx: Math.max(0, walkFollow.currentIdx),
+                    ratio: walkFollow.progress.ratio,
+                    donePath: donePathRef.current,
+                  }
+                : null
           }
           walkVersion={walkVersion}
           /**
@@ -2834,6 +2922,22 @@ export default function NavShell({
       <RouteSheet
         open={rsOpen}
         pane={pane}
+        /* ★ 2026-11-12（P1-b）：独立步行导航的数据出口 —— 与 `walk`（方案内步行段）互斥 */
+        walkOnly={
+          walkOnly
+            ? {
+                destLabel: walkOnly.destLabel,
+                phase: walkOnlyRoute.out.phase,
+                steps: walkOnlyRoute.out.steps,
+                totalDistM: walkOnlyRoute.out.stepsTotalM,
+                totalDurationS: walkOnlyRoute.out.totalDurationS,
+                err: walkOnlyRoute.out.err,
+                onRetry: () => walkOnlyRoute.reload("out"),
+              }
+            : null
+        }
+        onWalkClose={closeWalkOnly}
+        onWalkNav={startWalkOnly}
         detent={snap}
         topsPx={topsPx}
         onDetentChange={onDetent}

@@ -34,6 +34,14 @@ export interface RouteResultPaneProps {
   err: string;
   onRetry: () => void;
   onCardOpen: (card: RecommendCard, degraded: boolean) => void;
+  /**
+   * ★ 2026-11-12（P1-b）：`too_close` 空态的「步行导航」入口。
+   *
+   * 为什么必须有：`too_close` 的结论是「建议直接步行」，但旧面板只给一句
+   * 「步行约 N 分钟」+「重试」——用户被劝去走路，却没有任何可点的下一步，
+   * 等于把导航断在这里。缺省不传 ⇒ 不渲染按钮（其他空态/调用方零影响）。
+   */
+  onWalkNav?: () => void;
 }
 
 /**
@@ -73,7 +81,7 @@ function fmtClock(iso: string | null | undefined): string | null {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-export default function RouteResultPane({ phase, data, err, onRetry, onCardOpen }: RouteResultPaneProps) {
+export default function RouteResultPane({ phase, data, err, onRetry, onCardOpen, onWalkNav }: RouteResultPaneProps) {
   const empty = data && data.cards.length === 0 ? EMPTY_TEXT[data.emptyReason ?? "no_candidate"] : null;
   /**
    * ★ 2026-11-06：两种"时间相关"状态，**同一行槽位**互斥渲染（永远不会两行 / 不会留空位）：
@@ -155,14 +163,18 @@ export default function RouteResultPane({ phase, data, err, onRetry, onCardOpen 
                   步行约 <b>{data.nearbyWalkMin}</b> 分钟（比等车更快）。
                 </p>
               )}
-              <button
-                type="button"
-                className="btn btn--outline btn--sm"
-                onClick={onRetry}
-                style={{ marginTop: 10 }}
-              >
-                重试
-              </button>
+              {/* ★ 2026-11-12（P1-b）：「建议步行」必须给出**可执行的下一步**，
+                  否则用户被劝走路却无处可点。步行是这里的主行动 ⇒ 主按钮；重试降为次按钮。 */}
+              <div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "center" }}>
+                {data.emptyReason === "too_close" && onWalkNav ? (
+                  <button type="button" className="btn btn--primary btn--sm" onClick={onWalkNav}>
+                    步行导航
+                  </button>
+                ) : null}
+                <button type="button" className="btn btn--outline btn--sm" onClick={onRetry}>
+                  重试
+                </button>
+              </div>
             </div>
           ) : (
             <RecommendCards
