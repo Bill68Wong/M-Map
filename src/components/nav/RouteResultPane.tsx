@@ -23,8 +23,27 @@ import type { RecommendData } from "./useRecommend";
  */
 const EMPTY_TEXT: Record<string, { title: string; body: string }> = {
   too_close: { title: "距离很近", body: "起点与目的地很近，建议直接步行前往。" },
+  /**
+   * ★ 2026-11-13（P6）：**新增枚举必须在这里有文案**。
+   *   取值处是 `EMPTY_TEXT[data.emptyReason ?? "no_candidate"]` —— 没有这一条会返回
+   *   `undefined`，随后解构 `t.title` 抛错/渲染成空白块（无标题、无正文、无重试）。
+   *   这是 P6 最容易漏的一步，`scripts/test-nav-service-area.ts` 第 ⑥ 段用
+   *   「枚举全集必须有文案」兜住（静态扫本文件，不靠人肉 review）。
+   */
+  out_of_scope: {
+    title: "目的地不在澳门",
+    body: "本应用只提供澳门特别行政区内的公共交通。请把目的地换到澳门范围内再试。",
+  },
   no_live: { title: "暂时没有可用的班次", body: "现在这个时段，能到这个方向的线路大多已收班，或暂时查不到车。" },
   no_candidate: { title: "暂时没有可用方案", body: "换个起终点，或稍后重试。" },
+  /**
+   * ★ 2026-11-13（P6 顺带补）：`no_cover` 一直只存在于 `NavEmptyReason` 类型里，
+   *   文案表缺失且**当前没有任何生产点下发它**（grep 只有类型定义那一处）。
+   *   补上的理由不是" nicer"，而是这个组合一旦被启用就是**整块空白**：
+   *   取值处拿不到文案 → 解构 `undefined` → 无标题/无正文/无重试。
+   *   与其在门禁里为它开白名单（白名单本身就是下一个遗忘源），不如现在就补齐。
+   */
+  no_cover: { title: "附近没有可用的站点", body: "这个位置附近暂时没有查到澳门公交站，请换一个起终点再试。" },
   amap_unavailable: { title: "路网数据暂时不可用", body: "暂时没能算出可用路线。请稍后重试。" },
 };
 
