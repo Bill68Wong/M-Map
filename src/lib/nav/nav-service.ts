@@ -53,7 +53,7 @@ import { holidayFallbackOf, type ScheduleHideReason } from "@/lib/recommend/sche
 import { mainCodeOf } from "@/lib/recommend/segment-lookup";
 import type { AltBusView, OptionSeed, RecommendCard, SchoolZone } from "@/lib/recommend/types";
 import { candidatesToSeeds, chainToCandidates, pathsToCandidates, LOCAL_SUMMARY } from "./enumerate-nav";
-import { inMacauServiceArea } from "./macau-service-area";
+import { inMacauServiceArea, nearestEntryPoint } from "./macau-service-area";
 
 /**
  * ★ 2026-11-12（P1）：「起终点过近 ⇒ 建议直接步行」的直线距离阈值（米）。
@@ -194,6 +194,17 @@ export interface NavOutput {
   skipped_by_schedule: { route: string; boardMain: string; reason: ScheduleHideReason }[];
   /** ★ 2026-11-04（U8）：假期表不可用 ⇒ U8 本轮**未生效**（一律不因时间隐藏） */
   holiday_fallback: boolean;
+  /**
+   * ★ 2026-11-13（P6 收尾）：**起点在服务范围外时，实际采用的入境口岸**。
+   *
+   * 背景：从珠海/香港出发是真实需求，不能像目的地那样直接判 `out_of_scope`；
+   *   但拿珠海坐标去找"最近的澳门站"会跨海吸附到路环/氹仔某站，规划出现实走不通的路线。
+   *   ⇒ 改为锚到最近**入境口岸**（关闸/青茂/横琴/港珠澳/氹仔码头/外港码头），并在响应里
+   *   明确告诉 UI「出发点被换成了哪个口岸」，否则用户看到「步行 300m 到关闸总站」会莫名。
+   *
+   * `null` / 缺省 = 起点本来就在服务范围内（绝大多数请求）⇒ UI 不渲染任何提示。
+   */
+  origin_gate?: { name: string; lng: number; lat: number } | null;
   stats: NavStats;
   generatedAt: number;
 }
@@ -416,8 +427,6 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
   const zone = input.zone ?? null;
   const origin = input.origin;
   const dest = input.dest;
-  const fromWgs = gcj02ToWgs84({ lng: origin.lng, lat: origin.lat });
-  const toWgs = gcj02ToWgs84({ lng: dest.lng, lat: dest.lat });
 
   // ★ v2.3.0：自定义站链模式（`chain` 非空）—— 候选枚举按链约束、**不调高德**；
   //   `walk` / `tiers` 仅在此模式下生效（07 §2.2：chain 为空 = 现有路径，零改动）。
@@ -426,6 +435,27 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
   const tierOverride = chainMode ? tierSpeedOverrideOf(input.tiers) : undefined;
   // ★ B4（需求 8）：偏好三档（缺省 balanced）
   const prefs = input.prefs ?? PREF_DEFAULTS.balanced;
+
+  /**
+   * ★ 2026-11-13（P6 收尾）：**起点在服务范围外 ⇒ 锚到最近入境口岸**。
+   *
+   * 旧行为：起点不判范围，交给坐标吸附去找"最近的澳门站"。珠海长隆（对岸）会跨海吸到
+   *   路环或氹仔的某个站，再让高德规划「步行过海」—— 生成一条现实中走不通的路线。
+   *
+   * 为什么不直接判 `out_of_scope`：从珠海/香港过关来澳门是真实需求，砍掉等于把主路径
+   *   一起砍了（目的地判定可以砍，起点不行）。改为落到**通关必经的口岸**，
+   *   首段接驳才是真的；同时把落点写进 `origin_gate` 让 UI 明说，避免"我明明在长隆"。
+   *
+   * `chainMode` 不锚：显式站链是用户自己的意图，与 P1/P6 早退同一取舍。
+   */
+  const originGate =
+    !chainMode && !inMacauServiceArea(origin.lng, origin.lat)
+      ? nearestEntryPoint(origin.lng, origin.lat)
+      : null;
+  const fromWgs = gcj02ToWgs84(
+    originGate ? { lng: originGate.lng, lat: originGate.lat } : { lng: origin.lng, lat: origin.lat },
+  );
+  const toWgs = gcj02ToWgs84({ lng: dest.lng, lat: dest.lat });
 
   // ① 静态
   const tStatic = Date.now();
@@ -493,6 +523,8 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
       ms: Date.now() - tAll,
     },
     generatedAt: nowMs,
+    // 起点被锚到口岸时如实上报（UI 据此显示「已从 XX 出发」）；范围内 ⇒ null
+    origin_gate: originGate,
     ...extra,
   });
 
@@ -880,6 +912,7 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
       ms: Date.now() - tAll,
     },
     generatedAt: nowMs,
+    origin_gate: originGate,
   };
 }
 

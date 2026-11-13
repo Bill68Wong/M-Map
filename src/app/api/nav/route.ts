@@ -136,6 +136,10 @@ export async function GET(req: NextRequest) {
         //   （`useRecommend.ts:178` → `RouteResultPane.tsx:153` 的「步行约 X 分钟」），
         //   但服务端从未下发 ⇒ 那句文案自上线起恒不显示（恒 null 的死代码）。
         nearbyWalkMin: r.nearbyWalkMin ?? null,
+        // ★ 2026-11-13（P6 收尾）：起点在服务范围外时，服务端把出发点锚到了**入境口岸**。
+        //   必须透传：不透传 ⇒ 用户在珠海搜路线，看到「步行 300m 到关闸总站」却不知道
+        //   出发点已经被换掉了（`useRecommend` 据此渲染一行说明）。
+        origin_gate: r.origin_gate ?? null,
         generatedAt: new Date(r.generatedAt).toISOString(),
         count: r.cards.length,
         cards: r.cards,
