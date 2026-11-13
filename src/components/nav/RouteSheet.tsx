@@ -646,7 +646,14 @@ export default function RouteSheet({
                 </>
               ) : (
                 <span className="sheet-peek__meta">
-                  {walkOnly.phase === "failed" ? "步行路线暂时取不到" : "正在获取步行路线…"}
+                  {/* ★ 2026-11-13：`ready` + 零分步 = 起终点几乎重合（零距离早退）。
+                      旧三元只分 failed / 其余，会把「已经到目的地了」显示成「正在获取步行路线…」——
+                      永久转圈式的假加载，比留白更容易被当成卡死。 */}
+                  {walkOnly.phase === "failed"
+                    ? "步行路线暂时取不到"
+                    : walkOnly.phase === "ready"
+                      ? "距离很近 · 无需步行"
+                      : "正在获取步行路线…"}
                 </span>
               )}
               <Icon name="caretUp" size={20} className="sheet-peek__chev" />

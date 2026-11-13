@@ -67,6 +67,15 @@ export default function WalkOnlyPane({
   const remainM = Math.max(0, totalDistM - (cur?.cumStartM ?? 0));
   const arrived = phase === "ready" && steps.length > 0 && currentIdx >= steps.length;
   const minutes = Math.max(1, Math.round(totalDurationS / 60));
+  /**
+   * ★ 2026-11-13（P1-b 补）：**取数成功但没有分步**。
+   *   唯一来源是 `/api/nav/walk` 的「零距离/极短距离早退」（< 1 米 ⇒ `ok:true` + 空 `steps`，
+   *   刻意不打上游，见 route.ts 文件头「零距离/极短距离」段）。
+   *   旧版只认 `steps.length > 0` 才渲染正文 ⇒ 此时整个面板只剩标题，正文一片空白，
+   *   用户刚被 `too_close` 劝来走路，点进来看到空壳，比没有入口更糟。
+   *   ⇒ 必须给一句「已经在这里了」的结论，而不是让面板静默。
+   */
+  const zeroWalk = phase === "ready" && steps.length === 0;
 
   return (
     <div className="walkonly">
@@ -104,6 +113,20 @@ export default function WalkOnlyPane({
           </p>
           <button type="button" className="btn btn--outline btn--sm" onClick={onRetry} style={{ marginTop: 10 }}>
             重试
+          </button>
+        </div>
+      ) : null}
+
+      {/* ★ 取数成功但零分步（起终点几乎重合）：给结论，不留空面板。见 `zeroWalk` 注释。 */}
+      {zeroWalk ? (
+        <div className="rc-empty rc-empty--neutral" style={{ marginTop: 4 }}>
+          <p className="h-title">已经到目的地了</p>
+          <p className="t-body t-muted" style={{ marginTop: 6, lineHeight: 1.7 }}>
+            当前位置与目的地几乎重合，不需要步行路线。
+            {totalDistM >= 1 ? ` 直线约 ${Math.round(totalDistM)} 米，沿地图上的连线走过去即可。` : ""}
+          </p>
+          <button type="button" className="btn btn--outline btn--sm" onClick={onClose} style={{ marginTop: 10 }}>
+            回到地图
           </button>
         </div>
       ) : null}
