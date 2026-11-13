@@ -185,6 +185,13 @@ function cacheGet(key: string): { rows: CachedPoi[]; report: PoiFilterReport } |
     amapCache.delete(key);
     return null;
   }
+  // 形态不符（本次改动前写入的旧条目，或将来字段再变）⇒ 当作未命中丢弃。
+  // 读缓存这段不在 try 里，一旦 `e.rows` 为 undefined 会直接冒到 API 变成 500，
+  // 为一条过时缓存把整个搜索打挂不值得。
+  if (!Array.isArray(e.rows)) {
+    amapCache.delete(key);
+    return null;
+  }
   return { rows: e.rows, report: e.report };
 }
 function cacheSet(
