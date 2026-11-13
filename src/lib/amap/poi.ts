@@ -484,6 +484,21 @@ const REL_BASE: Record<number, number> = { 3: 900, 2: 650, 1: 400, 0: 150 };
 const REL_PROX_MAX = 100;
 
 /**
+ * 档内「距离越近分越高」的加成（0~100）。
+ *
+ * ★ 2026-11-13（P2）：**必须导出**。`toResults` 首次直连时用它算分，
+ *   `poi-search#rescoreCachedRows` 命中缓存后按**当前位置**重算时也用它。
+ *   两处若各写一份公式，迟早漂移 —— 表现为「同一个词，第一次搜和第二次搜排序不同」，
+ *   且极难复现（取决于是否命中缓存）。
+ *
+ * 该函数是 `score` 里**唯一**与用户位置相关的项，因此 `relBase = score - dirProxBonus(distM)`
+ * 可以精确逆推，这是「缓存只存位置无关分」的前提。
+ */
+export function dirProxBonus(distM?: number): number {
+  return distM !== undefined ? Math.max(0, REL_PROX_MAX - distM / 50) : 0;
+}
+
+/**
  * ★ 【7③】POI 类别权重：**地标 / 酒店 / 建筑 优先于「公交站」**。
  *
  * 产品实测（2026-09-19）：搜「新葡京」，高德 `place/text` 原始返回**第一个是公交站**
@@ -601,8 +616,7 @@ function toResults(
     let score: number;
     if (opts.query) {
       // ★ 相关性优先：档位基础分 + 类别加成（地标/酒店/建筑优先于公交站）+ 档内距离加成
-      const near = distM !== undefined ? Math.max(0, REL_PROX_MAX - distM / 50) : 0;
-      score = REL_BASE[relevanceTier(queryNorm, r.name)] + poiCategoryBonus(r.typecode) + near;
+      score = REL_BASE[relevanceTier(queryNorm, r.name)] + poiCategoryBonus(r.typecode) + dirProxBonus(distM);
     } else {
       // 旧口径（距离优先）——向后兼容
       score = (opts.baseScore ?? 1) + (distM !== undefined ? Math.max(0, 1000 - distM / 10) : 0);

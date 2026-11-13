@@ -46,6 +46,7 @@
 import {
   ADCODE_MACAU,
   classifyMacau,
+  dirProxBonus,
   hasFilterReport,
   hasFilteredItems,
   inputtips,
@@ -56,7 +57,7 @@ import {
   tipsToResults,
   type PoiCallHook,
 } from "@/lib/amap/poi";
-import type { LatLng } from "@/lib/amap/coord";
+import { haversineM, type LatLng } from "@/lib/amap/coord";
 import type {
   PoiFilterReport,
   PoiPendingMatch,
@@ -124,26 +125,71 @@ const CACHE_TTL_MS = 10 * 60_000;
  */
 const CACHE_TTL_EMPTY_MS = 60_000;
 const CACHE_MAX = 300;
-/** ★ 2026-11-12：缓存里一并存**过滤报告** —— 否则「命中缓存」时 `filtered` 会凭空消失，
- *  同一查询两次回车给出两种报告，产品要求的「过滤数量可核对」就不可信了。
- *  `ttl` 逐条目存放：正常结果 10 分钟，空结果只有 60s，两者共用同一张表与淘汰策略。 */
+/**
+ * ★ 2026-11-13（P2）：缓存条目**不再直接存打分后的结果**。
+ *
+ * 旧实现把 `PoiSearchResult[]` 整个存下来，而其中的 `distM` / `score` 是按**下单那一刻的
+ * 用户位置**预算好的 ⇒ 在关闸搜「议事亭前地」得到 2601m，走到氹仔（真实 5706m）再搜同一个词，
+ * 命中缓存后仍然显示 2601m，排序也是按关闸的位置排的。这就是「跨位置串味」。
+ *
+ * 现改为：存**裸 POI**（名字/坐标/类别等位置无关字段）+ `relBase`（位置无关分）。
+ * 命中时按当前位置重算 `distM` 与 `score`（见 `rescoreCachedRows`）。
+ * 代价是每次命中多一次 haversine 与排序，量级可忽略。
+ *
+ * `ttl` 逐条目存放：正常结果 10 分钟，空结果只有 60s，两者共用同一张表与淘汰策略。
+ */
+export interface CachedPoi {
+  /** 裸 POI：除 distM / score 外的字段都与位置无关 */
+  poi: PoiSearchResult;
+  /** 位置无关分 = score - dirProxBonus(distM)；重算时再加当前距离加成 */
+  relBase: number;
+}
+
 const amapCache = new Map<
   string,
-  { at: number; ttl: number; results: PoiSearchResult[]; report: PoiFilterReport }
+  { at: number; ttl: number; rows: CachedPoi[]; report: PoiFilterReport }
 >();
 
-function cacheGet(key: string): { results: PoiSearchResult[]; report: PoiFilterReport } | null {
+/** 写入缓存前把「打分结果」拆成「位置无关部分」 */
+export function toCachedRows(results: PoiSearchResult[]): CachedPoi[] {
+  return results.map((poi) => ({
+    poi,
+    // `toResults` 的 score = 档位 + 类别 + dirProxBonus(distM) ⇒ 减去距离项即得位置无关分。
+    // 用存下来的（已取整的）distM 反推，误差 ≤0.01 分，不影响排序。
+    relBase: poi.score - dirProxBonus(poi.distM),
+  }));
+}
+
+/**
+ * 命中缓存后按**当前**用户位置重算距离与分数。
+ *
+ * @param userPos 当前位置；缺省时 `distM` 一律置空 —— 绝不能沿用它处算出来的旧距离，
+ *                那正是本项要修的缺陷。
+ */
+export function rescoreCachedRows(rows: CachedPoi[], userPos?: LatLng): PoiSearchResult[] {
+  const out = rows.map(({ poi, relBase }) => {
+    const distM = userPos
+      ? Math.round(haversineM(userPos, { lng: poi.lng, lat: poi.lat }))
+      : undefined;
+    return { ...poi, distM, score: relBase + dirProxBonus(distM) };
+  });
+  // 与 `searchAmap` 首次直连时的排序口径一致（同分保持缓存原序，sort 稳定）
+  out.sort((a, b) => b.score - a.score);
+  return out;
+}
+
+function cacheGet(key: string): { rows: CachedPoi[]; report: PoiFilterReport } | null {
   const e = amapCache.get(key);
   if (!e) return null;
   if (Date.now() - e.at > e.ttl) {
     amapCache.delete(key);
     return null;
   }
-  return { results: e.results, report: e.report };
+  return { rows: e.rows, report: e.report };
 }
 function cacheSet(
   key: string,
-  results: PoiSearchResult[],
+  rows: CachedPoi[],
   report: PoiFilterReport,
   ttl = CACHE_TTL_MS,
 ): void {
@@ -158,7 +204,7 @@ function cacheSet(
     }
     if (oldestKey) amapCache.delete(oldestKey);
   }
-  amapCache.set(key, { at: Date.now(), ttl, results, report });
+  amapCache.set(key, { at: Date.now(), ttl, rows, report });
 }
 
 // ─────────────────────────── 第一段：本地（0 配额） ───────────────────────────
@@ -292,7 +338,15 @@ export interface AmapSuggest {
 export async function searchAmap(query: string, opts: SuggestOptions = {}): Promise<AmapSuggest> {
   const key = normalizeQuery(query);
   const cached = cacheGet(key);
-  if (cached) return { results: cached.results, circuitOpen: false, quotaConsumed: 0, filtered: cached.report };
+  // ★ 2026-11-13（P2）：命中缓存**必须按当前位置重算**距离与排序，不能直接返回缓存里的 distM。
+  if (cached) {
+    return {
+      results: rescoreCachedRows(cached.rows, opts.userPos),
+      circuitOpen: false,
+      quotaConsumed: 0,
+      filtered: cached.report,
+    };
+  }
 
   const st = await circuitState();
   if (st.open) return { results: [], circuitOpen: true, quotaConsumed: 0, filtered: newPoiFilterStats() };
@@ -378,7 +432,8 @@ export async function searchAmap(query: string, opts: SuggestOptions = {}): Prom
     );
   }
   // ★ 2026-11-12（P3）：空结果也入缓存，但只用短 TTL；上游没答复成功（失败/超时/熔断）则不入。
-  if (results.length) cacheSet(key, results, report);
+  // ★ 2026-11-13（P2）：写入的是「位置无关形态」，命中后按调用方当前位置重算。
+  if (results.length) cacheSet(key, toCachedRows(results), report);
   else if (upstreamOk) cacheSet(key, [], report, CACHE_TTL_EMPTY_MS);
   return { results, circuitOpen: false, quotaConsumed: quota, filtered: report };
 }
