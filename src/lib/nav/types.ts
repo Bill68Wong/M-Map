@@ -514,6 +514,7 @@ export type NavEmptyReason =
   | "no_candidate" // 找不到可用路线
   | "no_live" // 无在途车 / 已收班
   | "too_close" // 距离过近 → 建议步行
+  | "out_of_scope" // 目的地在澳门服务范围之外（★ 2026-11-13 · P6）
   | "no_cover" // 附近无站点（郊区）
   | "amap_unavailable"; // 高德不可用（降级仍无结果）
 

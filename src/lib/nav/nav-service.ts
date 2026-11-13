@@ -53,6 +53,7 @@ import { holidayFallbackOf, type ScheduleHideReason } from "@/lib/recommend/sche
 import { mainCodeOf } from "@/lib/recommend/segment-lookup";
 import type { AltBusView, OptionSeed, RecommendCard, SchoolZone } from "@/lib/recommend/types";
 import { candidatesToSeeds, chainToCandidates, pathsToCandidates, LOCAL_SUMMARY } from "./enumerate-nav";
+import { inMacauServiceArea } from "./macau-service-area";
 
 /**
  * ★ 2026-11-12（P1）：「起终点过近 ⇒ 建议直接步行」的直线距离阈值（米）。
@@ -444,6 +445,57 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
   const anchorFromMain = anchorMainFor({ label: origin.label, lng: origin.lng, lat: origin.lat }, geo, st.routeIdx)?.main;
   const anchorToMain = anchorMainFor({ label: dest.label, lng: dest.lng, lat: dest.lat }, geo, st.routeIdx)?.main;
 
+  const straightM = haversineM(fromWgs, toWgs);
+
+  /**
+   * 「尚未调用任何上游就早退」的响应骨架（P1 过近 / P6 范围外共用）。
+   *
+   * 为什么抽出来：这两条早退的字段**除 `emptyReason`/`nearbyWalkMin` 外完全一致**。
+   *   复制两份的代价不是这 20 行，而是以后每加一个 `stats` 字段都要记得改两处 ——
+   *   漏一处的表现是「某些空态下 stats 缺键」，而 JSON 很难在测试里立刻发现。
+   *
+   * ⚠️ `degraded` 必须显式 `false`：下面收尾路径写的是 `!transitOk && !chainMode`，
+   *   而早退时 `transitOk` 尚未置位（恒 false）——若照抄该表达式会把「没调高德」
+   *   误标成「高德不可用、本地推算」，前端会挂上「本地推算」标签。
+   * ⚠️ `stats` 其余字段恒 0 是**事实**而非占位：早退确实没调高德、没建模、没排名。
+   */
+  const earlyExit = (emptyReason: NavEmptyReason, extra: Partial<NavOutput> = {}): NavOutput => ({
+    fromSlug,
+    toSlug,
+    cards: [],
+    // colors 取已装载的 `st.routeColors`（空卡片时 UI 用不到，但契约要求非空映射）
+    colors: st.routeColors,
+    degraded: false,
+    emptyReason,
+    provenance: {},
+    excluded: [],
+    missed: [],
+    skipped_by_schedule: [],
+    // 未读 headway ⇒ 不存在「假期表不可用」，恒 false（不是"未知"）
+    holiday_fallback: false,
+    stats: {
+      staticMs,
+      transitMs: 0,
+      multiStrategyMs: 0,
+      transitOk: false,
+      transitFromCache: false,
+      transitCacheFallback: false,
+      amapPlans: 0,
+      bridged: 0,
+      dropped: [],
+      localCandidates: 0,
+      localKept: 0,
+      localSource: "none",
+      strategiesUsed: [],
+      chainMode,
+      liveMs: 0,
+      modelMs: 0,
+      ms: Date.now() - tAll,
+    },
+    generatedAt: nowMs,
+    ...extra,
+  });
+
   // ★ 2026-11-12（P1）：**起终点过近 ⇒ 候选枚举之前早退**（"走路比坐车快"，§11.4）。
   //
   //   为什么必须提前：原判据写在收尾处 `if (cards.length === 0)` 里，但本地补充策略
@@ -456,50 +508,28 @@ export async function planNav(pool: Pool, input: NavInput): Promise<NavOutput> {
   //
   //   `chain` 模式**不受约束**：自定义站链是用户的显式意图（300m 也可能是他要的走法），
   //   与收尾处 `if (chainMode)` 分支保持同一取舍。
-  //
-  //   ⚠️ `degraded` 必须显式 `false`：下面收尾路径写的是 `!transitOk && !chainMode`，
-  //   而早退时 `transitOk` 尚未置位（恒 false）——若照抄该表达式会把「没调高德」
-  //   误标成「高德不可用、本地推算」，前端会挂上「本地推算」标签。
-  const straightM = haversineM(fromWgs, toWgs);
   if (!chainMode && straightM < NAV_TOO_CLOSE_M) {
     // 纯步行建议：直线 → 短距修正（无高德几何）→ ÷84（常速基准分钟），与收尾处同一口径
     const corrected = fixWalkDistance(straightM, null).correctedM;
-    return {
-      fromSlug,
-      toSlug,
-      cards: [],
-      // colors 取已装载的 `st.routeColors`（空卡片时 UI 用不到，但契约要求非空映射）
-      colors: st.routeColors,
-      degraded: false,
-      emptyReason: "too_close",
-      nearbyWalkMin: Math.max(1, Math.round(walkMinutes(corrected))),
-      provenance: {},
-      excluded: [],
-      missed: [],
-      skipped_by_schedule: [],
-      // 未读 headway ⇒ 不存在「假期表不可用」，恒 false（不是"未知"）
-      holiday_fallback: false,
-      stats: {
-        staticMs,
-        transitMs: 0,
-        multiStrategyMs: 0,
-        transitOk: false,
-        transitFromCache: false,
-        transitCacheFallback: false,
-        amapPlans: 0,
-        bridged: 0,
-        dropped: [],
-        localCandidates: 0,
-        localKept: 0,
-        localSource: "none",
-        strategiesUsed: [],
-        chainMode,
-        liveMs: 0,
-        modelMs: 0,
-        ms: Date.now() - tAll,
-      },
-      generatedAt: nowMs,
-    };
+    return earlyExit("too_close", { nearbyWalkMin: Math.max(1, Math.round(walkMinutes(corrected))) });
+  }
+
+  // ★ 2026-11-13（P6）：**目的地不在澳门服务范围 ⇒ 明确归因**，不再伪装成「已收班」。
+  //
+  //   旧行为：目的地填珠海长隆 → `cards: 0 + emptyReason:"no_live"`，文案「暂时没有可用的班次
+  //   …线路大多已收班」⇒ 用户以为等一会儿就有车，实际**永远不会有**。
+  //
+  //   为什么排在 too_close **之后**：起终点都在珠海且相距 100m 时，「建议直接步行」仍然是
+  //   用户眼前能执行的正确结论（人确实走两步就到），不必先教他"澳门不覆盖"。
+  //   两个判据都成立时，按「能立刻执行」的那条给。
+  //
+  //   为什么**只判目的地、不判起点**：从珠海/香港出发前往澳门是真实需求（过关后接着坐车），
+  //   起点在界外不应阻断规划。`anchorToMain` 会把界外起点锚到最近的澳门站点 —— 那是既有
+  //   行为，不在本项范围内改动（改了会动到「从珠海来」这条主路径）。
+  //
+  //   `chain` 模式同样不判：用户显式挑的站都在库内，与 P1 早退的 `!chainMode` 取舍一致。
+  if (!chainMode && !inMacauServiceArea(dest.lng, dest.lat)) {
+    return earlyExit("out_of_scope");
   }
 
   // ③ 高德（默认 strategy=0）
