@@ -34,6 +34,7 @@
 import { NextRequest } from "next/server";
 import { fetchWalkingSteps } from "@/lib/amap/walking";
 import { API_ERROR, errorResponse } from "@/lib/http/errors";
+import { COORD_LIMITS } from "@/lib/nav/query-params";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -62,10 +63,10 @@ export async function GET(req: NextRequest) {
 
   // 主用 fromLng/fromLat/toLng/toLat；oLng/oLat/dLng/dLat 为架构文档 §4.1.1 的旧写法，
   // 保留兼容，**新代码不得再用**（两套都传时以 from*/to* 为准）。
-  const fromLng = coordOf(pick(sp, "fromLng", "oLng"), 180);
-  const fromLat = coordOf(pick(sp, "fromLat", "oLat"), 90);
-  const toLng = coordOf(pick(sp, "toLng", "dLng"), 180);
-  const toLat = coordOf(pick(sp, "toLat", "dLat"), 90);
+  const fromLng = coordOf(pick(sp, "fromLng", "oLng"), COORD_LIMITS.lng);
+  const fromLat = coordOf(pick(sp, "fromLat", "oLat"), COORD_LIMITS.lat);
+  const toLng = coordOf(pick(sp, "toLng", "dLng"), COORD_LIMITS.lng);
+  const toLat = coordOf(pick(sp, "toLat", "dLat"), COORD_LIMITS.lat);
 
   if (fromLng === null || fromLat === null || toLng === null || toLat === null) {
     // 不区分"缺哪个参数"—— 参数名属内部契约，回给客户端只会变成泄漏面

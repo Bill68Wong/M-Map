@@ -17,7 +17,7 @@
  * 跑法：`node node_modules/tsx/dist/cli.mjs scripts/test-nav-params.ts`
  *      （或 `npm run test:nav-params`）
  */
-import { numOf } from "../src/lib/nav/query-params";
+import { coordInRange, numOf } from "../src/lib/nav/query-params";
 
 let fail = 0;
 let pass = 0;
@@ -69,6 +69,26 @@ console.log("\n── ④ 回归：`?fromLng=&fromLat=&toLng=&toLat=` 四个全 
   else fail++;
   console.log(`${ok ? "OK  " : "FAIL"} 四值 = ${JSON.stringify(all)}${ok ? "" : "  (期望全 null)"}`);
 }
+
+/* ── ⑤ P5：世界坐标范围校验 ────────────────────────────────────────────── */
+console.log("\n── ⑤ coordInRange（P5：非法坐标必须 400，不能伪装成「高德不可用」）──");
+function inr(lng: number, lat: number, expected: boolean, label: string): void {
+  const actual = coordInRange(lng, lat);
+  const ok = actual === expected;
+  if (ok) pass++;
+  else fail++;
+  console.log(`${ok ? "OK  " : "FAIL"} ${label}  → ${actual}` + (ok ? "" : `  (期望 ${expected})`));
+}
+inr(113.5491, 22.2153, true, "澳门关闸坐标");
+inr(113.5432, 22.1987, true, "澳门半岛坐标");
+inr(113.5491, 999, false, "`fromLat=999`（P5 事故样本）");
+inr(181, 22.2153, false, "`fromLng=181` 越经度上限");
+inr(113.5491, 90.0001, false, "纬度 90.0001 越界（超 0.0001 也要拦）");
+inr(180, 90, true, "**边界 (180, 90) 合法**（含边界）");
+inr(-180, -90, true, "**边界 (-180, -90) 合法**（含边界）");
+inr(0, 0, true, "`(0, 0)` 在物理范围内 ⇒ 放行（是否在澳门属 P6，不在此处拦）");
+inr(Number.NaN, 22.2, false, "`NaN` 越界");
+inr(113.5, Number.POSITIVE_INFINITY, false, "`Infinity` 越界");
 
 console.log(`\n通过 ${pass} / 失败 ${fail}`);
 process.exit(fail ? 1 : 0);

@@ -40,7 +40,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
 import { planNav } from "@/lib/nav/nav-service";
 import { decodeChain, decodeTiers, decodeWalk, type ChainStep, type TierOverride, type WalkOverride } from "@/lib/nav/combo-params";
-import { pointOf } from "@/lib/nav/query-params";
+import { coordInRange, pointOf } from "@/lib/nav/query-params";
 import { NAV_LIMIT_DEFAULT } from "@/lib/recommend/limits";
 import { parsePrefs } from "@/lib/recommend/score";
 import { SCHOOL_ZONES, type SchoolZone } from "@/lib/recommend/types";
@@ -64,6 +64,18 @@ export async function GET(req: NextRequest) {
   if (!origin || !dest) {
     // ★ v3.6.0（AC-50d）：`error` 只允许六枚举。`useRecommend` 已用 `errorTextOf(j.error)`
     //   翻译后渲染 ⇒ 回枚举才是与前端契约一致（旧中文串会被当未知值回落）。
+    return NextResponse.json(
+      { ok: false, error: API_ERROR.bad_request },
+      { status: 400 },
+    );
+  }
+
+  // ★ 2026-11-13（P5）：世界坐标范围校验 —— **必须在 `planNav` 之前**。
+  //   旧行为：`fromLat=999` 能通过 `pointOf`（只是有限数），一路打高德，上游失败后
+  //   归一成 `200 + degraded + emptyReason:"amap_unavailable"` ⇒ 把「调用方传了
+  //   不存在的坐标」误报成「高德不可用」，排查方向直接跑偏。
+  //   这里只挡物理上不可能的坐标；「是否在澳门」是 P6 的 `out_of_scope`，两者不合并。
+  if (!coordInRange(origin.lng, origin.lat) || !coordInRange(dest.lng, dest.lat)) {
     return NextResponse.json(
       { ok: false, error: API_ERROR.bad_request },
       { status: 400 },
