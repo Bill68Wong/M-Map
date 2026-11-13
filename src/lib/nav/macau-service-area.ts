@@ -15,19 +15,37 @@
  *     见 `amap/district.ts` 该常量注释）—— 直接复用，不在此重复描一遍。
  *   抓取日期 **2026-11-13**。**不新增任何自绘边界**，符合仓库「边界只取高德官方数据」口径。
  *
- *   ⚠️ 环外还叠了一层 250m 距离容差，**不是**为了让边界变模糊，而是实测必需：
- *      高德澳门环在关闸/拱北一段沿边检分界线收口，而关闸广场与巴士总站（GCJ-02
- *      `113.5491, 22.2153`）在环外 **148m** —— 不加容差，最常用的起点会被判「不在澳门」。
- *      实测分离度（对官方环的最短距离）：
- *        关闸巴士总站 148m（须在内）/ 关闸边检大楼 102m / 横琴口岸澳方区 878m（靠手工环）
- *        珠海长隆 **1639m** / 珠海拱北口岸 664m / 珠海横琴镇 2098m（均须在外）
- *      ⇒ 250m 能收住关闸、又离长隆/拱北足够远（余量 ≥400m）。
+ * ── 容差 200m 的依据（★ 2026-11-13 复测后从 250m 下调，别看错）─────────────
+ *   **官方环本身已经足够准**：用高德 POI 实测 24 个边缘地点（关闸总站/关闸边检大楼/
+ *   青洲/青洲坊/九澳/黑沙/竹湾/石排湾/机场/科学馆/妈阁/氹仔码头/港珠澳澳门口岸…）
+ *   **全部落在官方环内**，一个都不需要容差。原先取 250m 是因为早期样本用了**估的坐标**
+ *   （把关闸总站写成 `113.5491, 22.2153`，与真实值 `113.553795, 22.212162` 差 ~500m），
+ *   于是"关闸在环外 148m"是个假象。真实值请以本段下表为准，别再引旧数。
+ *
+ *   复测分离度（对**官方环**的最短距离，GCJ-02）：
+ *     澳门侧：全部 POI 环内（0m）
+ *     珠海侧：湾仔口岸 **440m** / 横琴口岸 519m / 拱北口岸 664m / 长隆 1639m
+ *   ⇒ 200m 只用于兜底「站在填海地块边缘、环外几十米」的情况，离最近的珠海点（440m）
+ *     还有 240m 余量。**调大容差会先把珠海湾仔口岸吞进来**，这就是那条钉子。
+ *
+ * ── 手工环零容差（★ 2026-11-13 收紧）──────────────────────────────────
+ *   `HENGQIN_PORT_RING` 是**围网边界**，环外 45m 就是珠海横琴镇 —— 给它容差等于把
+ *   口岸对面的珠海市区算成澳门。旧实现把手工环一起并入 `distToRingsM(...) <= PAD`，
+ *   于是「珠海横琴镇」被判在内（实测环外 45m）⇒ 用户搜珠海路线仍得到「已收班」。
+ *   现在手工环只做**严格环内**判定，不参与容差。
+ *
+ * ── 已知上限（数据精度所限，不是实现缺陷）──────────────────────────────
+ *   · 手工环是 8 点粗多边形（`lng 113.538~113.552 / lat 22.135~22.147`），把横琴口岸
+ *     **珠海一侧**（POI `113.549232, 22.138106`，与澳门口岸区仅隔 90m）也圈在内 ⇒ 判 IN。
+ *     要分开须重新标定围网，那会牵动 `district.ts` 的地图遮罩，超出本项范围。
+ *   · 官方环 200m 内的一水之隔仍判 IN（如紧贴海岸的珠海点）。判定的用途是给用户一句
+ *     正确的解释，不是画边界；且最近的真实珠海 POI 在 440m，已在容差外。
  *
  * ── 口径边界（有意不做的事）────────────────────────────────────────────
  *   · 这是**服务范围**判定，不替代 P5 的物理范围校验（`|lat|≤90` 等）——
  *     非法坐标在 route 层就 400 了，不会走到这里；
- *   · 不做"是否与澳门陆路相连"判断。容差内隔着窄水道的点会被判在内，属可接受误差：
- *     本判定的用途只是给用户一句正确的解释，不是画边界。
+ *   · **起点不参与 `out_of_scope` 判定**（从珠海/香港过关来澳门是真实需求），但会
+ *     锚定到最近**入境口岸**，见本文件 `MACAU_ENTRY_POINTS` 与 `nav-service` 的用法。
  */
 import { HENGQIN_PORT_RING, isInsideRings, type Ring } from "@/lib/amap/district";
 
@@ -84,10 +102,46 @@ export const MACAU_UNI_RINGS: Ring[] = [
 export const SERVICE_AREA_RINGS: Ring[] = [...MACAU_ADMIN_RINGS, ...MACAU_UNI_RINGS, HENGQIN_PORT_RING];
 
 /**
- * 边界外容差（米）。取值依据见文件头「数据来源与合规」段：
- * 关闸广场/巴士总站在官方环外 148m，必须收进来；珠海长隆在 1639m，必须排除在外。
+ * 官方环（高德行政区划）：澳门 820000 + 澳大横琴校区 440499。
+ * **只有这一组享受距离容差** —— 它们是"多边形近似"，边角可能有几米~几十米的缝隙。
  */
-export const SERVICE_AREA_PAD_M = 250;
+export const OFFICIAL_AREA_RINGS: Ring[] = [...MACAU_ADMIN_RINGS, ...MACAU_UNI_RINGS];
+
+/**
+ * 手工环（横琴口岸澳方管辖区）：围网就是边界，**不享受容差**。
+ * 见文件头「手工环零容差」——环外 45m 的珠海横琴镇必须判 OUT。
+ */
+export const HAND_DRAWN_AREA_RINGS: Ring[] = [HENGQIN_PORT_RING];
+
+/**
+ * 边界外容差（米），仅作用于 `OFFICIAL_AREA_RINGS`。
+ * 取值依据见文件头「容差 200m 的依据」：所有实测澳门 POI 都在环内，
+ * 最近的珠海 POI（湾仔口岸 440m）必须留在外面 ⇒ 200m 是"挡得住对岸、兜得住边角"的位置。
+ */
+export const SERVICE_AREA_PAD_M = 200;
+
+/**
+ * 澳门入境口岸（GCJ-02，与 `NavPoint` 同口径）。
+ *
+ * ── 用途 ──────────────────────────────────────────────────────────────
+ *   `/api/nav` 的**起点**在服务范围外时（从珠海/香港出发），不能拿原坐标去找"最近的澳门站"
+ *   —— 那会跨海吸附到路环或氹仔某个站，规划出一条现实中走不通的路线。改用**最近入境口岸**
+ *   作为实际出发点：从珠海来的人必然经过口岸，这样首段步行/接驳才是真的。
+ *
+ * ── 数据来源 ──────────────────────────────────────────────────────────
+ *   高德 `place/text` 实测（`city=820000`，抓取日期 **2026-11-13**），取「口岸/边检大楼/
+ *   客运码头」的 POI 坐标，**不自绘**。括号内是检索词，便于将来复核。
+ *
+ *   ⚠️ 海路口岸（氹仔/外港码头）也在列：从香港乘船来的用户起点在港岛，锚到码头才合理。
+ */
+export const MACAU_ENTRY_POINTS: { name: string; lng: number; lat: number }[] = [
+  { name: "关闸", lng: 113.554231, lat: 22.212952 }, // 「关闸」
+  { name: "青茂口岸", lng: 113.547051, lat: 22.210112 }, // 「青茂口岸澳门边检大楼」
+  { name: "横琴口岸", lng: 113.550074, lat: 22.137827 }, // 「横琴口岸-澳门口岸区」
+  { name: "港珠澳大桥口岸", lng: 113.581181, lat: 22.19875 }, // 「港珠澳大桥澳门口岸」
+  { name: "氹仔客运码头", lng: 113.581164, lat: 22.161624 }, // 「氹仔客运码头」
+  { name: "外港客运码头", lng: 113.563976, lat: 22.194488 }, // 「外港客运码头」
+];
 
 /** 每度纬度的米数（WGS84 平均值，误差对本用途可忽略） */
 const M_PER_DEG_LAT = 110540;
@@ -132,15 +186,52 @@ export function distToRingsM(lng: number, lat: number, rings: Ring[]): number {
 }
 
 /**
- * 坐标是否属于澳门服务范围（含容差）。
+ * 坐标是否属于澳门服务范围（含官方环容差）。
+ *
+ * 判定顺序（任一条成立即 IN）：
+ *   ① 官方环内（澳门 820000 + 澳大 440499）—— 实测所有澳门 POI 都走这一条；
+ *   ② 横琴口岸手工环内（**严格**，不加容差：围网外 45m 就是珠海）；
+ *   ③ 官方环外 200m 内 —— 兜底填海地块边缘/多边形边角。
  *
  * @param lng GCJ-02 经度（与 `NavPoint` 同口径，**本函数不做坐标转换**）
  * @param lat GCJ-02 纬度
  */
 export function inMacauServiceArea(lng: number, lat: number): boolean {
   if (!Number.isFinite(lng) || !Number.isFinite(lat)) return false;
-  // 环内：用与地图遮罩同一份射线法实现（`district.ts#isInsideRings`），避免两套判定漂移
-  if (isInsideRings(lng, lat, SERVICE_AREA_RINGS)) return true;
-  // 环外 250m 内：口岸/边检一带的分界精度与建筑跨线所致，见文件头实测数据
-  return distToRingsM(lng, lat, SERVICE_AREA_RINGS) <= SERVICE_AREA_PAD_M;
+  // ① / ②：环内，用与地图遮罩同一份射线法实现（`district.ts#isInsideRings`），避免两套判定漂移
+  if (isInsideRings(lng, lat, OFFICIAL_AREA_RINGS)) return true;
+  if (isInsideRings(lng, lat, HAND_DRAWN_AREA_RINGS)) return true;
+  // ③ 容差**只**作用于官方环：手工环若也吃容差，珠海横琴镇（环外 45m）会被吞进来
+  return distToRingsM(lng, lat, OFFICIAL_AREA_RINGS) <= SERVICE_AREA_PAD_M;
+}
+
+/** 两点平面距离（米）—— 选口岸用，量级几十公里，误差可忽略 */
+function ptDistM(a: { lng: number; lat: number }, b: { lng: number; lat: number }): number {
+  const kx = mPerDegLng((a.lat + b.lat) / 2);
+  return Math.hypot((a.lng - b.lng) * kx, (a.lat - b.lat) * M_PER_DEG_LAT);
+}
+
+/**
+ * 最近入境口岸。用于「起点在服务范围外」时把出发点落到真正走得到的地方。
+ *
+ * 调用方应**先**用 `inMacauServiceArea` 判断起点是否在范围内，只在界外时调用本函数 ——
+ * 范围内起点直接锚到口岸会把用户瞬移几百米。
+ */
+export function nearestEntryPoint(lng: number, lat: number): { name: string; lng: number; lat: number } {
+  let best = MACAU_ENTRY_POINTS[0];
+  let bestD = Infinity;
+  for (const p of MACAU_ENTRY_POINTS) {
+    const d = ptDistM({ lng, lat }, p);
+    if (d < bestD) {
+      bestD = d;
+      best = p;
+    }
+  }
+  return best;
+}
+
+/** 最近入境口岸及其距离（米）—— 诊断/测试用，免去再算一次 */
+export function nearestEntryPointM(lng: number, lat: number): { point: { name: string; lng: number; lat: number }; distM: number } {
+  const p = nearestEntryPoint(lng, lat);
+  return { point: p, distM: ptDistM({ lng, lat }, p) };
 }

@@ -36,14 +36,6 @@ const EMPTY_TEXT: Record<string, { title: string; body: string }> = {
   },
   no_live: { title: "暂时没有可用的班次", body: "现在这个时段，能到这个方向的线路大多已收班，或暂时查不到车。" },
   no_candidate: { title: "暂时没有可用方案", body: "换个起终点，或稍后重试。" },
-  /**
-   * ★ 2026-11-13（P6 顺带补）：`no_cover` 一直只存在于 `NavEmptyReason` 类型里，
-   *   文案表缺失且**当前没有任何生产点下发它**（grep 只有类型定义那一处）。
-   *   补上的理由不是" nicer"，而是这个组合一旦被启用就是**整块空白**：
-   *   取值处拿不到文案 → 解构 `undefined` → 无标题/无正文/无重试。
-   *   与其在门禁里为它开白名单（白名单本身就是下一个遗忘源），不如现在就补齐。
-   */
-  no_cover: { title: "附近没有可用的站点", body: "这个位置附近暂时没有查到澳门公交站，请换一个起终点再试。" },
   amap_unavailable: { title: "路网数据暂时不可用", body: "暂时没能算出可用路线。请稍后重试。" },
 };
 
@@ -101,7 +93,19 @@ function fmtClock(iso: string | null | undefined): string | null {
 }
 
 export default function RouteResultPane({ phase, data, err, onRetry, onCardOpen, onWalkNav }: RouteResultPaneProps) {
-  const empty = data && data.cards.length === 0 ? EMPTY_TEXT[data.emptyReason ?? "no_candidate"] : null;
+  /**
+   * ★ 2026-11-13（P6 收尾）：取值加 `?? EMPTY_TEXT.no_candidate` 兜底。
+   *
+   * 为什么不在类型上"保证"就够：`emptyReason` 来自**运行时 JSON**（`/api/nav` 响应），
+   *   `NavEmptyReason` 只是编译期约束 —— 旧版本前端 + 新版本服务端（或反过来、以及
+   *   CDN 上的旧 JS）都会让两侧枚举漂移。漂移的表现原来是**整块空白**：
+   *   拿不到文案 → `empty.title` 抛 TypeError（客户端组件，整面板白）。
+   *   兜底后最多退化一句「暂时没有可用方案」，不会白屏。
+   */
+  const empty =
+    data && data.cards.length === 0
+      ? (EMPTY_TEXT[data.emptyReason ?? "no_candidate"] ?? EMPTY_TEXT.no_candidate)
+      : null;
   /**
    * ★ 2026-11-06：两种"时间相关"状态，**同一行槽位**互斥渲染（永远不会两行 / 不会留空位）：
    *   · `refreshing`：有旧数据 + 正在重拉 ⇒ 「正在更新…」。
@@ -166,6 +170,20 @@ export default function RouteResultPane({ phase, data, err, onRetry, onCardOpen,
 
           {data.degraded && (
             <div className="nav-degraded t-label">路网数据暂时不可用，以下为估算结果</div>
+          )}
+          {/*
+            ★ 2026-11-13（P6 收尾）：**起点被锚到入境口岸**时如实说明。
+
+            为什么必须有这一行：从珠海/香港出发时，服务端把出发点换成了最近口岸（见
+            `nav-service` 的 `originGate`）。不说明的话，用户会看到「步行 300m 到关闸总站」
+            却明明在长隆 —— 那是比"没有路线"更让人失去信任的体验。
+            样式沿用「数据时刻」那一行（`FRESH_STYLE` 的 Token 内联，零新增全局类）；
+            `data-origin-gate` 是 QA 断言钩子（与 `data-fresh` 同风格）。
+          */}
+          {data.originGate && (
+            <p className="nav-origin" data-origin-gate={data.originGate.name} style={FRESH_STYLE}>
+              起点不在澳门，已从「{data.originGate.name}」出发
+            </p>
           )}
           {empty ? (
             /* ★ v3.3.0（AC-108）：**中性空态**（图标 + 主句 + 副句 + 重试；中性灰、无红色） */

@@ -53,6 +53,14 @@ export interface RecommendData {
    *      两者相差一次网络往返；用它才能让用户看到"刷新确实换了数据"。
    */
   generatedAt: string | null;
+  /**
+   * ★ 2026-11-13（P6 收尾）：**起点被锚到的入境口岸**（起点在服务范围外时才有）。
+   *
+   * `null` = 起点本来就在澳门（绝大多数请求）⇒ 调用方不渲染任何提示。
+   * 非 null ⇒ 服务端已把出发点换成该口岸（关闸/青茂/横琴/港珠澳/氹仔码头/外港码头），
+   *   UI **必须**说出来，否则用户会以为应用搞错了他的位置。
+   */
+  originGate: { name: string; lng: number; lat: number } | null;
 }
 
 interface NavResp {
@@ -69,6 +77,8 @@ interface NavResp {
   toSlug?: string;
   /** ★ 2026-11-06：ISO 8601（`route.ts:123` 已 `.toISOString()`）；旧响应可缺。 */
   generatedAt?: string | null;
+  /** ★ 2026-11-13（P6 收尾）：起点被锚到的入境口岸；范围内 ⇒ `null`/缺省。 */
+  origin_gate?: { name: string; lng: number; lat: number } | null;
 }
 
 export interface UseRecommend {
@@ -181,6 +191,7 @@ export function useRecommend(
         fromSlug: j.fromSlug ?? "",
         toSlug: j.toSlug ?? "",
         generatedAt: j.generatedAt ?? null,
+        originGate: j.origin_gate ?? null,
       }));
       setPhase("ready");
     } catch (e) {
