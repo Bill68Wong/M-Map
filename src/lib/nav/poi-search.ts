@@ -440,8 +440,15 @@ export async function searchAmap(query: string, opts: SuggestOptions = {}): Prom
   }
   // ★ 2026-11-12（P3）：空结果也入缓存，但只用短 TTL；上游没答复成功（失败/超时/熔断）则不入。
   // ★ 2026-11-13（P2）：写入的是「位置无关形态」，命中后按调用方当前位置重算。
-  if (results.length) cacheSet(key, toCachedRows(results), report);
-  else if (upstreamOk) cacheSet(key, [], report, CACHE_TTL_EMPTY_MS);
+  // ⚠️ `relBase = score - dirProxBonus(distM)` 只在 `toResults` 的 **query 分支**成立；
+  //   空查询走的是旧口径（`baseScore + (1000 - dist/10)`），逆推出来是错的（实测偏 24 分）。
+  //   当前唯一入口 `suggest` 的上游路由已拦掉空 `q`，此处纯防御：真有人放开，宁可不缓存。
+  //   注意分支顺序：有结果但不可逆时**什么都不写**，绝不能再落到「写空数组」那一支。
+  if (!results.length) {
+    if (upstreamOk) cacheSet(key, [], report, CACHE_TTL_EMPTY_MS);
+  } else if (query.length > 0) {
+    cacheSet(key, toCachedRows(results), report);
+  }
   return { results, circuitOpen: false, quotaConsumed: quota, filtered: report };
 }
 
