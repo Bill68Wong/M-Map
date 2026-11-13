@@ -494,8 +494,8 @@ const REL_PROX_MAX = 100;
  * 该函数是 `score` 里**唯一**与用户位置相关的项，因此 `relBase = score - dirProxBonus(distM)`
  * 可以精确逆推，这是「缓存只存位置无关分」的前提。
  */
-export function dirProxBonus(distM?: number): number {
-  return distM !== undefined ? Math.max(0, REL_PROX_MAX - distM / 50) : 0;
+export function dirProxBonus(distM?: number | null): number {
+  return distM != null ? Math.max(0, REL_PROX_MAX - distM / 50) : 0;
 }
 
 /**
@@ -632,7 +632,7 @@ function toResults(
         lng: ll.lng,
         lat: ll.lat,
         kind: kindOfTypeCode(r.typecode),
-        distM: distM !== undefined ? Math.round(distM) : undefined,
+        distM: distM !== undefined ? Math.round(distM) : null,
         score,
       },
     });

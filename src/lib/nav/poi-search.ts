@@ -170,7 +170,7 @@ export function rescoreCachedRows(rows: CachedPoi[], userPos?: LatLng): PoiSearc
   const out = rows.map(({ poi, relBase }) => {
     const distM = userPos
       ? Math.round(haversineM(userPos, { lng: poi.lng, lat: poi.lat }))
-      : undefined;
+      : null;
     return { ...poi, distM, score: relBase + dirProxBonus(distM) };
   });
   // 与 `searchAmap` 首次直连时的排序口径一致（同分保持缓存原序，sort 稳定）
@@ -212,6 +212,32 @@ function cacheSet(
     if (oldestKey) amapCache.delete(oldestKey);
   }
   amapCache.set(key, { at: Date.now(), ttl, rows, report });
+}
+
+/**
+ * 写缓存的三种去向（★ 2026-11-13 抽出为纯函数）
+ *
+ * 抽出来的原因：这段逻辑有三种组合容易写错，而其中一种（空查询 + 有结果）在**生产路径上不可达**
+ * （`/api/poi/suggest` 对空 `q` 早退），没法用 HTTP 端到端覆盖。做成纯函数后，
+ * 门禁 `test:poi-cache` 可以直接穷举全部分支，而不是靠「读代码确认分支顺序」。
+ *
+ * - `rows`  ：正常结果，存「裸 POI + 位置无关分」，命中后按当前位置重算（10 分钟）；
+ * - `empty` ：上游**明确答复 0 条**才存空结果（60s）；失败/超时/熔断一律不存，
+ *             否则一次网络抖动会被钉成 10 分钟的「这个地点不存在」；
+ * - `none`  ：不写。包含「空查询 + 有结果」——`relBase` 逆推只在 `toResults` 的
+ *             query 分支成立，空查询走旧口径（`baseScore + (1000 - dist/10)`），
+ *             逆推出来偏差实测 24 分，缓存后会把排序算错。
+ */
+export type PoiCachePolicy = "rows" | "empty" | "none";
+
+export function poiCachePolicy(
+  query: string,
+  resultCount: number,
+  upstreamOk: boolean,
+): PoiCachePolicy {
+  if (resultCount === 0) return upstreamOk ? "empty" : "none";
+  // ⚠️ 与 `toResults` 里 `if (opts.query)` 的判据必须一致（同一个 `query` 变量直传）。
+  return query.length > 0 ? "rows" : "none";
 }
 
 // ─────────────────────────── 第一段：本地（0 配额） ───────────────────────────
@@ -438,17 +464,11 @@ export async function searchAmap(query: string, opts: SuggestOptions = {}): Prom
         `${sus ? ` ｜名称待确认：${sus}` : ""}`,
     );
   }
-  // ★ 2026-11-12（P3）：空结果也入缓存，但只用短 TTL；上游没答复成功（失败/超时/熔断）则不入。
-  // ★ 2026-11-13（P2）：写入的是「位置无关形态」，命中后按调用方当前位置重算。
-  // ⚠️ `relBase = score - dirProxBonus(distM)` 只在 `toResults` 的 **query 分支**成立；
-  //   空查询走的是旧口径（`baseScore + (1000 - dist/10)`），逆推出来是错的（实测偏 24 分）。
-  //   当前唯一入口 `suggest` 的上游路由已拦掉空 `q`，此处纯防御：真有人放开，宁可不缓存。
-  //   注意分支顺序：有结果但不可逆时**什么都不写**，绝不能再落到「写空数组」那一支。
-  if (!results.length) {
-    if (upstreamOk) cacheSet(key, [], report, CACHE_TTL_EMPTY_MS);
-  } else if (query.length > 0) {
-    cacheSet(key, toCachedRows(results), report);
-  }
+  // 缓存去向由纯函数 `poiCachePolicy` 判定（空结果短 TTL / 空查询不缓存 / 正常结果可重算），
+  // 这里只负责执行。判断逻辑集中在一处，门禁可穷举全部分支。
+  const policy = poiCachePolicy(query, results.length, upstreamOk);
+  if (policy === "rows") cacheSet(key, toCachedRows(results), report);
+  else if (policy === "empty") cacheSet(key, [], report, CACHE_TTL_EMPTY_MS);
   return { results, circuitOpen: false, quotaConsumed: quota, filtered: report };
 }
 

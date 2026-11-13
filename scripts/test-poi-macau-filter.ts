@@ -123,6 +123,8 @@ const mk = (name: string, adcode?: string, district?: string): PoiSearchResult =
   lng: 113.55,
   lat: 22.19,
   kind: "poi",
+  // 与坐标同算可得；本脚本只关心地区分类，距离固定值即可（`distM` 自 2026-11-13 起必填，无距离用 null）
+  distM: null,
   score: 100,
 });
 const fixture = [

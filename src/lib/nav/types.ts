@@ -76,8 +76,19 @@ export interface PoiSearchResult {
    * 用于「巴士站带编号」显示（`M1 關閘總站`）与类型徽章；高德结果一般为空。
    */
   code?: string;
-  /** 与用户当前位置的距离（米）；未知则不填（inputtips 无 dist，见调研 §6 坑#8） */
-  distM?: number;
+  /**
+   * 与用户当前位置的距离（米）；**未知时为 `null`**（inputtips 无 dist，见调研 §6 坑#8）。
+   *
+   * ★ 2026-11-13：由「不填」改为「显式 null」。原因有二：
+   *   ① `undefined` 会被 `JSON.stringify` 丢掉键 ⇒ 同一个接口有时带 `distM`、有时不带，
+   *      客户端与门禁只能靠「键不存在」猜，判断方式很容易写错（`"distM" in r` 会误判）；
+   *   ② 缓存重算（`rescoreCachedRows`）需要在「没有位置」时把距离**清零**，
+   *      显式 null 比 undefined 更能表达「这次确实算不出」，而不是「忘了赋值」。
+   * 消费侧统一用 `typeof x.distM === "number"` 或 `x.distM != null` 判断。
+   * 故此处**必填**（`number | null`，不允许省略）——「算不出距离」用 `null` 表达，
+   * 让「键是否存在于 JSON」不再成为客户端要猜的事。
+   */
+  distM: number | null;
   /** 排序分（越大越靠前；本地命中普遍高于高德） */
   score: number;
 }
