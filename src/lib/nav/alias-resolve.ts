@@ -158,7 +158,9 @@ export async function resolveAliases(
 /** 别名命中 → `PoiSearchResult`（⚠️ 无坐标返回 null —— 那条应归入 `pending`） */
 export function aliasToResult(m: AliasMatch, opts: { userPos?: LatLng } = {}): PoiSearchResult | null {
   if (m.lng === null || m.lat === null) return null;
-  const distM = opts.userPos ? Math.round(haversineM(opts.userPos, { lng: m.lng, lat: m.lat })) : undefined;
+  // ★ 2026-11-13：无位置时给 `null` 而不是 `undefined` —— 让 `distM` 键始终存在，
+  //   客户端/门禁用 `typeof === "number"` 一个判断就够（见 `PoiSearchResult.distM` 注释）。
+  const distM = opts.userPos ? Math.round(haversineM(opts.userPos, { lng: m.lng, lat: m.lat })) : null;
   const kind = kindOfTarget(m.targetKind);
   // ★ 【7①】巴士站带编号：本地命中的站点给「主码」（M1/11 → M1），供 UI 显示 `M1 關閘總站`。
   const code =

@@ -22,7 +22,7 @@
  */
 import { haversineM } from "../src/lib/amap/coord";
 import { dirProxBonus } from "../src/lib/amap/poi";
-import { rescoreCachedRows, toCachedRows } from "../src/lib/nav/poi-search";
+import { poiCachePolicy, rescoreCachedRows, toCachedRows } from "../src/lib/nav/poi-search";
 import type { PoiSearchResult } from "../src/lib/nav/types";
 
 let pass = 0;
@@ -46,7 +46,7 @@ const MAISON = { lat: 22.19349, lng: 113.53945 };
 const mk = (
   name: string,
   ll: { lat: number; lng: number },
-  distM: number | undefined,
+  distM: number | null,
   score: number,
 ): PoiSearchResult => ({
   source: "amap-text",
@@ -93,7 +93,8 @@ assert(r1[0].name === "议事亭前地", "名称等位置无关字段原样保�
 // ── ③ 无位置：distM 必须清零，不得沿用旧值 ────────────────────────────
 console.log("\n── ③ 未传位置时不残留旧距离 ──");
 const r3 = rescoreCachedRows(rows);
-assert(r3[0].distM === undefined, `无 userPos ⇒ distM 为 undefined（实际 ${String(r3[0].distM)}）`);
+assert(r3[0].distM === null, `无 userPos ⇒ distM 为 null（实际 ${String(r3[0].distM)}）`);
+assert("distM" in r3[0], "无 userPos 时 distM 键仍然存在（JSON 序列化不会被丢键）");
 assert(
   r3[0].score === atBorderResult.score - dirProxBonus(d1),
   "无位置时不加距离加成（分数回落到 relBase）",
@@ -124,6 +125,33 @@ const x1 = JSON.stringify(rescoreCachedRows(twoRows, AT_TAIPA));
 const x2 = JSON.stringify(rescoreCachedRows(twoRows, AT_TAIPA));
 assert(x1 === x2, "同一输入连续两次重算结果一致（幂等）");
 assert(rescoreCachedRows([], AT_BORDER).length === 0, "空缓存行 ⇒ 空结果，不抛错");
+
+// ── ⑥ 缓存写入策略：三种去向 × 四种组合全部穷举 ──────────────────────
+/* 这条分支原先只靠「读代码确认 if/else 顺序」保证 —— 「空查询 + 有结果」在生产路径
+   不可达（路由对空 q 早退），HTTP 层测不到，却是最容易写错的一格（写成
+   `if (query && results.length) … else if (upstreamOk)` 就会把**空数组**写进缓存）。
+   抽成纯函数后在这里穷举。 */
+console.log("\n── ⑥ 缓存写入策略穷举 ──");
+assert(poiCachePolicy("大三巴", 3, true) === "rows", "有结果 + 有查询 ⇒ 存可重算行");
+assert(poiCachePolicy("大三巴", 3, false) === "rows", "有结果时与上游成败无关（结果本身就是答复）");
+assert(poiCachePolicy("zzzqqqxx", 0, true) === "empty", "上游明确答复 0 条 ⇒ 存空结果（短 TTL）");
+assert(poiCachePolicy("zzzqqqxx", 0, false) === "none", "上游失败/超时/熔断 ⇒ 不写（不把抖动钉成假空）");
+assert(poiCachePolicy("", 3, true) === "none", "空查询 + 有结果 ⇒ 不写（旧口径不可逆，宁可不缓存）");
+assert(poiCachePolicy("", 0, true) === "empty", "空查询 + 空结果 ⇒ 仍是空结果缓存，不误判成 none");
+assert(poiCachePolicy("  ", 2, true) === "rows", "仅空白的查询按非空处理（长度 2 > 0，与 toResults 判据一致）");
+
+// 「有结果但不可逆」绝不能落成写空数组 —— 用穷举把这一格单独钉住
+assert(
+  poiCachePolicy("", 5, true) !== "empty",
+  "空查询 + 5 条结果：去向不是 empty（不会把空数组写进缓存冲掉结果）",
+);
+
+// 无坐标写入 ⇒ relBase 就是原分，重算时不加任何距离加成（null 与 undefined 等价）
+const noPosRow = toCachedRows([mk("无坐标点", MAISON, null, 777)]);
+assert(noPosRow[0].relBase === 777, "distM=null 写入 ⇒ relBase 等于原分（dirProxBonus(null)=0）");
+assert(rescoreCachedRows(noPosRow, AT_BORDER)[0].score === 777 + dirProxBonus(
+  Math.round(haversineM(AT_BORDER, MAISON)),
+), "无坐标条目命中后仍能按当前位置补出距离加成");
 
 console.log(`\n═══ 合计 ${pass + fail} 条：PASS ${pass} / FAIL ${fail} ═══`);
 console.log(fail === 0 ? "✅ 全部通过" : "❌ 有失败");
