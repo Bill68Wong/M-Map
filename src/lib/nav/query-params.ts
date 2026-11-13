@@ -59,6 +59,35 @@ export function numOf(sp: URLSearchParams, key: string): number | null {
 }
 
 /**
+ * 世界经纬度边界（角度制的物理上限，与坐标系统无关：GCJ-02 与 WGS84 同范围）。
+ *
+ * ⚠️ 这里是**物理范围**，不是「是否在澳门」的业务判断 —— 后者属 P6（bbox + `out_of_scope`），
+ *    不要把两件事合并：本校验只负责「根本不是地球上的坐标」。
+ */
+export const COORD_LIMITS = { lng: 180, lat: 90 } as const;
+
+/**
+ * 经纬度是否落在世界坐标范围内（**含边界**）；`NaN` / `Infinity` 一律视为越界。
+ *
+ * ── ★ 2026-11-13（P5）：修「非法坐标被当成高德不可用」──────────────────────
+ *   `numOf` 只挡「缺失 / 空串 / 非数字」，`Number("999")` 是有限数 ⇒ 原样通过。
+ *   于是一个 `fromLat=999` 的请求会**一路走完整 `planNav`**：真打高德 → 上游返回失败
+ *   → 归一成 `{ok:true, degraded:true, emptyReason:"amap_unavailable"}` + **HTTP 200**。
+ *   排查方向被直接带偏（看起来像高德挂了/配额没了），实际是调用方传了不存在的坐标。
+ *
+ *   ⇒ 在进入业务逻辑之前按物理范围挡掉，回 `400 bad_request`。
+ *   ⚠️ 不放 `numOf`：那个函数的注释明确它不做业务判断，且探针会显式传 `0` 做边界实验。
+ */
+export function coordInRange(lng: number, lat: number): boolean {
+  return (
+    Number.isFinite(lng) &&
+    Number.isFinite(lat) &&
+    Math.abs(lng) <= COORD_LIMITS.lng &&
+    Math.abs(lat) <= COORD_LIMITS.lat
+  );
+}
+
+/**
  * 由查询串解析一端（起点 / 终点）；任一坐标缺失或非法 ⇒ `null`。
  *
  * `label` 缺省值按 `kind` 给（GPS 说「我的位置」，其余按起/终点位置说）。
